@@ -1,0 +1,415 @@
+# nfcp.py (updated + variable-length FIRE mask)
+
+ESC = 0xFF
+
+SOF_BROADCAST = 0x55
+SOF_GROUP     = 0x47
+SOF_UNIQUE    = 0x78
+SOF_RESPONSE  = 0x6A
+
+SOF2_BROADCAST = 0xFD
+SOF2_GROUP     = 0xFC
+SOF2_UNIQUE    = 0xFB
+SOF2_RESPONSE  = 0xFA
+
+ENCODED_SOF = {
+    SOF_BROADCAST: bytes([ESC, SOF2_BROADCAST]),
+    SOF_GROUP:     bytes([ESC, SOF2_GROUP]),
+    SOF_UNIQUE:    bytes([ESC, SOF2_UNIQUE]),
+    SOF_RESPONSE:  bytes([ESC, SOF2_RESPONSE]),
+}
+
+CRC_POLY = 0x1021
+
+CMD_ARM          = 0x10
+CMD_DISARM       = 0x11
+CMD_FIRE         = 0x20
+CMD_SET_UNIQUE   = 0x30
+CMD_SET_GROUP    = 0x31
+CMD_DISCOVER     = 0x40
+CMD_DISCOVER_RSP = 0x41
+
+CMD_ACK          = 0x50
+CMD_NACK         = 0x51
+
+# speed test / ping
+CMD_PING         = 0x7F   # Unique-only ping for latency/throughput tests
+PING_REPLY_BYTE  = 0xAA   # Used when CMD_PING payload is empty
+
+# continuity
+CMD_CONTINUITY_REQ = 0x22   # Unique-only request
+CMD_CONTINUITY_RSP = 0x23   # Response-only
+
+ACK_OK              = 0x00
+NACK_REJECTED_ARMED = 0x01
+NACK_BAD_LENGTH     = 0x02
+NACK_INVALID_VALUE  = 0x03
+NACK_INTERNAL_ERROR = 0x04
+
+
+def crc16_ccitt(data: bytes, crc=0xFFFF) -> int:
+    for b in data:
+        crc ^= b << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ CRC_POLY) if (crc & 0x8000) else (crc << 1)
+            crc &= 0xFFFF
+    return crc
+
+
+class NFCPError(Exception):
+    pass
+
+
+class NFCP:
+    def __init__(self, node_id: int):
+        self.node_id = node_id & 0xFF
+
+    def _escape(self, data: bytes) -> bytes:
+        out = bytearray()
+        for b in data:
+            if b == ESC:
+                out += bytes([ESC, 0xFE])
+            else:
+                out.append(b)
+        return bytes(out)
+
+    def _frame(self, sof: int, payload: bytes) -> bytes:
+        if len(payload) > 255:
+            raise NFCPError("Payload too long (>255)")
+        header = bytes([len(payload) & 0xFF]) + payload
+        crc = crc16_ccitt(header).to_bytes(2, "big")
+        # Escape the header and CRC (everything after SOF)
+        return ENCODED_SOF[sof] + self._escape(header) + self._escape(crc)
+
+    # -------------------------
+    # FIRE mask encoding (NEW)
+    # -------------------------
+    def _encode_fire_mask(self, mask: int) -> bytes:
+        """
+        Encode a FIRE mask as 1..8 bytes, big-endian, minimal length.
+        Supports up to 64 cues (64 bits). Backward compatible with 1-byte masks.
+        """
+        if mask is None:
+            raise NFCPError("Mask is None")
+
+        mask &= 0xFFFFFFFFFFFFFFFF
+
+        # Always at least 1 byte
+        if mask == 0:
+            return b"\x00"
+
+        nbytes = 1
+        tmp = mask
+        while tmp > 0xFF:
+            nbytes += 1
+            tmp >>= 8
+
+        if nbytes > 8:
+            raise NFCPError("Mask too large (>64-bit)")
+        return mask.to_bytes(nbytes, "big")
+
+    # Broadcast: ONLY ARM/DISARM/DISCOVER
+    def build_broadcast(self, cmd: int, data: bytes = b"") -> bytes:
+        if cmd not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER):
+            raise NFCPError("Broadcast only allowed for ARM/DISARM/DISCOVER")
+        return self._frame(SOF_BROADCAST, bytes([self.node_id, cmd]) + data)
+
+    def build_arm_broadcast(self) -> bytes:
+        return self.build_broadcast(CMD_ARM)
+
+    def build_disarm_broadcast(self) -> bytes:
+        return self.build_broadcast(CMD_DISARM)
+
+    def build_discover_broadcast(self, nonce=None) -> bytes:
+        if nonce is None:
+            return self.build_broadcast(CMD_DISCOVER)
+        return self.build_broadcast(CMD_DISCOVER, (nonce & 0xFFFF).to_bytes(2, "big"))
+
+    # FIRE (group/unique only) — mask is now 1..8 bytes
+    def build_group_fire(self, group_addr: int, mask: int) -> bytes:
+        mask_bytes = self._encode_fire_mask(mask)
+        payload = (
+            bytes([self.node_id]) +
+            (group_addr & 0xFFFF).to_bytes(2, "big") +
+            bytes([CMD_FIRE]) +
+            mask_bytes
+        )
+        return self._frame(SOF_GROUP, payload)
+
+    def build_unique_fire(self, target_unique: int, mask: int) -> bytes:
+        mask_bytes = self._encode_fire_mask(mask)
+        payload = (
+            bytes([self.node_id]) +
+            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes([CMD_FIRE]) +
+            mask_bytes
+        )
+        return self._frame(SOF_UNIQUE, payload)
+
+    # Setters (unique only)
+    def build_set_group(self, target_unique: int, new_group: int) -> bytes:
+        payload = (
+            bytes([self.node_id]) +
+            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes([CMD_SET_GROUP]) +
+            (new_group & 0xFFFF).to_bytes(2, "big")
+        )
+        return self._frame(SOF_UNIQUE, payload)
+
+    def build_set_unique(self, target_unique: int, new_unique: int) -> bytes:
+        payload = (
+            bytes([self.node_id]) +
+            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes([CMD_SET_UNIQUE]) +
+            (new_unique & 0xFFFFFFFF).to_bytes(4, "big")
+        )
+        return self._frame(SOF_UNIQUE, payload)
+
+    # continuity request (unique only)
+    def build_continuity_request(self, target_unique: int) -> bytes:
+        payload = (
+            bytes([self.node_id]) +
+            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes([CMD_CONTINUITY_REQ])
+        )
+        return self._frame(SOF_UNIQUE, payload)
+
+    # Response builder
+    def build_response(self, src_unique: int, cmd: int, data: bytes = b"") -> bytes:
+        payload = (src_unique & 0xFFFFFFFF).to_bytes(4, "big") + bytes([cmd & 0xFF]) + data
+        return self._frame(SOF_RESPONSE, payload)
+
+    def build_ack(self, src_unique: int, orig_cmd: int, code: int = ACK_OK) -> bytes:
+        return self.build_response(src_unique, CMD_ACK, bytes([orig_cmd & 0xFF, code & 0xFF]))
+
+    def build_nack(self, src_unique: int, orig_cmd: int, code: int) -> bytes:
+        return self.build_response(src_unique, CMD_NACK, bytes([orig_cmd & 0xFF, code & 0xFF]))
+
+    def build_discover_response(
+        self,
+        src_unique: int,
+        group_id: int,
+        unique_id: int,
+        cue_count: int,
+        device_type: int,
+        proto_ver: int = 0x10,
+        flags: int = 0x00,
+        nonce=None,
+    ) -> bytes:
+        data = bytearray()
+        data += (group_id & 0xFFFF).to_bytes(2, "big")
+        data += (unique_id & 0xFFFFFFFF).to_bytes(4, "big")
+        data.append(cue_count & 0xFF)
+        data.append(device_type & 0xFF)
+        data.append(proto_ver & 0xFF)
+        data.append(flags & 0xFF)
+        if nonce is not None:
+            data += (nonce & 0xFFFF).to_bytes(2, "big")
+        return self.build_response(src_unique, CMD_DISCOVER_RSP, bytes(data))
+
+    # continuity response
+    def build_continuity_response(self, src_unique: int, mask_or_cue_ok: int, openload_or_cue_count: int = None, mode: int = None) -> bytes:
+        """Build a continuity response.
+
+        Supports two call styles:
+
+          New variable-length maindummy.py style:
+            build_continuity_response(src_unique, open_mask, cue_count)
+
+            Data payload is open_mask encoded as ceil(cue_count / 8) bytes,
+            big-endian.  bit0=cue1, bit63=cue64, 1=open, 0=OK/closed.
+
+          Legacy 16-cue style:
+            build_continuity_response(src_unique, cue_ok_mask, openload16, mode)
+
+            Data payload is cue_ok_mask(1) | openload16(2) | mode(1).
+        """
+        # New variable-length continuity format used by the uploaded maindummy.py.
+        if mode is None:
+            if openload_or_cue_count is None:
+                raise NFCPError("cue_count required for variable-length continuity response")
+
+            open_mask = mask_or_cue_ok & 0xFFFFFFFFFFFFFFFF
+            cue_count = int(openload_or_cue_count)
+
+            if cue_count < 1:
+                cue_count = 1
+            if cue_count > 64:
+                cue_count = 64
+
+            nbytes = (cue_count + 7) // 8
+            if nbytes < 1:
+                nbytes = 1
+            if nbytes > 8:
+                nbytes = 8
+
+            # Keep only the bytes that are valid for the reported cue count.
+            open_mask &= (1 << (nbytes * 8)) - 1
+            data = open_mask.to_bytes(nbytes, "big")
+            return self.build_response(src_unique, CMD_CONTINUITY_RSP, data)
+
+        # Legacy 16-cue format.
+        cue_ok_mask = mask_or_cue_ok
+        openload16 = openload_or_cue_count
+        data = bytes([cue_ok_mask & 0xFF]) + (openload16 & 0xFFFF).to_bytes(2, "big") + bytes([mode & 0xFF])
+        return self.build_response(src_unique, CMD_CONTINUITY_RSP, data)
+
+# -------------------------------------------------------------------
+# Stream RX parser (consolidated from nfcp_rx.py)
+# -------------------------------------------------------------------
+# Literal 0xFF is encoded on the wire as: 0xFF 0xFE
+ESC_0xFF_VALUE = 0xFE
+
+WAIT_FF   = 0
+WAIT_SOF2 = 1
+RECV      = 2
+WAIT_ESC2 = 3
+
+
+class NFCPStreamParser:
+    """Incremental byte-at-a-time NFCP frame parser.
+
+    feed(b) returns a decoded packet dict or None until a full valid frame is received.
+    Packet format matches main.py expectations:
+      {"frame_type", "src", "target", "cmd", "data"}
+    """
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.state = WAIT_FF
+        self.frame_type = None
+        self.buf = bytearray()
+        self.length = None
+        self.expected = None
+
+    def feed(self, b):
+        # Wait for 0xFF
+        if self.state == WAIT_FF:
+            if b == ESC:
+                self.state = WAIT_SOF2
+            return None
+
+        # Wait for SOF2 type
+        if self.state == WAIT_SOF2:
+            if b == SOF2_BROADCAST:
+                self._start(SOF_BROADCAST); return None
+            if b == SOF2_GROUP:
+                self._start(SOF_GROUP); return None
+            if b == SOF2_UNIQUE:
+                self._start(SOF_UNIQUE); return None
+            if b == SOF2_RESPONSE:
+                self._start(SOF_RESPONSE); return None
+            self.reset()
+            return None
+
+        # Receive stuffed body
+        if self.state == RECV:
+            if b == ESC:
+                self.state = WAIT_ESC2
+                return None
+            self._push(b)
+            return self._finish()
+
+        # ESC seen inside body
+        if self.state == WAIT_ESC2:
+            # literal 0xFF byte
+            if b == ESC_0xFF_VALUE:
+                self._push(ESC)
+                self.state = RECV
+                return self._finish()
+
+            # resync: treat as a new SOF2 mid-frame
+            if b == SOF2_BROADCAST:
+                self._start(SOF_BROADCAST); return None
+            if b == SOF2_GROUP:
+                self._start(SOF_GROUP); return None
+            if b == SOF2_UNIQUE:
+                self._start(SOF_UNIQUE); return None
+            if b == SOF2_RESPONSE:
+                self._start(SOF_RESPONSE); return None
+
+            # invalid escape sequence
+            self.reset()
+            return None
+
+        self.reset()
+        return None
+
+    def _start(self, frame_type):
+        self.frame_type = frame_type
+        self.state = RECV
+        self.buf = bytearray()
+        self.length = None
+        self.expected = None
+
+    def _push(self, b):
+        # Body is unstuffed as it is pushed into buf:
+        # First byte is LEN, then LEN payload bytes, then 2 CRC bytes.
+        if self.length is None:
+            self.length = b & 0xFF
+            self.expected = self.length + 2  # payload + CRC16
+            self.buf.append(self.length)
+        else:
+            self.buf.append(b)
+            self.expected -= 1
+
+    def _finish(self):
+        if self.expected != 0:
+            return None
+
+        # buf = [LEN | PAYLOAD... | CRC16(2)]
+        header = self.buf[:-2]  # LEN|PAYLOAD
+        rx_crc = int.from_bytes(self.buf[-2:], "big")
+        if crc16_ccitt(header) != rx_crc:
+            self.reset()
+            return None
+
+        payload = header[1:]  # strip LEN
+        pkt = self._decode(payload)
+        self.reset()
+        return pkt
+
+    def _decode(self, payload):
+        pkt = {"frame_type": self.frame_type, "src": None, "target": None, "cmd": None, "data": b""}
+
+        if self.frame_type == SOF_BROADCAST:
+            if len(payload) < 2:
+                return None
+            pkt["src"] = payload[0]
+            pkt["cmd"] = payload[1]
+            pkt["data"] = payload[2:]
+            if pkt["cmd"] not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER):
+                return None
+
+        elif self.frame_type == SOF_GROUP:
+            if len(payload) < 4:
+                return None
+            pkt["src"] = payload[0]
+            pkt["target"] = int.from_bytes(payload[1:3], "big")
+            pkt["cmd"] = payload[3]
+            pkt["data"] = payload[4:]
+            if pkt["cmd"] in (CMD_SET_GROUP, CMD_SET_UNIQUE, CMD_CONTINUITY_REQ):
+                return None
+
+        elif self.frame_type == SOF_UNIQUE:
+            if len(payload) < 6:
+                return None
+            pkt["src"] = payload[0]
+            pkt["target"] = int.from_bytes(payload[1:5], "big")
+            pkt["cmd"] = payload[5]
+            pkt["data"] = payload[6:]
+
+        elif self.frame_type == SOF_RESPONSE:
+            if len(payload) < 5:
+                return None
+            pkt["src"] = int.from_bytes(payload[0:4], "big")
+            pkt["cmd"] = payload[4]
+            pkt["data"] = payload[5:]
+
+        if pkt["cmd"] == CMD_FIRE and self.frame_type == SOF_BROADCAST:
+            return None
+        if pkt["cmd"] in (CMD_SET_GROUP, CMD_SET_UNIQUE, CMD_CONTINUITY_REQ) and self.frame_type != SOF_UNIQUE:
+            return None
+
+        return pkt

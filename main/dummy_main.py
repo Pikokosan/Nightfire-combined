@@ -1,0 +1,294 @@
+from machine import UART, Pin
+import time
+import urandom
+
+from nfcp import *
+
+
+UART_ID = 0
+UART_BAUD = 256000
+UART_TX_PIN = 0
+UART_RX_PIN = 1
+UART_INVERT = True
+
+RS485_DE_PIN = 2  # e.g. 2
+
+CFG_PATH = "/flash/nfcp_cfg.bin"
+DEFAULT_GROUP_ID = 0x0001
+DEFAULT_UNIQUE_ID = 0x12345678
+DEFAULT_CUE_COUNT = 16  # may be set from config; valid range is 1..64
+DEFAULT_DEVICE_TYPE = 0x10  # test device type
+
+BUS_IDLE_MS = 8
+DISCOVER_MAX_TRIES = 6
+DISCOVER_BACKOFF_MIN_MS = 10
+DISCOVER_BACKOFF_MAX_MS = 250
+TX_TURNAROUND_MS = 2
+
+# Continuity rate-limit (allowed when ARMED)
+CONT_MIN_INTERVAL_MS = 100  # 10/sec
+_last_cont_ms = 0
+
+# Simulated continuity fault model
+SIM_OPEN_CUE_COUNT = 2
+SIM_REFRESH_MS = 2500  # refresh which cues are "open" every 2.5s
+_sim_open = set()
+_sim_last_refresh = 0
+
+CUE_MIN = 1
+CUE_MAX = DEFAULT_CUE_COUNT
+
+
+def load_cfg():
+    try:
+        with open(CFG_PATH, "rb") as f:
+            b = f.read()
+            if len(b) == 8:
+                g = int.from_bytes(b[0:2], "big")
+                u = int.from_bytes(b[2:6], "big")
+                cues = b[6]
+                dtype = b[7]
+                return g, u, cues, dtype
+            if len(b) == 6:
+                g = int.from_bytes(b[0:2], "big")
+                u = int.from_bytes(b[2:6], "big")
+                return g, u, DEFAULT_CUE_COUNT, DEFAULT_DEVICE_TYPE
+    except:
+        pass
+    return DEFAULT_GROUP_ID, DEFAULT_UNIQUE_ID, DEFAULT_CUE_COUNT, DEFAULT_DEVICE_TYPE
+
+
+def save_cfg(group_id: int, unique_id: int, cue_count: int, device_type: int):
+    with open(CFG_PATH, "wb") as f:
+        f.write((group_id & 0xFFFF).to_bytes(2, "big"))
+        f.write((unique_id & 0xFFFFFFFF).to_bytes(4, "big"))
+        f.write(bytes([cue_count & 0xFF, device_type & 0xFF]))
+
+
+uart = UART(
+    UART_ID,
+    baudrate=UART_BAUD,
+    tx=Pin(UART_TX_PIN),
+    rx=Pin(UART_RX_PIN),
+    invert=(UART.INV_TX | UART.INV_RX) if UART_INVERT else 0,
+)
+uart.read(1)
+
+de = None
+if RS485_DE_PIN is not None:
+    de = Pin(RS485_DE_PIN, Pin.OUT, value=0)
+
+parser = NFCPStreamParser()
+nfcp = NFCP(node_id=0x01)
+
+ARMED = False
+GROUP_ID, UNIQUE_ID, CUE_COUNT, DEVICE_TYPE = load_cfg()
+
+# Clamp cue count to supported protocol range.
+# Continuity masks support 1..64 cues.
+if CUE_COUNT < 1:
+    CUE_COUNT = 1
+if CUE_COUNT > 64:
+    CUE_COUNT = 64
+CUE_MAX = CUE_COUNT
+
+print("NFCP TEST16 RX node started - DEFAULT: DISARMED")
+print("CFG: GROUP=0x%04X UNIQUE=0x%08X CUES=%d TYPE=0x%02X" % (GROUP_ID, UNIQUE_ID, CUE_COUNT, DEVICE_TYPE))
+
+last_rx_ms = time.ticks_ms()
+
+
+def bus_idle() -> bool:
+    return time.ticks_diff(time.ticks_ms(), last_rx_ms) >= BUS_IDLE_MS
+
+
+def tx_bytes(data: bytes):
+    if de is not None:
+        de.value(1)
+        time.sleep_ms(1)
+    uart.write(data)
+    uart.flush()
+    if de is not None:
+        time.sleep_ms(TX_TURNAROUND_MS)
+        de.value(0)
+
+
+def address_matches(pkt):
+    if pkt["frame_type"] == SOF_BROADCAST:
+        return True
+    if pkt["frame_type"] == SOF_GROUP:
+        return pkt.get("target") == GROUP_ID
+    if pkt["frame_type"] == SOF_UNIQUE:
+        return pkt.get("target") == UNIQUE_ID
+    return False
+
+
+def sim_refresh_open_cues():
+    global _sim_open, _sim_last_refresh
+    now = time.ticks_ms()
+    if _sim_last_refresh == 0 or time.ticks_diff(now, _sim_last_refresh) >= SIM_REFRESH_MS:
+        _sim_last_refresh = now
+        _sim_open = set()
+        # pick SIM_OPEN_CUE_COUNT distinct cues 1..CUE_COUNT
+        # simple loop to avoid heavy operations
+        target_open_count = SIM_OPEN_CUE_COUNT
+        if target_open_count > CUE_MAX:
+            target_open_count = CUE_MAX
+        while len(_sim_open) < target_open_count:
+            cue = (urandom.getrandbits(16) % CUE_MAX) + 1
+            _sim_open.add(cue)
+
+
+def build_open_mask() -> int:
+    """
+    Variable-length continuity mask source.
+    bit0=cue1, bit63=cue64
+    1 = OPEN, 0 = OK/closed
+    """
+    sim_refresh_open_cues()
+    open_mask = 0
+    for cue in _sim_open:
+        if 1 <= cue <= CUE_COUNT:
+            open_mask |= (1 << (cue - 1))
+    return open_mask & 0xFFFFFFFFFFFFFFFF
+
+
+def handle_discover(pkt):
+    nonce = None
+    if pkt.get("data") and len(pkt["data"]) >= 2:
+        nonce = int.from_bytes(pkt["data"][:2], "big")
+
+    for _ in range(DISCOVER_MAX_TRIES):
+        delay = DISCOVER_BACKOFF_MIN_MS + (
+            urandom.getrandbits(16) %
+            (DISCOVER_BACKOFF_MAX_MS - DISCOVER_BACKOFF_MIN_MS + 1)
+        )
+        time.sleep_ms(delay)
+        if not bus_idle():
+            continue
+
+        rsp = nfcp.build_discover_response(
+            src_unique=UNIQUE_ID,
+            group_id=GROUP_ID,
+            unique_id=UNIQUE_ID,
+            cue_count=CUE_COUNT,
+            device_type=DEVICE_TYPE,
+            proto_ver=0x10,
+            flags=0x00,
+            nonce=nonce
+        )
+        tx_bytes(rsp)
+        break
+
+
+def handle(pkt):
+    global ARMED, GROUP_ID, UNIQUE_ID, CUE_COUNT, DEVICE_TYPE, _last_cont_ms
+
+    cmd = pkt["cmd"]
+
+    # ---- SPEED TEST: immediate echo/ACK ----
+    if cmd == CMD_PING:
+        # Respond ONLY when addressed via UNIQUE ID (not group/broadcast)
+        if not (pkt.get("frame_type") == SOF_UNIQUE and pkt.get("target") == UNIQUE_ID):
+            return
+
+        data = pkt.get("data", b"")
+        if not data:
+            data = bytes([PING_REPLY_BYTE])
+        tx_bytes(nfcp.build_response(UNIQUE_ID, CMD_PING, data))
+        return
+
+
+    if cmd == CMD_ARM:
+        ARMED = True
+        print("ARMED")
+        return
+
+    if cmd == CMD_DISARM:
+        ARMED = False
+        print("DISARMED")
+        return
+
+    if cmd == CMD_DISCOVER:
+        print("Discovery requested")
+        handle_discover(pkt)
+        return
+
+    # FIRE intentionally ignored in this test device
+    if cmd == CMD_FIRE:
+        print("FIRE received (ignored - dummy device)")
+        return
+
+    # Continuity allowed even when ARMED, but rate-limited
+    if cmd == CMD_CONTINUITY_REQ:
+        now = time.ticks_ms()
+        if time.ticks_diff(now, _last_cont_ms) < CONT_MIN_INTERVAL_MS:
+            return
+        _last_cont_ms = now
+
+        try:
+            open_mask = build_open_mask()
+
+            # New on-wire continuity format:
+            # open_mask(1..8 bytes), big-endian, bit0=cue1, 1=open, 0=OK/closed
+            # Byte count is based on CUE_COUNT: ceil(CUE_COUNT / 8), max 8 bytes.
+            rsp = nfcp.build_continuity_response(UNIQUE_ID, open_mask, CUE_COUNT)
+            tx_bytes(rsp)
+
+            # Optional serial print for debugging
+            # print("CONT: open cues:", sorted(list(_sim_open)), "mask=0x%016X" % open_mask)
+        except:
+            tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_CONTINUITY_REQ, NACK_INTERNAL_ERROR))
+        return
+
+    # ---- SET_GROUP with ACK/NACK ----
+    if cmd == CMD_SET_GROUP:
+        if ARMED:
+            tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_SET_GROUP, NACK_REJECTED_ARMED))
+            return
+        data = pkt.get("data", b"")
+        if len(data) != 2:
+            tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_SET_GROUP, NACK_BAD_LENGTH))
+            return
+        try:
+            GROUP_ID = int.from_bytes(data, "big") & 0xFFFF
+            save_cfg(GROUP_ID, UNIQUE_ID, CUE_COUNT, DEVICE_TYPE)
+            tx_bytes(nfcp.build_ack(UNIQUE_ID, CMD_SET_GROUP, ACK_OK))
+            print("NEW GROUP_ID = 0x%04X" % GROUP_ID)
+        except:
+            tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_SET_GROUP, NACK_INTERNAL_ERROR))
+        return
+
+    # ---- SET_UNIQUE with ACK/NACK (responds from OLD unique) ----
+    if cmd == CMD_SET_UNIQUE:
+        old_unique = UNIQUE_ID
+        if ARMED:
+            tx_bytes(nfcp.build_nack(old_unique, CMD_SET_UNIQUE, NACK_REJECTED_ARMED))
+            return
+        data = pkt.get("data", b"")
+        if len(data) != 4:
+            tx_bytes(nfcp.build_nack(old_unique, CMD_SET_UNIQUE, NACK_BAD_LENGTH))
+            return
+        try:
+            new_unique = int.from_bytes(data, "big") & 0xFFFFFFFF
+            tx_bytes(nfcp.build_ack(old_unique, CMD_SET_UNIQUE, ACK_OK))
+            UNIQUE_ID = new_unique
+            save_cfg(GROUP_ID, UNIQUE_ID, CUE_COUNT, DEVICE_TYPE)
+            print("NEW UNIQUE_ID = 0x%08X" % UNIQUE_ID)
+        except:
+            tx_bytes(nfcp.build_nack(old_unique, CMD_SET_UNIQUE, NACK_INTERNAL_ERROR))
+        return
+
+
+while True:
+    if uart.any():
+        b = uart.read(1)
+        if b:
+            last_rx_ms = time.ticks_ms()
+            pkt = parser.feed(b[0])
+            if pkt and address_matches(pkt):
+                handle(pkt)
+
+    time.sleep_ms(1)
+
+
