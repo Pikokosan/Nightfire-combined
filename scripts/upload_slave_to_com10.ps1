@@ -11,16 +11,29 @@ if (-not (Test-Path -LiteralPath $mpremote)) {
     throw "mpremote was not found at: $mpremote"
 }
 
+function Invoke-MpRemote {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    & $mpremote @Arguments
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "mpremote failed with exit code $LASTEXITCODE while running: mpremote $($Arguments -join ' ')"
+    }
+}
+
 Push-Location $repoRoot
 try {
     Write-Host "Uploading slave device files to $Port..."
 
-    & $mpremote connect $Port fs cp ".\main\slave_main.py" ":main.py"
-    & $mpremote connect $Port fs cp ".\main\nfcp.py" ":nfcp.py"
-    & $mpremote connect $Port fs cp ".\main\mc33996_driver.py" ":mc33996_driver.py"
+    Invoke-MpRemote @("connect", $Port, "fs", "cp", ".\main\slave_main.py", ":main.py")
+    Invoke-MpRemote @("connect", $Port, "fs", "cp", ".\main\nfcp.py", ":nfcp.py")
+    Invoke-MpRemote @("connect", $Port, "fs", "cp", ".\main\mc33996_driver.py", ":mc33996_driver.py")
 
     Write-Host "Resetting device..."
-    & $mpremote connect $Port reset
+    Invoke-MpRemote @("connect", $Port, "reset")
 
     Write-Host "Done. slave_main.py is now installed as main.py on $Port."
 }

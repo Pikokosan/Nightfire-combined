@@ -39,6 +39,19 @@ CUE_MIN = 1
 CUE_MAX = DEFAULT_CUE_COUNT
 
 
+def clamp_cue_count(cue_count):
+    try:
+        cue_count = int(cue_count)
+    except:
+        cue_count = DEFAULT_CUE_COUNT
+
+    if cue_count < 1:
+        return 1
+    if cue_count > 64:
+        return 64
+    return cue_count
+
+
 def load_cfg():
     try:
         with open(CFG_PATH, "rb") as f:
@@ -46,7 +59,7 @@ def load_cfg():
             if len(b) == 8:
                 g = int.from_bytes(b[0:2], "big")
                 u = int.from_bytes(b[2:6], "big")
-                cues = b[6]
+                cues = clamp_cue_count(b[6])
                 dtype = b[7]
                 return g, u, cues, dtype
             if len(b) == 6:
@@ -59,6 +72,8 @@ def load_cfg():
 
 
 def save_cfg(group_id: int, unique_id: int, cue_count: int, device_type: int):
+    cue_count = clamp_cue_count(cue_count)
+
     with open(CFG_PATH, "wb") as f:
         f.write((group_id & 0xFFFF).to_bytes(2, "big"))
         f.write((unique_id & 0xFFFFFFFF).to_bytes(4, "big"))
@@ -153,6 +168,16 @@ def build_open_mask() -> int:
     return open_mask & 0xFFFFFFFFFFFFFFFF
 
 
+def build_continuity_frame(src_unique, open_mask):
+    cue_count = clamp_cue_count(CUE_COUNT)
+    nbytes = (cue_count + 7) // 8
+
+    open_mask &= (1 << (nbytes * 8)) - 1
+    data = open_mask.to_bytes(nbytes, "big")
+
+    return nfcp.build_response(src_unique, CMD_CONTINUITY_RSP, data)
+
+
 def handle_discover(pkt):
     nonce = None
     if pkt.get("data") and len(pkt["data"]) >= 2:
@@ -232,7 +257,7 @@ def handle(pkt):
             # New on-wire continuity format:
             # open_mask(1..8 bytes), big-endian, bit0=cue1, 1=open, 0=OK/closed
             # Byte count is based on CUE_COUNT: ceil(CUE_COUNT / 8), max 8 bytes.
-            rsp = nfcp.build_continuity_response(UNIQUE_ID, open_mask, CUE_COUNT)
+            rsp = build_continuity_frame(UNIQUE_ID, open_mask)
             tx_bytes(rsp)
 
             # Optional serial print for debugging

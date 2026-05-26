@@ -174,6 +174,16 @@ class NFCP:
         )
         return self._frame(SOF_UNIQUE, payload)
 
+    # ping / speed test (unique only)
+    def build_ping(self, target_unique: int, data: bytes = b"") -> bytes:
+        payload = (
+            bytes([self.node_id]) +
+            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes([CMD_PING]) +
+            data
+        )
+        return self._frame(SOF_UNIQUE, payload)
+
     # Response builder
     def build_response(self, src_unique: int, cmd: int, data: bytes = b"") -> bytes:
         payload = (src_unique & 0xFFFFFFFF).to_bytes(4, "big") + bytes([cmd & 0xFF]) + data

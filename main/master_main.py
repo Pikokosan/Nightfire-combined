@@ -16,6 +16,9 @@ import nfcp
 DEFAULT_CUE_COUNT = 16
 MAX_CUE_COUNT = 64
 MODULE_CONTINUITY_AUTO_CHECK_MS = 4000
+DISCOVER_IDLE_TIMEOUT_MS = 3000
+DISCOVER_MAX_SCAN_MS = 30000
+SPEED_TEST_TIMEOUT_MS = 2000
 
 SRC_ID = 0x01
 DEVICE_DB_PATH = "nfcp_devices.json"
@@ -134,7 +137,8 @@ def load_app_settings(path=SETTINGS_PATH):
         settings = {}
 
     return {
-        "auto_module_continuity": bool(settings.get("auto_module_continuity", True))
+        "auto_module_continuity": bool(settings.get("auto_module_continuity", True)),
+        "color_cues_without_script": bool(settings.get("color_cues_without_script", True))
     }
 
 
@@ -236,7 +240,7 @@ def get_last_packets():
     return _last_packets
 
 
-def discover(scan_ms=1200):
+def discover(idle_ms=DISCOVER_IDLE_TIMEOUT_MS, max_scan_ms=DISCOVER_MAX_SCAN_MS):
     drain_uart()
 
     nonce = random.getrandbits(16)
@@ -244,9 +248,11 @@ def discover(scan_ms=1200):
 
     db = load_device_db()
     idx = index_db_by_unique(db)
-    deadline = time.ticks_add(time.ticks_ms(), scan_ms)
+    start_ms = time.ticks_ms()
+    last_packet_ms = start_ms
+    max_deadline = time.ticks_add(start_ms, max_scan_ms)
 
-    while time.ticks_diff(deadline, time.ticks_ms()) > 0:
+    while time.ticks_diff(max_deadline, time.ticks_ms()) > 0:
         packets = poll_responses()
         for pkt in packets:
             if pkt["cmd"] != nfcp.CMD_DISCOVER_RSP:
@@ -255,6 +261,10 @@ def discover(scan_ms=1200):
             info = parse_discover_rsp(pkt["src_unique"], pkt["data"])
             if info:
                 idx[info["unique_id"]] = info
+                last_packet_ms = time.ticks_ms()
+
+        if time.ticks_diff(time.ticks_ms(), last_packet_ms) >= idle_ms:
+            break
 
         time.sleep_ms(1)
 
@@ -284,6 +294,38 @@ def request_continuity_for_uid(uid_int, cue_count_hint=16, timeout_ms=300):
     except:
         cue_count = DEFAULT_CUE_COUNT
     return [False] * cue_count
+
+
+def request_ping_for_uid(uid_int, timeout_ms=SPEED_TEST_TIMEOUT_MS):
+    drain_uart()
+
+    nonce = random.getrandbits(16)
+    payload = (
+        (uid_int & 0xFFFFFFFF).to_bytes(4, "big") +
+        (nonce & 0xFFFF).to_bytes(2, "big")
+    )
+    start = time.ticks_ms()
+
+    # Speed tests are unique-addressed only. The target UID is also echoed in
+    # the payload so stale or unrelated ping responses cannot be accepted.
+    rs485_write(nfcp_tx.build_ping(uid_int, payload))
+
+    deadline = time.ticks_add(start, timeout_ms)
+    while time.ticks_diff(deadline, time.ticks_ms()) > 0:
+        packets = poll_responses()
+        for pkt in packets:
+            if pkt["cmd"] != nfcp.CMD_PING:
+                continue
+            if (pkt["src_unique"] & 0xFFFFFFFF) != (uid_int & 0xFFFFFFFF):
+                continue
+            if pkt.get("data", b"") != payload:
+                continue
+
+            return time.ticks_diff(time.ticks_ms(), start)
+
+        time.sleep_ms(2)
+
+    return None
 
 
 def continuity_scan(timeout_ms=300):
@@ -326,6 +368,36 @@ def continuity_scan(timeout_ms=300):
     return results
 
 
+def speed_test_scan(timeout_ms=SPEED_TEST_TIMEOUT_MS):
+    db = load_device_db()
+    changed = False
+    results = []
+
+    for dev in db.get("devices", []):
+        uid_text = dev.get("unique_id", "0x00000000")
+        try:
+            uid = int(uid_text, 16) & 0xFFFFFFFF
+        except:
+            continue
+
+        ping_ms = request_ping_for_uid(uid, timeout_ms)
+        dev["speed_test_target_uid"] = uid_text
+        dev["speed_test_ms"] = ping_ms
+        dev["speed_test_ok"] = ping_ms is not None
+        dev["speed_test_last_epoch"] = time.time()
+
+        results.append({
+            "unique_id": uid_text,
+            "ping_ms": ping_ms
+        })
+        changed = True
+
+    if changed:
+        save_device_db(db)
+
+    return results
+
+
 def arm():
     rs485_write(nfcp_tx.build_arm_broadcast())
 
@@ -356,6 +428,8 @@ nfcp.get_last_packets = get_last_packets
 nfcp.discover = discover
 nfcp.request_continuity_for_uid = request_continuity_for_uid
 nfcp.continuity_scan = continuity_scan
+nfcp.request_ping_for_uid = request_ping_for_uid
+nfcp.speed_test_scan = speed_test_scan
 nfcp.arm = arm
 nfcp.disarm = disarm
 nfcp.fire_unique = fire_unique
@@ -366,6 +440,7 @@ class NFCPGui:
     def __init__(self):
         self.modules = []
         self.selected_module = None
+        self.last_selected_module_uid = None
         self.selected_script = None
 
         self.clear_loaded_script()
@@ -375,10 +450,14 @@ class NFCPGui:
         self.current_screen = None
         self.current_view = "main"
         self.discover_busy = False
+        self.modules_page = 0
         self.last_module_continuity_auto_ms = time.ticks_ms()
         self.settings = load_app_settings()
         self.auto_module_continuity = bool(
             self.settings.get("auto_module_continuity", True)
+        )
+        self.color_cues_without_script = bool(
+            self.settings.get("color_cues_without_script", True)
         )
 
         self.group_edit_value = 1
@@ -415,7 +494,53 @@ class NFCPGui:
         if self.current_screen:
             self.current_screen.set_style_bg_color(color, 0)
 
+    def delete_old_screen(self, old_screen):
+        if old_screen is None:
+            return
+
+        try:
+            if hasattr(old_screen, "delete_async"):
+                old_screen.delete_async()
+            elif hasattr(old_screen, "del_async"):
+                old_screen.del_async()
+            elif hasattr(old_screen, "delete"):
+                old_screen.delete()
+            elif hasattr(old_screen, "del"):
+                getattr(old_screen, "del")()
+        except Exception as e:
+            print("Old screen delete failed:", e)
+
+    def clear_screen_refs(self):
+        names = (
+            "status",
+            "manual_fire_btn",
+            "arm_btn",
+            "discover_btn",
+            "refresh_btn",
+            "module_list",
+            "module_label",
+            "arm_label",
+            "speed_label",
+            "summary",
+            "grid_box",
+            "cue_buttons",
+            "cue_labels",
+            "auto_continuity_checkbox",
+            "no_script_color_checkbox",
+            "group_edit_box",
+            "group_edit_label",
+        )
+
+        for name in names:
+            try:
+                if hasattr(self, name):
+                    delattr(self, name)
+            except Exception:
+                pass
+
     def new_screen(self, title_text, view_name=None):
+        old_screen = self.current_screen
+        self.clear_screen_refs()
         scr = lv.obj()
 
         scr.set_style_bg_color(
@@ -425,6 +550,7 @@ class NFCPGui:
 
         scr.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
         load_screen(scr)
+        self.delete_old_screen(old_screen)
 
         self.status = lv.label(scr)
         self.status.set_text("Status: Ready")
@@ -433,10 +559,6 @@ class NFCPGui:
         title = lv.label(scr)
         title.set_text(title_text)
         title.align(lv.ALIGN.TOP_MID, 0, 10)
-
-        self.clock = lv.label(scr)
-        self.clock.set_text("Uptime: 0s")
-        self.clock.align(lv.ALIGN.TOP_RIGHT, -20, 15)
 
         self.current_screen = scr
 
@@ -501,11 +623,99 @@ class NFCPGui:
         except:
             return str(uid_text)
 
+    def format_speed_test(self, module):
+        if not module.get("speed_test_ok", False):
+            return "--"
+
+        try:
+            return "%dms" % int(module.get("speed_test_ms", 0))
+        except:
+            return "--"
+
+    def format_selected_speed_test(self):
+        if not self.selected_module:
+            return "Speed: --"
+
+        return "Speed: %s" % self.format_speed_test(self.selected_module)
+
+    def format_module_continuity_summary(self, module):
+        cue_count = self.get_module_cue_count(module)
+        continuity = module.get("continuity", None)
+
+        if not continuity:
+            return "--/%d" % cue_count
+
+        try:
+            good = 0
+            for cue_info in continuity.get("cues", []):
+                if bool(cue_info.get("ok")):
+                    good += 1
+
+            return "%d/%d" % (good, cue_count)
+        except:
+            return "--/%d" % cue_count
+
+    def set_modules_page_for_uid(self, uid_text):
+        if not uid_text:
+            return
+
+        for i, module in enumerate(self.modules):
+            if module.get("unique_id", None) == uid_text:
+                self.modules_page = i // 9
+                return
+
     def get_selected_module_cue_count(self):
         if not self.selected_module:
             return DEFAULT_CUE_COUNT
 
         return self.get_module_cue_count(self.selected_module)
+
+    def get_module_saved_continuity(self, module):
+        cue_count = self.get_module_cue_count(module)
+        out = [False] * cue_count
+        continuity = module.get("continuity", None)
+
+        if not continuity:
+            return out
+
+        try:
+            for cue_info in continuity.get("cues", []):
+                cue_num = int(cue_info.get("cue", 0))
+                ok = bool(cue_info.get("ok"))
+
+                if 1 <= cue_num <= cue_count:
+                    out[cue_num - 1] = ok
+        except Exception as e:
+            print("Saved continuity parse failed:", e)
+
+        return out
+
+    def module_matches_selected(self, module):
+        if not self.selected_module:
+            return False
+
+        return (
+            module.get("unique_id", None) ==
+            self.selected_module.get("unique_id", None)
+        )
+
+    def module_has_continuity_data(self, module):
+        if self.module_matches_selected(module):
+            if self.selected_module.get("continuity", None):
+                return True
+
+        return module.get("continuity", None) is not None
+
+    def get_module_continuity_list(self, module):
+        cue_count = self.get_module_cue_count(module)
+
+        if self.module_matches_selected(module):
+            out = [False] * cue_count
+            for i in range(cue_count):
+                out[i] = bool(self.continuity[i]) if i < len(self.continuity) else False
+            return out
+
+        return self.get_module_saved_continuity(module)
 
     def update_modules_busy_buttons(self):
         if hasattr(self, "discover_btn"):
@@ -519,6 +729,8 @@ class NFCPGui:
                 self.refresh_btn.add_state(lv.STATE.DISABLED)
             else:
                 self.refresh_btn.remove_state(lv.STATE.DISABLED)
+
+        self.update_arm_button()
 
     # -------------------------
     # Main menu
@@ -543,7 +755,7 @@ class NFCPGui:
             self.show_manual_fire
         )
 
-        self.make_button(
+        self.arm_btn = self.make_button(
             scr,
             "DISARM" if self.armed else "ARM",
             440,
@@ -554,6 +766,7 @@ class NFCPGui:
         )
 
         self.update_manual_fire_button()
+        self.update_arm_button()
 
     def update_manual_fire_button(self):
         if not hasattr(self, "manual_fire_btn"):
@@ -566,6 +779,21 @@ class NFCPGui:
                 self.manual_fire_btn.add_state(lv.STATE.DISABLED)
         except Exception as e:
             print("Manual fire button state update failed:", e)
+
+    def has_scanned_modules(self):
+        return len(self.modules) > 0
+
+    def update_arm_button(self):
+        if not hasattr(self, "arm_btn"):
+            return
+
+        try:
+            if self.has_scanned_modules() and not self.discover_busy:
+                self.arm_btn.remove_state(lv.STATE.DISABLED)
+            else:
+                self.arm_btn.add_state(lv.STATE.DISABLED)
+        except Exception as e:
+            print("Arm button state update failed:", e)
 
     # -------------------------
     # View / Load Script
@@ -895,6 +1123,21 @@ class NFCPGui:
             None
         )
 
+        self.no_script_color_checkbox = lv.checkbox(scr)
+        self.no_script_color_checkbox.set_pos(45, 175)
+        self.no_script_color_checkbox.set_text("Color modules without script")
+
+        if self.color_cues_without_script:
+            self.no_script_color_checkbox.add_state(lv.STATE.CHECKED)
+        else:
+            self.no_script_color_checkbox.remove_state(lv.STATE.CHECKED)
+
+        self.no_script_color_checkbox.add_event_cb(
+            self.toggle_color_cues_without_script,
+            lv.EVENT.CLICKED,
+            None
+        )
+
         self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_main_menu)
 
     def toggle_auto_module_continuity(self, event=None):
@@ -916,6 +1159,30 @@ class NFCPGui:
                 "Auto continuity enabled"
                 if self.auto_module_continuity
                 else "Auto continuity disabled"
+            )
+        except Exception as e:
+            print("Settings save failed:", e)
+            self.set_status("Settings save failed")
+
+    def toggle_color_cues_without_script(self, event=None):
+        checked = not self.color_cues_without_script
+
+        try:
+            target = event.get_target()
+            if hasattr(target, "has_state"):
+                checked = target.has_state(lv.STATE.CHECKED)
+        except:
+            pass
+
+        self.color_cues_without_script = bool(checked)
+        self.settings["color_cues_without_script"] = self.color_cues_without_script
+
+        try:
+            save_app_settings(self.settings)
+            self.set_status(
+                "No-script module colors enabled"
+                if self.color_cues_without_script
+                else "No-script module colors disabled"
             )
         except Exception as e:
             print("Settings save failed:", e)
@@ -1028,30 +1295,7 @@ class NFCPGui:
             if group_id is None:
                 continue
 
-            cont = None
-
-            if "continuity" in module:
-                try:
-                    cont = [False] * self.get_module_cue_count(module)
-
-                    for c in module["continuity"].get("cues", []):
-                        cue_num = int(c.get("cue", 0))
-                        ok = bool(c.get("ok"))
-
-                        if 1 <= cue_num <= len(cont):
-                            cont[cue_num - 1] = ok
-                except:
-                    cont = None
-
-            if self.selected_module is not None:
-                selected_gid = self.selected_module.get("group_id", None)
-                selected_group_id = self.parse_group_id(selected_gid)
-
-                if selected_group_id == group_id:
-                    cont = self.continuity
-
-            if cont is not None:
-                group_continuity[group_id] = cont
+            group_continuity[group_id] = self.get_module_continuity_list(module)
 
         for event in self.loaded_script_pyro_events:
             channel = event.get("channel")
@@ -1105,30 +1349,23 @@ class NFCPGui:
             if group_id is None:
                 continue
 
-            continuity = module.get("continuity", None)
-
-            if not continuity:
+            if not self.module_has_continuity_data(module):
                 continue
 
-            cues = continuity.get("cues", [])
+            continuity = self.get_module_continuity_list(module)
 
-            for cue_info in cues:
-                try:
-                    cue_num = int(cue_info.get("cue", 0))
-                    cue_ok = bool(cue_info.get("ok"))
+            for i, cue_ok in enumerate(continuity):
+                if not cue_ok:
+                    continue
 
-                    if not cue_ok:
-                        continue
+                cue_num = i + 1
 
-                    if group_id not in assigned:
-                        self.extra_connected_cue_count += 1
-                        continue
+                if group_id not in assigned:
+                    self.extra_connected_cue_count += 1
+                    continue
 
-                    if cue_num not in assigned[group_id]:
-                        self.extra_connected_cue_count += 1
-
-                except:
-                    pass
+                if cue_num not in assigned[group_id]:
+                    self.extra_connected_cue_count += 1
 
     def get_module_button_color(self, module):
         normal_blue = lv.color_hex(0x2F4F8F)
@@ -1137,7 +1374,22 @@ class NFCPGui:
         green = lv.color_hex(0x1F7A1F)
 
         if not self.selected_script:
-            return normal_blue
+            if not self.color_cues_without_script:
+                return normal_blue
+
+            if not self.module_has_continuity_data(module):
+                return normal_blue
+
+            continuity = self.get_module_continuity_list(module)
+
+            if not continuity:
+                return normal_blue
+
+            for cue_ok in continuity:
+                if not cue_ok:
+                    return red
+
+            return green
 
         gid = module.get("group_id", None)
 
@@ -1154,22 +1406,15 @@ class NFCPGui:
             if item.get("group") == group_id:
                 return orange
 
-        continuity = module.get("continuity", None)
-
-        if not continuity:
+        if not self.module_has_continuity_data(module):
             return normal_blue
 
-        cues = continuity.get("cues", [])
+        continuity = self.get_module_continuity_list(module)
 
         cont_map = {}
 
-        for cue_info in cues:
-            try:
-                cue_num = int(cue_info.get("cue", 0))
-                cue_ok = bool(cue_info.get("ok"))
-                cont_map[cue_num] = cue_ok
-            except:
-                pass
+        for i, cue_ok in enumerate(continuity):
+            cont_map[i + 1] = bool(cue_ok)
 
         assigned_cues = []
 
@@ -1202,49 +1447,14 @@ class NFCPGui:
 
         return green
 
-    def show_mismatch_details(self, event=None):
-        scr = self.new_screen("Mismatch Details", "mismatch_details")
-
-        self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_modules_menu)
-
-        title = lv.label(scr)
-        title.set_text("Module / Script Mismatches")
-        title.set_pos(30, 60)
-
-        text = ""
-
-        if self.loaded_script_extra_channels:
-            text += "Discovered channels not in script:\n"
-            for ch in self.loaded_script_extra_channels:
-                text += "  Channel %d\n" % ch
-            text += "\n"
-
-        if self.loaded_script_duplicate_channels:
-            text += "Duplicate discovered channels:\n"
-            for item in self.loaded_script_duplicate_channels:
-                text += "  Channel %d has %d modules\n" % (
-                    item["group"],
-                    item["count"]
-                )
-            text += "\n"
-
-        if self.extra_connected_cue_count:
-            text += "Connected cues not assigned in script:\n"
-            text += "  Total extra connected cues: %d\n\n" % self.extra_connected_cue_count
-
-        if not text:
-            text = "No discovered module channels are outside the script.\nNo duplicate module channels found.\nNo extra connected cues found."
-
-        label = lv.label(scr)
-        label.set_text(text)
-        label.set_pos(60, 110)
-
     # -------------------------
     # Modules screen
     # -------------------------
 
-    def show_modules_menu(self, event=None):
+    def show_modules_menu(self, event=None, restore_selected_page=True):
         self.load_modules_from_db()
+        if restore_selected_page:
+            self.set_modules_page_for_uid(self.last_selected_module_uid)
         self.update_script_module_mismatch()
         self.update_open_script_cues()
         self.update_extra_connected_cues()
@@ -1292,11 +1502,6 @@ class NFCPGui:
             open_cues_loaded = self.open_script_cue_count
             open_cues_total = self.loaded_script_fire_count
 
-            mismatch_count = (
-                len(self.loaded_script_extra_channels) +
-                len(self.loaded_script_duplicate_channels)
-            )
-
             label = lv.label(scr)
             label.set_text(
                 "Script: %s | Open Cues: %d/%d +%d | Discovered Channels: %d/%d" %
@@ -1311,19 +1516,6 @@ class NFCPGui:
             )
             label.set_pos(30, 55)
 
-            mismatch_btn = lv.button(scr)
-            mismatch_btn.set_pos(560, 50)
-            mismatch_btn.set_size(180, 38)
-            mismatch_btn.add_event_cb(
-                self.show_mismatch_details,
-                lv.EVENT.CLICKED,
-                None
-            )
-
-            mismatch_lbl = lv.label(mismatch_btn)
-            mismatch_lbl.set_text("Mismatch: %d" % mismatch_count)
-            mismatch_lbl.center()
-
         else:
             label = lv.label(scr)
             label.set_text("Select a module to view cue continuity")
@@ -1335,43 +1527,60 @@ class NFCPGui:
             empty.align(lv.ALIGN.CENTER, 0, 0)
             return
 
-        module_list = lv.obj(scr)
-        module_list.set_pos(20, 100)
-        module_list.set_size(760, 285)
+        page_size = 9
+        total_pages = (len(self.modules) + page_size - 1) // page_size
 
-        module_list.set_style_bg_color(lv.color_hex(0x101010), 0)
-        module_list.set_style_border_width(0, 0)
-        module_list.set_style_radius(0, 0)
-        module_list.set_style_pad_all(0, 0)
+        if total_pages < 1:
+            total_pages = 1
+        if self.modules_page < 0:
+            self.modules_page = 0
+        if self.modules_page >= total_pages:
+            self.modules_page = total_pages - 1
 
-        module_list.set_scroll_dir(lv.DIR.VER)
-        module_list.set_scrollbar_mode(lv.SCROLLBAR_MODE.AUTO)
+        page_label = lv.label(scr)
+        page_label.set_text("Page %d/%d" % (self.modules_page + 1, total_pages))
+        page_label.set_pos(665, 55)
 
-        x0 = 20
-        y0 = 10
-        w = 220
-        h = 85
-        gap_x = 25
-        gap_y = 15
+        if total_pages > 1:
+            self.make_button(scr, "PREV", 670, 255, 90, 130, self.prev_modules_page)
+            self.make_button(scr, "NEXT", 670, 100, 90, 130, self.next_modules_page)
 
-        for i, module in enumerate(self.modules):
+        module_area = lv.obj(scr)
+        module_area.set_pos(20, 100)
+        module_area.set_size(640, 285)
+        module_area.set_style_bg_color(lv.color_hex(0x101010), 0)
+        module_area.set_style_border_width(0, 0)
+        module_area.set_style_radius(0, 0)
+        module_area.set_style_pad_all(0, 0)
+
+        x0 = 0
+        y0 = 0
+        w = 205
+        h = 82
+        gap_x = 10
+        gap_y = 12
+
+        start_index = self.modules_page * page_size
+        page_modules = self.modules[start_index:start_index + page_size]
+
+        for i, module in enumerate(page_modules):
             row = i // 3
             col = i % 3
+            uid_text = module.get("unique_id", "0x00000000")
 
             x = x0 + col * (w + gap_x)
             y = y0 + row * (h + gap_y)
 
-            uid_text = module.get("unique_id", "0x00000000")
             channel_text = self.group_to_int_display(module.get("group_id", "--"))
             cue_count = module.get("cue_count", 16)
 
-            text = "Channel %s\nUID:%s\nCues:%s" % (
+            text = "Ch %s  Cues:%s\nUID:%s" % (
                 channel_text,
-                self.format_uid(uid_text),
-                cue_count
+                cue_count,
+                self.format_uid(uid_text)
             )
 
-            btn = lv.button(module_list)
+            btn = lv.button(module_area)
             btn.set_pos(x, y)
             btn.set_size(w, h)
 
@@ -1382,13 +1591,21 @@ class NFCPGui:
 
             lbl = lv.label(btn)
             lbl.set_text(text)
-            lbl.center()
+            lbl.align(lv.ALIGN.LEFT_MID, 8, 0)
 
             btn.add_event_cb(
                 self.make_module_cb(module),
                 lv.EVENT.CLICKED,
                 None
             )
+
+    def next_modules_page(self, event=None):
+        self.modules_page += 1
+        self.show_modules_menu(restore_selected_page=False)
+
+    def prev_modules_page(self, event=None):
+        self.modules_page -= 1
+        self.show_modules_menu(restore_selected_page=False)
 
     def show_loading_screen(self, message="Loading..."):
         scr = self.new_screen("Please Wait", "loading")
@@ -1427,19 +1644,32 @@ class NFCPGui:
             self.set_status("Continuity scan failed")
             results = []
 
+        try:
+            self.show_loading_screen("Refreshing modules...\nRunning speed tests...")
+            speed_results = nfcp.speed_test_scan()
+        except Exception as e:
+            print("Speed test failed:", e)
+            self.set_status("Speed test failed")
+            speed_results = []
+
         self.load_modules_from_db()
         self.update_script_module_mismatch()
         self.update_open_script_cues()
         self.update_extra_connected_cues()
 
         count = len(results) if results else 0
+        speed_count = len(speed_results) if speed_results else 0
         print("Continuity checked:", count)
+        print("Speed tested:", speed_count)
 
         self.show_modules_menu()
-        self.set_status("Refresh complete - %d modules checked" % count)
+        self.set_status("Refresh complete - %d checked, %d speed tested" % (count, speed_count))
 
     def reset_modules(self, event=None):
         self.set_status("Clearing module database...")
+
+        if self.armed:
+            self.set_armed(False)
 
         try:
             nfcp.clear_device_db()
@@ -1451,6 +1681,7 @@ class NFCPGui:
         self.continuity = [False] * DEFAULT_CUE_COUNT
 
         self.show_modules_menu()
+        self.update_arm_button()
         self.set_status("Module database cleared")
 
     def discover_modules(self, event=None):
@@ -1458,14 +1689,24 @@ class NFCPGui:
             return
 
         self.discover_busy = True
-        self.set_status("Discovering modules...")
-        self.update_modules_busy_buttons()
-        self.flush_ui()
+        self.show_loading_screen("Discovering modules...\nWaiting for responses...")
 
         final_status = "Discovery complete"
+        cont_count = 0
+        speed_count = 0
 
         try:
-            self.modules = nfcp.discover(11600)
+            self.modules = nfcp.discover()
+            self.load_modules_from_db()
+
+            self.show_loading_screen("Discovering modules...\nChecking continuity...")
+            cont_results = nfcp.continuity_scan()
+            cont_count = len(cont_results) if cont_results else 0
+
+            self.show_loading_screen("Discovering modules...\nRunning speed tests...")
+            speed_results = nfcp.speed_test_scan()
+            speed_count = len(speed_results) if speed_results else 0
+
             self.load_modules_from_db()
             self.update_script_module_mismatch()
             self.update_open_script_cues()
@@ -1477,7 +1718,14 @@ class NFCPGui:
 
         self.discover_busy = False
         self.show_modules_menu()
-        self.set_status(final_status)
+        self.update_arm_button()
+        if final_status == "Discovery complete":
+            self.set_status(
+                "Discovery complete - %d checked, %d speed tested" %
+                (cont_count, speed_count)
+            )
+        else:
+            self.set_status(final_status)
 
     def make_module_cb(self, module):
         def cb(event):
@@ -1491,13 +1739,15 @@ class NFCPGui:
 
     def select_module(self, module):
         self.selected_module = module
+        self.last_selected_module_uid = module.get("unique_id", None)
 
-        cue_count = self.get_selected_module_cue_count()
-        self.continuity = [False] * cue_count
+        self.continuity = self.get_module_saved_continuity(module)
         self.last_module_continuity_auto_ms = time.ticks_ms()
 
-        self.show_module_continuity()
+        self.show_loading_screen("Opening module...\nRunning speed and continuity checks...")
+        self.request_selected_speed_test()
         self.request_selected_continuity()
+        self.show_module_continuity()
 
     def show_module_continuity(self, event=None):
         scr = self.new_screen("Module Continuity", "module_continuity")
@@ -1541,6 +1791,10 @@ class NFCPGui:
         self.arm_label = lv.label(scr)
         self.arm_label.set_text("ARM: ON" if self.armed else "ARM: OFF")
         self.arm_label.set_pos(650, 55)
+
+        self.speed_label = lv.label(scr)
+        self.speed_label.set_text(self.format_selected_speed_test())
+        self.speed_label.set_pos(500, 82)
 
         self.build_fixed_cue_grid(scr)
 
@@ -1632,6 +1886,79 @@ class NFCPGui:
             print("Continuity failed:", e)
             self.set_status("Continuity failed")
 
+    def request_selected_speed_test(self):
+        if not self.selected_module:
+            self.set_status("No module selected")
+            return
+
+        uid_text = self.selected_module.get("unique_id", "0x00000000")
+
+        try:
+            uid = int(uid_text, 16) & 0xFFFFFFFF
+        except:
+            self.set_status("Bad UID")
+            return
+
+        self.set_status("Running speed test...")
+
+        try:
+            ping_ms = nfcp.request_ping_for_uid(uid)
+            self.save_selected_module_speed_test(ping_ms)
+
+            if ping_ms is None:
+                self.set_status("Speed test timeout")
+            else:
+                self.set_status("Speed test: %dms" % ping_ms)
+
+            if hasattr(self, "speed_label"):
+                self.speed_label.set_text(self.format_selected_speed_test())
+
+        except Exception as e:
+            print("Speed test failed:", e)
+            self.set_status("Speed test failed")
+
+    def save_selected_module_speed_test(self, ping_ms):
+        if not self.selected_module:
+            return
+
+        uid_text = self.selected_module.get("unique_id", None)
+
+        if not uid_text:
+            return
+
+        try:
+            db = nfcp.load_device_db()
+            idx = nfcp.index_db_by_unique(db)
+        except Exception as e:
+            print("Speed test DB load failed:", e)
+            return
+
+        dev = idx.get(uid_text)
+
+        if not dev:
+            dev = self.selected_module
+
+        dev["speed_test_target_uid"] = uid_text
+        dev["speed_test_ms"] = ping_ms
+        dev["speed_test_ok"] = ping_ms is not None
+        dev["speed_test_last_epoch"] = time.time()
+
+        idx[uid_text] = dev
+        self.selected_module = dev
+
+        db["devices"] = sorted(
+            idx.values(),
+            key=lambda d: self.group_to_int_value(
+                d.get("group_id", None)
+            )
+        )
+
+        try:
+            nfcp.save_device_db(db)
+            self.load_modules_from_db()
+        except Exception as e:
+            print("Speed test DB save failed:", e)
+
     def save_selected_module_continuity(self, ok):
         if not self.selected_module:
             return
@@ -1668,6 +1995,7 @@ class NFCPGui:
         dev["continuity_last_epoch"] = time.time()
 
         idx[uid_text] = dev
+        self.selected_module = dev
 
         db["devices"] = sorted(
             idx.values(),
@@ -1750,6 +2078,7 @@ class NFCPGui:
 
             self.cue_labels[i].set_text(text)
             self.cue_labels[i].center()
+
             self.cue_buttons[i].set_style_bg_color(color, 0)
 
         if hasattr(self, "summary"):
@@ -1768,7 +2097,6 @@ class NFCPGui:
 
         scr = self.new_screen("Change Channel", "change_channel")
 
-        uid_text = self.selected_module.get("unique_id", "0x00000000")
         group_text = self.selected_module.get("group_id", "0x0001")
 
         current_group = self.parse_group_id(group_text, 1)
@@ -1779,17 +2107,13 @@ class NFCPGui:
         self.make_button(scr, "BACK", 20, 400, 120, 55, self.show_module_continuity)
         self.make_button(scr, "SAVE", 650, 400, 120, 55, self.save_group_change)
 
-        info = lv.label(scr)
-        info.set_text("UID: %s" % uid_text)
-        info.align(lv.ALIGN.TOP_MID, 0, 60)
-
         channel_title = lv.label(scr)
         channel_title.set_text("Channel")
-        channel_title.align(lv.ALIGN.TOP_MID, 0, 100)
+        channel_title.align(lv.ALIGN.TOP_MID, 0, 70)
 
         self.group_edit_box = lv.obj(scr)
         self.group_edit_box.set_size(260, 70)
-        self.group_edit_box.align(lv.ALIGN.TOP_MID, 0, 125)
+        self.group_edit_box.align(lv.ALIGN.TOP_MID, 0, 95)
         self.group_edit_box.set_style_bg_color(lv.color_hex(0x202020), 0)
         self.group_edit_box.set_style_border_color(lv.color_hex(0xFFFFFF), 0)
         self.group_edit_box.set_style_border_width(2, 0)
@@ -1803,12 +2127,12 @@ class NFCPGui:
         self.build_group_number_pad(scr)
 
     def build_group_number_pad(self, parent):
-        x0 = 230
-        y0 = 215
+        x0 = 190
+        y0 = 185
 
-        btn_w = 90
-        btn_h = 40
-        gap = 10
+        btn_w = 120
+        btn_h = 48
+        gap = 14
 
         keys = [
             ["1", "2", "3"],
@@ -1979,9 +2303,17 @@ class NFCPGui:
             )
 
     def toggle_arm(self, event=None):
+        if not self.armed and not self.has_scanned_modules():
+            self.set_status("Arm disabled - scan modules first")
+            return
+
         self.set_armed(not self.armed)
 
     def set_armed(self, armed):
+        if armed and not self.has_scanned_modules():
+            self.set_status("Arm disabled - scan modules first")
+            return
+
         self.armed = bool(armed)
 
         try:
@@ -1994,10 +2326,14 @@ class NFCPGui:
             self.set_status("Arm/disarm failed")
 
         if hasattr(self, "arm_label"):
-            self.arm_label.set_text("ARM: ON" if self.armed else "ARM: OFF")
+            try:
+                self.arm_label.set_text("ARM: ON" if self.armed else "ARM: OFF")
+            except Exception as e:
+                print("Arm label update failed:", e)
 
         self.update_background()
         self.update_manual_fire_button()
+        self.update_arm_button()
 
     # -------------------------
     # UART packet monitor
@@ -2076,6 +2412,7 @@ class NFCPGui:
                 self.update_script_module_mismatch()
                 self.update_open_script_cues()
                 self.update_extra_connected_cues()
+                self.update_arm_button()
 
                 if new_module_added and self.current_view == "modules":
                     self.show_modules_menu()
@@ -2094,10 +2431,6 @@ class NFCPGui:
         print(text)
 
     def update(self):
-        if hasattr(self, "clock"):
-            seconds = time.ticks_ms() // 1000
-            self.clock.set_text("Uptime: %ds" % seconds)
-
         if (
             self.auto_module_continuity and
             self.current_view == "module_continuity" and

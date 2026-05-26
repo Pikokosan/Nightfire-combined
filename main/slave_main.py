@@ -65,6 +65,19 @@ ALLOW_FIRE_WHEN_DISARMED = False
 CUE_COUNT = 16
 
 
+def clamp_cue_count(cue_count):
+    try:
+        cue_count = int(cue_count)
+    except Exception:
+        cue_count = DEFAULT_CUE_COUNT
+
+    if cue_count < 1:
+        return 1
+    if cue_count > 64:
+        return 64
+    return cue_count
+
+
 def load_cfg():
     try:
         with open(CFG_PATH, "rb") as f:
@@ -72,7 +85,7 @@ def load_cfg():
             if len(b) == 8:
                 g = int.from_bytes(b[0:2], "big")
                 u = int.from_bytes(b[2:6], "big")
-                cues = b[6]
+                cues = clamp_cue_count(b[6])
                 dtype = b[7]
                 return g, u, cues, dtype
             if len(b) == 6:
@@ -85,6 +98,8 @@ def load_cfg():
 
 
 def save_cfg(group_id, unique_id, cue_count, device_type):
+    cue_count = clamp_cue_count(cue_count)
+
     with open(CFG_PATH, "wb") as f:
         f.write((group_id & 0xFFFF).to_bytes(2, "big"))
         f.write((unique_id & 0xFFFFFFFF).to_bytes(4, "big"))
@@ -114,10 +129,20 @@ def open_cue_list(open_mask):
 def build_continuity_frame(src_unique, open_mask):
     """
     Build the NFCP continuity response:
-        data = open_mask encoded as ceil(CUE_COUNT / 8) bytes
+        data = open_mask encoded as ceil(CUE_COUNT / 8) bytes.
+
+    Current NFCP continuity format:
+        bit0 = cue1
+        1 = OPEN / no continuity
+        0 = OK / closed
     """
-    open_mask &= 0xFFFF
-    return nfcp.build_continuity_response(src_unique, open_mask, CUE_COUNT)
+    cue_count = clamp_cue_count(CUE_COUNT)
+    nbytes = (cue_count + 7) // 8
+
+    open_mask &= (1 << (nbytes * 8)) - 1
+    data = open_mask.to_bytes(nbytes, "big")
+
+    return nfcp.build_response(src_unique, CMD_CONTINUITY_RSP, data)
 
 
 # -------------------------
