@@ -12,6 +12,7 @@ import display_driver
 import ujson as json
 import urandom as random
 import nfcp
+import e77_radio
 
 DEFAULT_CUE_COUNT = 16
 MAX_CUE_COUNT = 64
@@ -24,11 +25,14 @@ SRC_ID = 0x01
 DEVICE_DB_PATH = "nfcp_devices.json"
 SETTINGS_PATH = "nfcp_settings.json"
 
-UART_ID = 1
-BAUDRATE = 256000
-TX_PIN = 16
-RX_PIN = 15
-RS485_DE_RE_PIN = 6
+TRANSPORT = "e77"
+RADIO_NETWORK_ID = e77_radio.DEFAULT_NETWORK_ID
+
+UART_ID = 2
+BAUDRATE = 115200 if TRANSPORT == "e77" else 256000
+TX_PIN = 15
+RX_PIN = 16
+RS485_DE_RE_PIN = None if TRANSPORT == "e77" else 6
 
 uart = UART(
     UART_ID,
@@ -45,7 +49,10 @@ else:
 
 nfcp_tx = nfcp.NFCP(SRC_ID)
 nfcp_rx = nfcp.NFCPStreamParser()
+radio_rx = e77_radio.E77FrameParser()
+radio_seq = 1
 _last_packets = []
+_last_radio_links = {}
 
 try:
     import sdcard_driver
@@ -71,7 +78,21 @@ def delete_device_db_on_startup():
         print("Failed to delete nfcp_devices.json:", e)
 
 
-def rs485_write(pkt):
+def next_radio_seq():
+    global radio_seq
+
+    seq = radio_seq & 0xFF
+    radio_seq = (radio_seq + 1) & 0xFF
+    if radio_seq == 0:
+        radio_seq = 1
+    return seq
+
+
+def transport_write(pkt):
+    if TRANSPORT == "e77":
+        uart.write(e77_radio.build_send_nfcp(next_radio_seq(), pkt))
+        return
+
     if de is not None:
         de.value(1)
         time.sleep_us(500)
@@ -85,6 +106,10 @@ def rs485_write(pkt):
     if de is not None:
         de.value(0)
         time.sleep_us(500)
+
+
+def rs485_write(pkt):
+    transport_write(pkt)
 
 
 def uart_read_some(max_bytes=256):
@@ -212,24 +237,46 @@ def poll_responses(max_packets=8):
         return packets
 
     for b in data:
-        pkt = nfcp_rx.feed(b)
-        if not pkt:
-            continue
+        if TRANSPORT == "e77":
+            frame = radio_rx.feed(b)
+            if not frame:
+                continue
+            if frame.cmd != e77_radio.CMD_NFCP_RX:
+                continue
+            rx_info = e77_radio.parse_nfcp_rx(frame.payload)
+            if not rx_info:
+                continue
+            nfcp_data = rx_info.get("nfcp_frame", b"")
+            radio_rssi = rx_info.get("rssi", None)
+            radio_snr = rx_info.get("snr", None)
+        else:
+            nfcp_data = bytes([b])
+            radio_rssi = None
+            radio_snr = None
 
-        if pkt.get("frame_type") != nfcp.SOF_RESPONSE:
-            continue
+        for nfcp_b in nfcp_data:
+            pkt = nfcp_rx.feed(nfcp_b)
+            if not pkt:
+                continue
 
-        out = {
-            "sof2": nfcp.SOF2_RESPONSE,
-            "src_unique": pkt.get("src", 0),
-            "cmd": pkt.get("cmd", 0),
-            "data": pkt.get("data", b"")
-        }
-        packets.append(out)
-        _last_packets.append(out)
+            if pkt.get("frame_type") != nfcp.SOF_RESPONSE:
+                continue
 
-        if len(_last_packets) > 20:
-            _last_packets = _last_packets[-20:]
+            out = {
+                "sof2": nfcp.SOF2_RESPONSE,
+                "src_unique": pkt.get("src", 0),
+                "cmd": pkt.get("cmd", 0),
+                "data": pkt.get("data", b""),
+                "radio_rssi": radio_rssi,
+                "radio_snr": radio_snr
+            }
+            packets.append(out)
+            _last_packets.append(out)
+
+            if len(_last_packets) > 20:
+                _last_packets = _last_packets[-20:]
+            if len(packets) >= max_packets:
+                break
         if len(packets) >= max_packets:
             break
 
@@ -238,6 +285,29 @@ def poll_responses(max_packets=8):
 
 def get_last_packets():
     return _last_packets
+
+
+def update_radio_link_from_packet(pkt):
+    uid = pkt.get("src_unique", None)
+    if uid is None:
+        return
+
+    rssi = pkt.get("radio_rssi", None)
+    snr = pkt.get("radio_snr", None)
+
+    if rssi is None and snr is None:
+        return
+
+    key = "0x%08X" % (uid & 0xFFFFFFFF)
+    _last_radio_links[key] = {
+        "radio_rssi": rssi,
+        "radio_snr": snr,
+        "radio_last_epoch": time.time()
+    }
+
+
+def get_last_radio_link(uid_text):
+    return _last_radio_links.get(uid_text, None)
 
 
 def discover(idle_ms=DISCOVER_IDLE_TIMEOUT_MS, max_scan_ms=DISCOVER_MAX_SCAN_MS):
@@ -260,6 +330,12 @@ def discover(idle_ms=DISCOVER_IDLE_TIMEOUT_MS, max_scan_ms=DISCOVER_MAX_SCAN_MS)
 
             info = parse_discover_rsp(pkt["src_unique"], pkt["data"])
             if info:
+                update_radio_link_from_packet(pkt)
+                if pkt.get("radio_rssi", None) is not None:
+                    info["radio_rssi"] = pkt["radio_rssi"]
+                if pkt.get("radio_snr", None) is not None:
+                    info["radio_snr"] = pkt["radio_snr"]
+                info["radio_last_epoch"] = time.time()
                 idx[info["unique_id"]] = info
                 last_packet_ms = time.ticks_ms()
 
@@ -285,6 +361,7 @@ def request_continuity_for_uid(uid_int, cue_count_hint=16, timeout_ms=300):
                 continue
             if (pkt["src_unique"] & 0xFFFFFFFF) != (uid_int & 0xFFFFFFFF):
                 continue
+            update_radio_link_from_packet(pkt)
             return parse_continuity_rsp(pkt["data"], cue_count_hint)
 
         time.sleep_ms(2)
@@ -321,6 +398,7 @@ def request_ping_for_uid(uid_int, timeout_ms=SPEED_TEST_TIMEOUT_MS):
             if pkt.get("data", b"") != payload:
                 continue
 
+            update_radio_link_from_packet(pkt)
             return time.ticks_diff(time.ticks_ms(), start)
 
         time.sleep_ms(2)
@@ -355,6 +433,15 @@ def continuity_scan(timeout_ms=300):
 
         dev["continuity"] = {"cues": cues}
         dev["continuity_last_epoch"] = time.time()
+
+        link = get_last_radio_link(uid_text)
+        if link:
+            if link.get("radio_rssi", None) is not None:
+                dev["radio_rssi"] = link["radio_rssi"]
+            if link.get("radio_snr", None) is not None:
+                dev["radio_snr"] = link["radio_snr"]
+            dev["radio_last_epoch"] = link.get("radio_last_epoch", time.time())
+
         results.append({
             "unique_id": uid_text,
             "cue_count": cue_count,
@@ -385,6 +472,14 @@ def speed_test_scan(timeout_ms=SPEED_TEST_TIMEOUT_MS):
         dev["speed_test_ms"] = ping_ms
         dev["speed_test_ok"] = ping_ms is not None
         dev["speed_test_last_epoch"] = time.time()
+
+        link = get_last_radio_link(uid_text)
+        if link:
+            if link.get("radio_rssi", None) is not None:
+                dev["radio_rssi"] = link["radio_rssi"]
+            if link.get("radio_snr", None) is not None:
+                dev["radio_snr"] = link["radio_snr"]
+            dev["radio_last_epoch"] = link.get("radio_last_epoch", time.time())
 
         results.append({
             "unique_id": uid_text,
@@ -425,6 +520,7 @@ nfcp.parse_discover_rsp = parse_discover_rsp
 nfcp.parse_continuity_rsp = parse_continuity_rsp
 nfcp.poll_responses = poll_responses
 nfcp.get_last_packets = get_last_packets
+nfcp.get_last_radio_link = get_last_radio_link
 nfcp.discover = discover
 nfcp.request_continuity_for_uid = request_continuity_for_uid
 nfcp.continuity_scan = continuity_scan
@@ -521,12 +617,14 @@ class NFCPGui:
             "module_label",
             "arm_label",
             "speed_label",
+            "radio_link_label",
             "summary",
             "grid_box",
             "cue_buttons",
             "cue_labels",
             "auto_continuity_checkbox",
             "no_script_color_checkbox",
+            "loading_label",
             "group_edit_box",
             "group_edit_label",
         )
@@ -637,6 +735,43 @@ class NFCPGui:
             return "Speed: --"
 
         return "Speed: %s" % self.format_speed_test(self.selected_module)
+
+    def format_rssi(self, module):
+        try:
+            rssi = module.get("radio_rssi", None)
+        except:
+            rssi = None
+
+        if rssi is None:
+            return "RSSI: --"
+
+        try:
+            return "RSSI: %ddBm" % int(rssi)
+        except:
+            return "RSSI: --"
+
+    def format_snr(self, module):
+        try:
+            snr = module.get("radio_snr", None)
+        except:
+            snr = None
+
+        if snr is None:
+            return "SNR: --"
+
+        try:
+            return "SNR: %ddB" % int(snr)
+        except:
+            return "SNR: --"
+
+    def format_selected_radio_link(self):
+        if not self.selected_module:
+            return "RSSI: --   SNR: --"
+
+        return "%s   %s" % (
+            self.format_rssi(self.selected_module),
+            self.format_snr(self.selected_module)
+        )
 
     def format_module_continuity_summary(self, module):
         cue_count = self.get_module_cue_count(module)
@@ -1138,7 +1273,155 @@ class NFCPGui:
             None
         )
 
+        radio_title = lv.label(scr)
+        radio_title.set_text("Radio")
+        radio_title.set_pos(430, 85)
+
+        self.make_button(
+            scr,
+            "RADIO UPDATE",
+            430,
+            125,
+            250,
+            65,
+            self.show_radio_update
+        )
+
         self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_main_menu)
+
+    def mount_sd_for_radio_update(self):
+        if sdcard_driver is None:
+            return
+
+        if not hasattr(sdcard_driver, "sd") or sdcard_driver.sd is None:
+            return
+
+        try:
+            os.mount(sdcard_driver.sd, "/sd")
+        except OSError:
+            pass
+        except Exception as e:
+            print("SD mount failed:", e)
+
+    def find_radio_update(self):
+        try:
+            import e77_bootloader
+            self.mount_sd_for_radio_update()
+            return e77_bootloader.find_firmware()
+        except Exception as e:
+            print("Radio firmware check failed:", e)
+            return None
+
+    def show_radio_update(self, event=None):
+        scr = self.new_screen("Radio Update", "radio_update")
+
+        self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_settings)
+
+        info = self.find_radio_update()
+
+        label = lv.label(scr)
+        if info:
+            version = info.get("version", "")
+            if version:
+                label.set_text(
+                    "Firmware found:\n%s\nVersion: %s" %
+                    (info.get("path", "--"), version)
+                )
+            else:
+                label.set_text("Firmware found:\n%s" % info.get("path", "--"))
+
+            self.make_button(
+                scr,
+                "START UPDATE",
+                250,
+                285,
+                300,
+                75,
+                self.run_radio_update
+            )
+        else:
+            label.set_text(
+                "No radio firmware found.\n"
+                "Use /sd/latest.json or /sd/firmware/latest.json."
+            )
+
+        label.align(lv.ALIGN.CENTER, 0, -45)
+
+    def restore_radio_uart(self):
+        global uart, radio_rx
+
+        try:
+            uart = UART(
+                UART_ID,
+                baudrate=BAUDRATE,
+                tx=Pin(TX_PIN),
+                rx=Pin(RX_PIN)
+            )
+            radio_rx = e77_radio.E77FrameParser()
+            drain_uart()
+        except Exception as e:
+            print("Radio UART restore failed:", e)
+
+    def run_radio_update(self, event=None):
+        try:
+            import e77_bootloader
+        except Exception as e:
+            print("Radio updater import failed:", e)
+            self.set_status("Radio updater missing")
+            return
+
+        self.mount_sd_for_radio_update()
+        info = e77_bootloader.find_firmware()
+        if not info:
+            self.set_status("No radio firmware found")
+            self.show_radio_update()
+            return
+
+        self.show_loading_screen("Radio update...\nStarting...")
+
+        last_progress_ms = {"value": 0}
+
+        def progress(message):
+            print("Radio update:", message)
+
+            now = time.ticks_ms()
+            if time.ticks_diff(now, last_progress_ms["value"]) < 500:
+                return
+
+            last_progress_ms["value"] = now
+
+            try:
+                if hasattr(self, "loading_label"):
+                    self.loading_label.set_text("Radio update...\n" + message)
+                    self.loading_label.align(lv.ALIGN.CENTER, 0, -20)
+                    self.flush_ui()
+            except Exception:
+                pass
+
+        result = None
+        try:
+            result = e77_bootloader.flash_first_available(
+                UART_ID,
+                TX_PIN,
+                RX_PIN,
+                app_baud=BAUDRATE,
+                boot_baud=115200,
+                progress_cb=progress
+            )
+        except Exception as e:
+            print("Radio update failed:", e)
+            self.restore_radio_uart()
+            self.show_radio_update()
+            self.set_status("Radio update failed")
+            return
+
+        self.restore_radio_uart()
+        self.show_radio_update()
+
+        if result:
+            self.set_status("Radio update complete")
+        else:
+            self.set_status("Radio update finished")
 
     def toggle_auto_module_continuity(self, event=None):
         checked = not self.auto_module_continuity
@@ -1591,7 +1874,11 @@ class NFCPGui:
 
             lbl = lv.label(btn)
             lbl.set_text(text)
-            lbl.align(lv.ALIGN.LEFT_MID, 8, 0)
+            lbl.align(lv.ALIGN.TOP_LEFT, 8, 8)
+
+            rssi_lbl = lv.label(btn)
+            rssi_lbl.set_text(self.format_rssi(module))
+            rssi_lbl.align(lv.ALIGN.BOTTOM_RIGHT, -8, -6)
 
             btn.add_event_cb(
                 self.make_module_cb(module),
@@ -1613,6 +1900,7 @@ class NFCPGui:
         label = lv.label(scr)
         label.set_text(message)
         label.align(lv.ALIGN.CENTER, 0, -20)
+        self.loading_label = label
 
         sub = lv.label(scr)
         sub.set_text("Do not power off.")
@@ -1794,7 +2082,11 @@ class NFCPGui:
 
         self.speed_label = lv.label(scr)
         self.speed_label.set_text(self.format_selected_speed_test())
-        self.speed_label.set_pos(500, 82)
+        self.speed_label.set_pos(300, 82)
+
+        self.radio_link_label = lv.label(scr)
+        self.radio_link_label.set_text(self.format_selected_radio_link())
+        self.radio_link_label.set_pos(25, 82)
 
         self.build_fixed_cue_grid(scr)
 
@@ -1882,6 +2174,9 @@ class NFCPGui:
             self.save_selected_module_continuity(ok)
             self.update_open_script_cues()
             self.update_extra_connected_cues()
+
+            if hasattr(self, "radio_link_label"):
+                self.radio_link_label.set_text(self.format_selected_radio_link())
         except Exception as e:
             print("Continuity failed:", e)
             self.set_status("Continuity failed")
@@ -1913,6 +2208,9 @@ class NFCPGui:
             if hasattr(self, "speed_label"):
                 self.speed_label.set_text(self.format_selected_speed_test())
 
+            if hasattr(self, "radio_link_label"):
+                self.radio_link_label.set_text(self.format_selected_radio_link())
+
         except Exception as e:
             print("Speed test failed:", e)
             self.set_status("Speed test failed")
@@ -1942,6 +2240,14 @@ class NFCPGui:
         dev["speed_test_ms"] = ping_ms
         dev["speed_test_ok"] = ping_ms is not None
         dev["speed_test_last_epoch"] = time.time()
+
+        link = nfcp.get_last_radio_link(uid_text)
+        if link:
+            if link.get("radio_rssi", None) is not None:
+                dev["radio_rssi"] = link["radio_rssi"]
+            if link.get("radio_snr", None) is not None:
+                dev["radio_snr"] = link["radio_snr"]
+            dev["radio_last_epoch"] = link.get("radio_last_epoch", time.time())
 
         idx[uid_text] = dev
         self.selected_module = dev
@@ -1993,6 +2299,14 @@ class NFCPGui:
         dev["cue_count"] = cue_count
         dev["continuity"] = {"cues": cues}
         dev["continuity_last_epoch"] = time.time()
+
+        link = nfcp.get_last_radio_link(uid_text)
+        if link:
+            if link.get("radio_rssi", None) is not None:
+                dev["radio_rssi"] = link["radio_rssi"]
+            if link.get("radio_snr", None) is not None:
+                dev["radio_snr"] = link["radio_snr"]
+            dev["radio_last_epoch"] = link.get("radio_last_epoch", time.time())
 
         idx[uid_text] = dev
         self.selected_module = dev

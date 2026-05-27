@@ -19,6 +19,8 @@ try {
         --port $Port `
         ".\main\master_main.py:main.py" `
         ".\main\nfcp.py:nfcp.py" `
+        ".\main\e77_radio.py:e77_radio.py" `
+        ".\main\e77_bootloader.py:e77_bootloader.py" `
         ".\main\display_driver.py:display_driver.py" `
         ".\main\sdcard_driver.py:sdcard_driver.py" `
         ".\main\ch422g.py:ch422g.py"

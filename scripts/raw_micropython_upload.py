@@ -108,7 +108,7 @@ def byte_literal(data):
     return repr(data)
 
 
-def upload_file(port, local_path, remote_path, chunk_size=768):
+def upload_file(port, local_path, remote_path, chunk_size=256):
     size = os.path.getsize(local_path)
     print("Uploading %s -> %s (%d bytes)" % (local_path, remote_path, size))
 
@@ -136,6 +136,13 @@ def main():
     args = parser.parse_args()
 
     with serial.Serial(args.port, args.baud, timeout=0.05, write_timeout=2) as port:
+        try:
+            port.dtr = False
+            port.rts = False
+            time.sleep(0.2)
+        except Exception:
+            pass
+
         port.reset_input_buffer()
         stop_running_program(port)
         enter_raw_repl(port)
