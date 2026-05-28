@@ -10,8 +10,10 @@ UART_ID = 0
 TRANSPORT = "e77"
 RADIO_BOOT_PING = True
 RADIO_UPDATE_ON_BOOT = True
+RADIO_APP_BAUD = 256000
+RADIO_BOOTLOADER_BAUD = 115200
 
-UART_BAUD = 115200 if TRANSPORT == "e77" else 256000
+UART_BAUD = RADIO_APP_BAUD if TRANSPORT == "e77" else 256000
 UART_TX_PIN = 0
 UART_RX_PIN = 1
 UART_INVERT = False if TRANSPORT == "e77" else True
@@ -23,6 +25,7 @@ DEFAULT_GROUP_ID = 0x0001
 DEFAULT_UNIQUE_ID = 0x12345678
 DEFAULT_CUE_COUNT = 16  # may be set from config; valid range is 1..64
 DEFAULT_DEVICE_TYPE = 0x10  # test device type
+DEFAULT_RADIO_NETWORK_ID = e77_radio.DEFAULT_NETWORK_ID
 
 BUS_IDLE_MS = 8
 DISCOVER_MAX_TRIES = 6
@@ -61,28 +64,39 @@ def load_cfg():
     try:
         with open(CFG_PATH, "rb") as f:
             b = f.read()
-            if len(b) == 8:
+            if len(b) >= 8:
                 g = int.from_bytes(b[0:2], "big")
                 u = int.from_bytes(b[2:6], "big")
                 cues = clamp_cue_count(b[6])
                 dtype = b[7]
-                return g, u, cues, dtype
+                if len(b) >= 10:
+                    network = int.from_bytes(b[8:10], "big")
+                else:
+                    network = DEFAULT_RADIO_NETWORK_ID
+                return g, u, cues, dtype, network
             if len(b) == 6:
                 g = int.from_bytes(b[0:2], "big")
                 u = int.from_bytes(b[2:6], "big")
-                return g, u, DEFAULT_CUE_COUNT, DEFAULT_DEVICE_TYPE
+                return g, u, DEFAULT_CUE_COUNT, DEFAULT_DEVICE_TYPE, DEFAULT_RADIO_NETWORK_ID
     except:
         pass
-    return DEFAULT_GROUP_ID, DEFAULT_UNIQUE_ID, DEFAULT_CUE_COUNT, DEFAULT_DEVICE_TYPE
+    return (
+        DEFAULT_GROUP_ID,
+        DEFAULT_UNIQUE_ID,
+        DEFAULT_CUE_COUNT,
+        DEFAULT_DEVICE_TYPE,
+        DEFAULT_RADIO_NETWORK_ID
+    )
 
 
-def save_cfg(group_id: int, unique_id: int, cue_count: int, device_type: int):
+def save_cfg(group_id: int, unique_id: int, cue_count: int, device_type: int, radio_network_id: int):
     cue_count = clamp_cue_count(cue_count)
 
     with open(CFG_PATH, "wb") as f:
         f.write((group_id & 0xFFFF).to_bytes(2, "big"))
         f.write((unique_id & 0xFFFFFFFF).to_bytes(4, "big"))
         f.write(bytes([cue_count & 0xFF, device_type & 0xFF]))
+        f.write((radio_network_id & 0xFFFF).to_bytes(2, "big"))
 
 
 uart = UART(
@@ -104,7 +118,7 @@ radio_seq = 1
 nfcp = NFCP(node_id=0x01)
 
 ARMED = False
-GROUP_ID, UNIQUE_ID, CUE_COUNT, DEVICE_TYPE = load_cfg()
+GROUP_ID, UNIQUE_ID, CUE_COUNT, DEVICE_TYPE, RADIO_NETWORK_ID = load_cfg()
 
 # Clamp cue count to supported protocol range.
 # Continuity masks support 1..64 cues.
@@ -115,7 +129,10 @@ if CUE_COUNT > 64:
 CUE_MAX = CUE_COUNT
 
 print("NFCP TEST16 RX node started - DEFAULT: DISARMED")
-print("CFG: GROUP=0x%04X UNIQUE=0x%08X CUES=%d TYPE=0x%02X" % (GROUP_ID, UNIQUE_ID, CUE_COUNT, DEVICE_TYPE))
+print(
+    "CFG: GROUP=0x%04X UNIQUE=0x%08X CUES=%d TYPE=0x%02X NET=0x%04X" %
+    (GROUP_ID, UNIQUE_ID, CUE_COUNT, DEVICE_TYPE, RADIO_NETWORK_ID)
+)
 
 last_rx_ms = time.ticks_ms()
 
@@ -161,7 +178,7 @@ def run_radio_update_if_requested():
             UART_TX_PIN,
             UART_RX_PIN,
             app_baud=UART_BAUD,
-            boot_baud=115200,
+            boot_baud=RADIO_BOOTLOADER_BAUD,
             progress_cb=progress,
         )
         e77_bootloader.clear_update_request()
@@ -197,6 +214,34 @@ def radio_boot_ping():
                 return
 
     print("E77 radio UART ping failed")
+
+
+def set_local_radio_network(network_id, timeout_ms=1000):
+    if TRANSPORT != "e77":
+        return True
+
+    seq = 0xA6
+    uart.write(e77_radio.build_set_network(seq, network_id))
+    deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
+
+    while time.ticks_diff(deadline, time.ticks_ms()) > 0:
+        if not uart.any():
+            time.sleep_ms(5)
+            continue
+
+        data = uart.read(32) or b""
+        for b in data:
+            frame = radio_parser.feed(b)
+            if not frame:
+                continue
+            if frame.seq != seq:
+                continue
+            if frame.cmd == e77_radio.CMD_SET_NETWORK and not (frame.flags & e77_radio.FLAG_ERROR):
+                print("E77 radio network = 0x%04X" % (network_id & 0xFFFF))
+                return True
+
+    print("E77 radio network set failed")
+    return False
 
 
 def tx_bytes(data: bytes):
@@ -243,6 +288,7 @@ def tx_bytes(data: bytes):
 
 run_radio_update_if_requested()
 radio_boot_ping()
+set_local_radio_network(RADIO_NETWORK_ID)
 
 
 def address_matches(pkt):
@@ -324,7 +370,7 @@ def handle_discover(pkt):
 
 
 def handle(pkt):
-    global ARMED, GROUP_ID, UNIQUE_ID, CUE_COUNT, DEVICE_TYPE, _last_cont_ms
+    global ARMED, GROUP_ID, UNIQUE_ID, CUE_COUNT, DEVICE_TYPE, RADIO_NETWORK_ID, _last_cont_ms
 
     cmd = pkt["cmd"]
 
@@ -394,11 +440,32 @@ def handle(pkt):
             return
         try:
             GROUP_ID = int.from_bytes(data, "big") & 0xFFFF
-            save_cfg(GROUP_ID, UNIQUE_ID, CUE_COUNT, DEVICE_TYPE)
+            save_cfg(GROUP_ID, UNIQUE_ID, CUE_COUNT, DEVICE_TYPE, RADIO_NETWORK_ID)
             tx_bytes(nfcp.build_ack(UNIQUE_ID, CMD_SET_GROUP, ACK_OK))
             print("NEW GROUP_ID = 0x%04X" % GROUP_ID)
         except:
             tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_SET_GROUP, NACK_INTERNAL_ERROR))
+        return
+
+    # ---- SET_NETWORK with ACK/NACK ----
+    if cmd == CMD_SET_NETWORK:
+        if ARMED:
+            tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_SET_NETWORK, NACK_REJECTED_ARMED))
+            return
+        data = pkt.get("data", b"")
+        if len(data) != 2:
+            tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_SET_NETWORK, NACK_BAD_LENGTH))
+            return
+        try:
+            new_network = int.from_bytes(data, "big") & 0xFFFF
+            tx_bytes(nfcp.build_ack(UNIQUE_ID, CMD_SET_NETWORK, ACK_OK))
+            RADIO_NETWORK_ID = new_network
+            save_cfg(GROUP_ID, UNIQUE_ID, CUE_COUNT, DEVICE_TYPE, RADIO_NETWORK_ID)
+            time.sleep_ms(50)
+            set_local_radio_network(RADIO_NETWORK_ID)
+            print("NEW RADIO_NETWORK_ID = 0x%04X" % RADIO_NETWORK_ID)
+        except:
+            tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_SET_NETWORK, NACK_INTERNAL_ERROR))
         return
 
     # ---- SET_UNIQUE with ACK/NACK (responds from OLD unique) ----
@@ -415,7 +482,7 @@ def handle(pkt):
             new_unique = int.from_bytes(data, "big") & 0xFFFFFFFF
             tx_bytes(nfcp.build_ack(old_unique, CMD_SET_UNIQUE, ACK_OK))
             UNIQUE_ID = new_unique
-            save_cfg(GROUP_ID, UNIQUE_ID, CUE_COUNT, DEVICE_TYPE)
+            save_cfg(GROUP_ID, UNIQUE_ID, CUE_COUNT, DEVICE_TYPE, RADIO_NETWORK_ID)
             print("NEW UNIQUE_ID = 0x%08X" % UNIQUE_ID)
         except:
             tx_bytes(nfcp.build_nack(old_unique, CMD_SET_UNIQUE, NACK_INTERNAL_ERROR))

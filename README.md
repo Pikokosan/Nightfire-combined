@@ -142,12 +142,13 @@ If an E77 radio is connected directly to the computer over UART, use the PC-side
 updater:
 
 ```powershell
-python .\scripts\update_e77_radio_firmware.py --port COM15 C:\Users\hog28\OneDrive\Documents\NightfirePY\Nightfire-E77\build\endpoint\e77_radio.elf
+python .\scripts\update_e77_radio_firmware.py --port COM15 C:\Users\hog28\OneDrive\Documents\NightfirePY\Nightfire-E77\build\release\e77_radio.elf
 ```
 
 That script sends the E77 bootloader command, runs `STM32_Programmer_CLI.exe`,
-verifies the image, and starts the new firmware. It supports `.elf`, `.hex`, and
-`.bin` images.
+verifies the image, and starts the new firmware. The updater talks to the
+running E77 app at `256000` baud, then programs through the STM32 ROM
+bootloader at `115200` baud. It supports `.elf`, `.hex`, and `.bin` images.
 
 The device-side updater only writes raw `.bin` images.
 
@@ -158,13 +159,21 @@ The E77 radio firmware exposes a local UART protocol:
 - `PING` / `PONG` for local radio checks
 - `SEND_NFCP` to transmit an NFCP frame over radio
 - `NFCP_RX` when a radio packet is received
+- `SET_NETWORK` to change the local E77 app network ID
 - `BOOTLOADER` to jump into the STM32WL ROM UART bootloader
 
 Current device UART settings for E77 mode:
 
-- Baud: `115200`
-- Master UART: `UART1`, TX `16`, RX `15`
+- App baud: `256000`
+- Radio bootloader baud: `115200`
+- Master UART: `UART2`, TX `15`, RX `16`
 - Slave/Dummy UART: `UART0`, TX `0`, RX `1`
+
+The master stores its selected network ID in `nfcp_settings.json`. Dummy and
+slave modules store their paired radio network ID in `nfcp_cfg.bin` and apply it
+to the attached E77 radio during boot. New modules ship on the default E77
+network; use Settings > Pair on the master to scan that default network and move
+responding modules to the master's selected network.
 
 ## Notes
 

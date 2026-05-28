@@ -27,9 +27,11 @@ SETTINGS_PATH = "nfcp_settings.json"
 
 TRANSPORT = "e77"
 RADIO_NETWORK_ID = e77_radio.DEFAULT_NETWORK_ID
+RADIO_APP_BAUD = 256000
+RADIO_BOOTLOADER_BAUD = 115200
 
 UART_ID = 2
-BAUDRATE = 115200 if TRANSPORT == "e77" else 256000
+BAUDRATE = RADIO_APP_BAUD if TRANSPORT == "e77" else 256000
 TX_PIN = 15
 RX_PIN = 16
 RS485_DE_RE_PIN = None if TRANSPORT == "e77" else 6
@@ -126,6 +128,73 @@ def drain_uart():
         uart.read()
 
 
+def local_radio_command(cmd, payload=b"", timeout_ms=1000):
+    if TRANSPORT != "e77":
+        return None
+
+    global radio_rx
+
+    drain_uart()
+    radio_rx = e77_radio.E77FrameParser()
+
+    seq = next_radio_seq()
+    uart.write(e77_radio.build_frame(seq, cmd, payload))
+
+    deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
+    while time.ticks_diff(deadline, time.ticks_ms()) > 0:
+        data = uart_read_some(64)
+        if not data:
+            time.sleep_ms(5)
+            continue
+
+        for b in data:
+            frame = radio_rx.feed(b)
+            if not frame:
+                continue
+            if frame.seq == seq:
+                return frame
+
+    return None
+
+
+def radio_ping(timeout_ms=1000):
+    if TRANSPORT != "e77":
+        return True
+
+    frame = local_radio_command(e77_radio.CMD_PING, b"", timeout_ms)
+    return bool(frame and frame.cmd == e77_radio.CMD_PONG and not (frame.flags & e77_radio.FLAG_ERROR))
+
+
+def set_local_radio_network(network_id, timeout_ms=1000):
+    if TRANSPORT != "e77":
+        return True
+
+    frame = local_radio_command(
+        e77_radio.CMD_SET_NETWORK,
+        (network_id & 0xFFFF).to_bytes(2, "big"),
+        timeout_ms
+    )
+
+    return bool(
+        frame and
+        frame.cmd == e77_radio.CMD_SET_NETWORK and
+        not (frame.flags & e77_radio.FLAG_ERROR)
+    )
+
+
+def check_radio_ready(network_id):
+    if TRANSPORT != "e77":
+        return True
+
+    if not radio_ping(1000):
+        return False
+
+    if not set_local_radio_network(network_id, 1000):
+        return False
+
+    return radio_ping(1000)
+
+
 def load_device_db(path=DEVICE_DB_PATH):
     try:
         with open(path, "r") as f:
@@ -161,9 +230,15 @@ def load_app_settings(path=SETTINGS_PATH):
     except:
         settings = {}
 
+    try:
+        radio_network_id = int(settings.get("radio_network_id", RADIO_NETWORK_ID)) & 0xFFFF
+    except:
+        radio_network_id = RADIO_NETWORK_ID
+
     return {
         "auto_module_continuity": bool(settings.get("auto_module_continuity", True)),
-        "color_cues_without_script": bool(settings.get("color_cues_without_script", True))
+        "color_cues_without_script": bool(settings.get("color_cues_without_script", True)),
+        "radio_network_id": radio_network_id
     }
 
 
@@ -512,6 +587,32 @@ def set_group(uid_int, new_group):
     rs485_write(nfcp_tx.build_set_group(uid_int, new_group))
 
 
+def request_set_network_for_uid(uid_int, new_network, timeout_ms=800):
+    drain_uart()
+    rs485_write(nfcp_tx.build_set_network(uid_int, new_network))
+
+    deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
+    while time.ticks_diff(deadline, time.ticks_ms()) > 0:
+        packets = poll_responses()
+        for pkt in packets:
+            if (pkt["src_unique"] & 0xFFFFFFFF) != (uid_int & 0xFFFFFFFF):
+                continue
+
+            data = pkt.get("data", b"")
+
+            if pkt["cmd"] == nfcp.CMD_ACK and len(data) >= 2:
+                if data[0] == nfcp.CMD_SET_NETWORK:
+                    return data[1] == nfcp.ACK_OK
+
+            if pkt["cmd"] == nfcp.CMD_NACK and len(data) >= 2:
+                if data[0] == nfcp.CMD_SET_NETWORK:
+                    return False
+
+        time.sleep_ms(2)
+
+    return False
+
+
 nfcp.load_device_db = load_device_db
 nfcp.save_device_db = save_device_db
 nfcp.clear_device_db = clear_device_db
@@ -530,6 +631,7 @@ nfcp.arm = arm
 nfcp.disarm = disarm
 nfcp.fire_unique = fire_unique
 nfcp.set_group = set_group
+nfcp.request_set_network_for_uid = request_set_network_for_uid
 
 
 class NFCPGui:
@@ -555,9 +657,19 @@ class NFCPGui:
         self.color_cues_without_script = bool(
             self.settings.get("color_cues_without_script", True)
         )
+        self.radio_network_id = int(
+            self.settings.get("radio_network_id", RADIO_NETWORK_ID)
+        ) & 0xFFFF
+        self.radio_error = None
 
         self.group_edit_value = 1
         self.group_edit_text = ""
+
+        if not check_radio_ready(self.radio_network_id):
+            self.radio_error = "E77 radio not responding"
+            print(self.radio_error)
+            self.show_radio_error()
+            return
 
         self.load_modules_from_db()
         self.show_main_menu()
@@ -627,6 +739,8 @@ class NFCPGui:
             "loading_label",
             "group_edit_box",
             "group_edit_label",
+            "network_edit_box",
+            "network_edit_label",
         )
 
         for name in names:
@@ -676,6 +790,29 @@ class NFCPGui:
         lbl.center()
 
         return btn
+
+    def show_radio_error(self):
+        scr = self.new_screen("Radio Error", "radio_error")
+
+        label = lv.label(scr)
+        label.set_text(
+            "E77 radio is not responding.\n"
+            "Check radio power, UART wiring, and firmware."
+        )
+        label.align(lv.ALIGN.CENTER, 0, -20)
+
+        retry = self.make_button(scr, "RETRY", 250, 310, 300, 70, self.retry_radio_boot_check)
+        retry.set_style_bg_color(lv.color_hex(0x2F4F8F), 0)
+
+    def retry_radio_boot_check(self, event=None):
+        if check_radio_ready(self.radio_network_id):
+            self.radio_error = None
+            self.load_modules_from_db()
+            self.show_main_menu()
+            return
+
+        self.radio_error = "E77 radio not responding"
+        self.show_radio_error()
 
     def group_to_int_display(self, group_value):
         try:
@@ -1287,6 +1424,30 @@ class NFCPGui:
             self.show_radio_update
         )
 
+        network_label = lv.label(scr)
+        network_label.set_text("Network: %d" % self.radio_network_id)
+        network_label.set_pos(430, 205)
+
+        self.make_button(
+            scr,
+            "NETWORK ID",
+            430,
+            235,
+            160,
+            55,
+            self.show_change_network
+        )
+
+        self.make_button(
+            scr,
+            "PAIR",
+            610,
+            235,
+            130,
+            55,
+            self.pair_modules_to_network
+        )
+
         self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_main_menu)
 
     def mount_sd_for_radio_update(self):
@@ -1405,7 +1566,7 @@ class NFCPGui:
                 TX_PIN,
                 RX_PIN,
                 app_baud=BAUDRATE,
-                boot_baud=115200,
+                boot_baud=RADIO_BOOTLOADER_BAUD,
                 progress_cb=progress
             )
         except Exception as e:
@@ -1422,6 +1583,179 @@ class NFCPGui:
             self.set_status("Radio update complete")
         else:
             self.set_status("Radio update finished")
+
+    def show_change_network(self, event=None):
+        scr = self.new_screen("Radio Network", "radio_network")
+
+        self.network_edit_value = self.radio_network_id
+        self.network_edit_text = str(self.radio_network_id)
+
+        self.make_button(scr, "BACK", 20, 400, 120, 55, self.show_settings)
+        self.make_button(scr, "SAVE", 650, 400, 120, 55, self.save_network_change)
+
+        title = lv.label(scr)
+        title.set_text("Network ID")
+        title.align(lv.ALIGN.TOP_MID, 0, 75)
+
+        self.network_edit_box = lv.obj(scr)
+        self.network_edit_box.set_size(260, 70)
+        self.network_edit_box.align(lv.ALIGN.TOP_MID, 0, 110)
+        self.network_edit_box.set_style_bg_color(lv.color_hex(0x202020), 0)
+        self.network_edit_box.set_style_border_color(lv.color_hex(0xFFFFFF), 0)
+        self.network_edit_box.set_style_border_width(2, 0)
+        self.network_edit_box.set_style_radius(8, 0)
+        self.network_edit_box.set_style_pad_all(0, 0)
+
+        self.network_edit_label = lv.label(self.network_edit_box)
+        self.network_edit_label.set_text(self.network_edit_text)
+        self.network_edit_label.center()
+
+        self.build_network_number_pad(scr)
+
+    def build_network_number_pad(self, parent):
+        x0 = 145
+        y0 = 205
+        btn_w = 150
+        btn_h = 42
+        gap = 12
+
+        keys = [
+            ["1", "2", "3"],
+            ["4", "5", "6"],
+            ["7", "8", "9"],
+            ["CLR", "0", "DEL"]
+        ]
+
+        for row in range(4):
+            for col in range(3):
+                key = keys[row][col]
+                x = x0 + col * (btn_w + gap)
+                y = y0 + row * (btn_h + gap)
+                self.make_button(parent, key, x, y, btn_w, btn_h, self.make_network_key_cb(key))
+
+    def make_network_key_cb(self, key):
+        def cb(event):
+            self.network_key_pressed(key)
+
+        return cb
+
+    def network_key_pressed(self, key):
+        if key == "CLR":
+            self.network_edit_text = ""
+        elif key == "DEL":
+            if len(self.network_edit_text) > 0:
+                self.network_edit_text = self.network_edit_text[:-1]
+        else:
+            if len(self.network_edit_text) < 5:
+                if self.network_edit_text == "0":
+                    self.network_edit_text = key
+                else:
+                    self.network_edit_text += key
+
+        if self.network_edit_text == "":
+            self.network_edit_value = 0
+        else:
+            try:
+                self.network_edit_value = int(self.network_edit_text)
+                if self.network_edit_value > 0xFFFF:
+                    self.network_edit_value = 0xFFFF
+                    self.network_edit_text = str(self.network_edit_value)
+            except:
+                self.network_edit_value = 0
+                self.network_edit_text = ""
+
+        if hasattr(self, "network_edit_label"):
+            self.network_edit_label.set_text(self.network_edit_text or "_")
+            self.network_edit_label.center()
+
+    def save_network_change(self, event=None):
+        if self.network_edit_value < 0 or self.network_edit_value > 0xFFFF:
+            self.set_status("Invalid network")
+            return
+
+        new_network = self.network_edit_value & 0xFFFF
+
+        if not set_local_radio_network(new_network):
+            self.set_status("Radio network set failed")
+            return
+
+        self.radio_network_id = new_network
+        self.settings["radio_network_id"] = self.radio_network_id
+
+        try:
+            save_app_settings(self.settings)
+        except Exception as e:
+            print("Settings save failed:", e)
+            self.set_status("Settings save failed")
+            return
+
+        self.set_status("Network changed to %d" % self.radio_network_id)
+        self.show_settings()
+
+    def pair_modules_to_network(self, event=None):
+        target_network = self.radio_network_id & 0xFFFF
+        pair_network = e77_radio.DEFAULT_NETWORK_ID & 0xFFFF
+
+        self.show_loading_screen("Pairing modules...\nScanning default network...")
+
+        paired = 0
+        failed = 0
+        discovered_count = 0
+        paired_uids = []
+
+        try:
+            if not set_local_radio_network(pair_network):
+                self.show_settings()
+                self.set_status("Pair failed - radio network")
+                return
+
+            devices = nfcp.discover()
+            discovered_count = len(devices)
+
+            for dev in devices:
+                uid_text = dev.get("unique_id", "0x00000000")
+                try:
+                    uid = int(uid_text, 16) & 0xFFFFFFFF
+                except:
+                    failed += 1
+                    continue
+
+                if nfcp.request_set_network_for_uid(uid, target_network):
+                    dev["radio_network_id"] = target_network
+                    paired_uids.append(uid_text)
+                    paired += 1
+                else:
+                    failed += 1
+
+            try:
+                db = nfcp.load_device_db()
+                idx = nfcp.index_db_by_unique(db)
+                for uid_text in paired_uids:
+                    if uid_text in idx:
+                        idx[uid_text]["radio_network_id"] = target_network
+                db["devices"] = sorted(
+                    idx.values(),
+                    key=lambda d: self.group_to_int_value(d.get("group_id", None))
+                )
+                nfcp.save_device_db(db)
+            except Exception as e:
+                print("Pair DB update failed:", e)
+
+            set_local_radio_network(target_network)
+            self.load_modules_from_db()
+        except Exception as e:
+            print("Pair modules failed:", e)
+            failed += 1
+            try:
+                set_local_radio_network(target_network)
+            except:
+                pass
+
+        self.show_settings()
+        self.set_status(
+            "Pair complete - %d/%d paired, %d failed" %
+            (paired, discovered_count, failed)
+        )
 
     def toggle_auto_module_continuity(self, event=None):
         checked = not self.auto_module_continuity

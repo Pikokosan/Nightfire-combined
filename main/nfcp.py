@@ -26,6 +26,7 @@ CMD_DISARM       = 0x11
 CMD_FIRE         = 0x20
 CMD_SET_UNIQUE   = 0x30
 CMD_SET_GROUP    = 0x31
+CMD_SET_NETWORK  = 0x32
 CMD_DISCOVER     = 0x40
 CMD_DISCOVER_RSP = 0x41
 
@@ -162,6 +163,15 @@ class NFCP:
             (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
             bytes([CMD_SET_UNIQUE]) +
             (new_unique & 0xFFFFFFFF).to_bytes(4, "big")
+        )
+        return self._frame(SOF_UNIQUE, payload)
+
+    def build_set_network(self, target_unique: int, new_network: int) -> bytes:
+        payload = (
+            bytes([self.node_id]) +
+            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes([CMD_SET_NETWORK]) +
+            (new_network & 0xFFFF).to_bytes(2, "big")
         )
         return self._frame(SOF_UNIQUE, payload)
 
@@ -399,7 +409,7 @@ class NFCPStreamParser:
             pkt["target"] = int.from_bytes(payload[1:3], "big")
             pkt["cmd"] = payload[3]
             pkt["data"] = payload[4:]
-            if pkt["cmd"] in (CMD_SET_GROUP, CMD_SET_UNIQUE, CMD_CONTINUITY_REQ):
+            if pkt["cmd"] in (CMD_SET_GROUP, CMD_SET_UNIQUE, CMD_SET_NETWORK, CMD_CONTINUITY_REQ):
                 return None
 
         elif self.frame_type == SOF_UNIQUE:
@@ -419,7 +429,7 @@ class NFCPStreamParser:
 
         if pkt["cmd"] == CMD_FIRE and self.frame_type == SOF_BROADCAST:
             return None
-        if pkt["cmd"] in (CMD_SET_GROUP, CMD_SET_UNIQUE, CMD_CONTINUITY_REQ) and self.frame_type != SOF_UNIQUE:
+        if pkt["cmd"] in (CMD_SET_GROUP, CMD_SET_UNIQUE, CMD_SET_NETWORK, CMD_CONTINUITY_REQ) and self.frame_type != SOF_UNIQUE:
             return None
 
         return pkt

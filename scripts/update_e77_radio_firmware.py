@@ -262,10 +262,10 @@ def main():
         description="Update an E77 STM32WL radio firmware over its UART command port."
     )
     parser.add_argument("--port", required=True, help="Radio UART port, for example COM14 or COM15.")
-    parser.add_argument("--baud", type=int, default=115200, help="Application UART baud rate.")
+    parser.add_argument("--baud", type=int, default=256000, help="E77 application UART baud rate.")
     parser.add_argument("--boot-timeout", type=float, default=2.0)
     parser.add_argument("--programmer", default=default_programmer_path())
-    parser.add_argument("--programmer-baud", type=int, default=115200)
+    parser.add_argument("--programmer-baud", type=int, default=115200, help="STM32 ROM bootloader UART baud rate.")
     parser.add_argument("--no-start", action="store_true", help="Do not start the application after programming.")
     parser.add_argument("--go-address", type=lambda value: int(value, 0), help="Override application start address.")
     parser.add_argument("firmware", help="Firmware image to write, usually e77_radio.elf or .bin/.hex.")
