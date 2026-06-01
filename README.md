@@ -10,6 +10,7 @@ Current firmware is set up for the E77 radio transport.
 
 - `main/nfcp.py` - shared NFCP framing, escaping, CRC, commands, and packet builders.
 - `main/e77_radio.py` - local UART protocol used to send NFCP frames through the E77 radio.
+- `main/module_transport.py` - shared dummy/slave UART transport and radio update helper.
 - `main/e77_bootloader.py` - device-side E77 radio firmware updater.
 - `main/master_main.py` - Waveshare ESP32-S3-LCD-4.3 master controller GUI.
 - `main/slave_main.py` - real 16-cue module firmware using the MC33996 driver.
@@ -58,6 +59,7 @@ Slave upload includes:
 - `slave_main.py` as `main.py`
 - `nfcp.py`
 - `e77_radio.py`
+- `module_transport.py`
 - `e77_bootloader.py`
 - `mc33996_driver.py`
 
@@ -66,6 +68,7 @@ Dummy upload includes:
 - `dummy_main.py` as `main.py`
 - `nfcp.py`
 - `e77_radio.py`
+- `module_transport.py`
 - `e77_bootloader.py`
 
 ## Radio Firmware Updates From The Master

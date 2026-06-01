@@ -1,9 +1,9 @@
-from machine import UART, Pin
 import time
 import urandom
 
 from nfcp import *
 import e77_radio
+from module_transport import ModuleTransport
 
 
 UART_ID = 0
@@ -99,22 +99,19 @@ def save_cfg(group_id: int, unique_id: int, cue_count: int, device_type: int, ra
         f.write((radio_network_id & 0xFFFF).to_bytes(2, "big"))
 
 
-uart = UART(
+transport = ModuleTransport(
     UART_ID,
-    baudrate=UART_BAUD,
-    tx=Pin(UART_TX_PIN),
-    rx=Pin(UART_RX_PIN),
-    invert=(UART.INV_TX | UART.INV_RX) if UART_INVERT else 0,
+    UART_BAUD,
+    UART_TX_PIN,
+    UART_RX_PIN,
+    invert=UART_INVERT,
+    rs485_de_pin=RS485_DE_PIN,
+    tx_turnaround_ms=TX_TURNAROUND_MS,
+    transport=TRANSPORT,
+    radio_bootloader_baud=RADIO_BOOTLOADER_BAUD,
 )
-uart.read(1)
-
-de = None
-if RS485_DE_PIN is not None:
-    de = Pin(RS485_DE_PIN, Pin.OUT, value=0)
 
 parser = NFCPStreamParser()
-radio_parser = e77_radio.E77FrameParser()
-radio_seq = 1
 nfcp = NFCP(node_id=0x01)
 
 ARMED = False
@@ -137,157 +134,20 @@ print(
 last_rx_ms = time.ticks_ms()
 
 
-def restore_radio_uart():
-    global uart, radio_parser
-
-    uart = UART(
-        UART_ID,
-        baudrate=UART_BAUD,
-        tx=Pin(UART_TX_PIN),
-        rx=Pin(UART_RX_PIN),
-        invert=(UART.INV_TX | UART.INV_RX) if UART_INVERT else 0,
-    )
-    uart.read(1)
-    radio_parser = e77_radio.E77FrameParser()
-
-
-def run_radio_update_if_requested():
-    if TRANSPORT != "e77" or not RADIO_UPDATE_ON_BOOT:
-        return
-
-    try:
-        import e77_bootloader
-    except Exception as e:
-        print("E77 updater import failed:", e)
-        return
-
-    if not e77_bootloader.update_requested():
-        return
-
-    info = e77_bootloader.find_firmware()
-    if not info:
-        print("E77 radio update requested, but no firmware was found")
-        return
-
-    def progress(message):
-        print("E77 radio update:", message)
-
-    try:
-        result = e77_bootloader.flash_first_available(
-            UART_ID,
-            UART_TX_PIN,
-            UART_RX_PIN,
-            app_baud=UART_BAUD,
-            boot_baud=RADIO_BOOTLOADER_BAUD,
-            progress_cb=progress,
-        )
-        e77_bootloader.clear_update_request()
-        print("E77 radio update complete:", result.get("path", ""))
-    except Exception as e:
-        print("E77 radio update failed:", e)
-    finally:
-        restore_radio_uart()
-
-
 def bus_idle() -> bool:
     return time.ticks_diff(time.ticks_ms(), last_rx_ms) >= BUS_IDLE_MS
 
 
-def radio_boot_ping():
-    if TRANSPORT != "e77" or not RADIO_BOOT_PING:
-        return
-
-    seq = 0xA5
-    uart.write(e77_radio.build_frame(seq, e77_radio.CMD_PING))
-    deadline = time.ticks_add(time.ticks_ms(), 1000)
-
-    while time.ticks_diff(deadline, time.ticks_ms()) > 0:
-        if not uart.any():
-            time.sleep_ms(5)
-            continue
-
-        data = uart.read(32) or b""
-        for b in data:
-            frame = radio_parser.feed(b)
-            if frame and frame.seq == seq and frame.cmd == e77_radio.CMD_PONG:
-                print("E77 radio UART ping OK")
-                return
-
-    print("E77 radio UART ping failed")
-
-
 def set_local_radio_network(network_id, timeout_ms=1000):
-    if TRANSPORT != "e77":
-        return True
-
-    seq = 0xA6
-    uart.write(e77_radio.build_set_network(seq, network_id))
-    deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
-
-    while time.ticks_diff(deadline, time.ticks_ms()) > 0:
-        if not uart.any():
-            time.sleep_ms(5)
-            continue
-
-        data = uart.read(32) or b""
-        for b in data:
-            frame = radio_parser.feed(b)
-            if not frame:
-                continue
-            if frame.seq != seq:
-                continue
-            if frame.cmd == e77_radio.CMD_SET_NETWORK and not (frame.flags & e77_radio.FLAG_ERROR):
-                print("E77 radio network = 0x%04X" % (network_id & 0xFFFF))
-                return True
-
-    print("E77 radio network set failed")
-    return False
+    return transport.set_network(network_id, timeout_ms)
 
 
 def tx_bytes(data: bytes):
-    global radio_seq
-
-    if TRANSPORT == "e77":
-        for attempt in range(3):
-            seq = radio_seq
-            uart.write(e77_radio.build_send_nfcp(seq, data))
-            radio_seq = (radio_seq + 1) & 0xFF
-            if radio_seq == 0:
-                radio_seq = 1
-
-            deadline = time.ticks_add(time.ticks_ms(), 250)
-            while time.ticks_diff(deadline, time.ticks_ms()) > 0:
-                if not uart.any():
-                    time.sleep_ms(2)
-                    continue
-
-                rx_data = uart.read(32) or b""
-                for b in rx_data:
-                    frame = radio_parser.feed(b)
-                    if not frame:
-                        continue
-                    if frame.cmd == e77_radio.CMD_SEND_NFCP and frame.seq == seq:
-                        if frame.payload and frame.payload[0] == 0:
-                            return
-                        break
-
-            time.sleep_ms(20 + attempt * 20)
-
-        print("E77 SEND_NFCP failed")
-        return
-
-    if de is not None:
-        de.value(1)
-        time.sleep_ms(1)
-    uart.write(data)
-    uart.flush()
-    if de is not None:
-        time.sleep_ms(TX_TURNAROUND_MS)
-        de.value(0)
+    transport.tx_bytes(data)
 
 
-run_radio_update_if_requested()
-radio_boot_ping()
+transport.run_radio_update_if_requested(RADIO_UPDATE_ON_BOOT)
+transport.radio_boot_ping(RADIO_BOOT_PING)
 set_local_radio_network(RADIO_NETWORK_ID)
 
 
@@ -490,34 +350,18 @@ def handle(pkt):
 
 
 def handle_uart_byte(b):
-    if TRANSPORT == "e77":
-        frame = radio_parser.feed(b)
-        if not frame:
-            return
-        if frame.cmd != e77_radio.CMD_NFCP_RX:
-            return
-
-        rx_info = e77_radio.parse_nfcp_rx(frame.payload)
-        if not rx_info:
-            return
-
-        for nfcp_b in rx_info.get("nfcp_frame", b""):
-            pkt = parser.feed(nfcp_b)
-            if pkt and address_matches(pkt):
-                handle(pkt)
-        return
-
-    pkt = parser.feed(b)
-    if pkt and address_matches(pkt):
-        handle(pkt)
+    for nfcp_b in transport.nfcp_bytes_from_uart_byte(b):
+        pkt = parser.feed(nfcp_b)
+        if pkt and address_matches(pkt):
+            handle(pkt)
 
 
 while True:
-    if uart.any():
-        b = uart.read(1)
-        if b:
+    if transport.any():
+        b = transport.read_byte()
+        if b is not None:
             last_rx_ms = time.ticks_ms()
-            handle_uart_byte(b[0])
+            handle_uart_byte(b)
 
     time.sleep_ms(1)
 

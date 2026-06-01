@@ -31,6 +31,7 @@ try {
     Invoke-MpRemote @("connect", $Port, "fs", "cp", ".\main\slave_main.py", ":main.py")
     Invoke-MpRemote @("connect", $Port, "fs", "cp", ".\main\nfcp.py", ":nfcp.py")
     Invoke-MpRemote @("connect", $Port, "fs", "cp", ".\main\e77_radio.py", ":e77_radio.py")
+    Invoke-MpRemote @("connect", $Port, "fs", "cp", ".\main\module_transport.py", ":module_transport.py")
     Invoke-MpRemote @("connect", $Port, "fs", "cp", ".\main\e77_bootloader.py", ":e77_bootloader.py")
     Invoke-MpRemote @("connect", $Port, "fs", "cp", ".\main\mc33996_driver.py", ":mc33996_driver.py")
 
