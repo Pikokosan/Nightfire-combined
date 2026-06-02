@@ -148,6 +148,31 @@ class ModuleTransport:
         print("E77 radio network set failed")
         return False
 
+    def get_radio_info(self, timeout_ms=1000):
+        if self.transport != "e77":
+            return None
+
+        seq = self.next_radio_seq()
+        self.uart.write(e77_radio.build_get_info(seq))
+        deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
+
+        while time.ticks_diff(deadline, time.ticks_ms()) > 0:
+            if not self.uart.any():
+                time.sleep_ms(5)
+                continue
+
+            data = self.uart.read(32) or b""
+            for b in data:
+                frame = self.radio_parser.feed(b)
+                if not frame:
+                    continue
+                if frame.seq != seq:
+                    continue
+                if frame.cmd == e77_radio.CMD_GET_INFO and not (frame.flags & e77_radio.FLAG_ERROR):
+                    return e77_radio.parse_get_info(frame.payload)
+
+        return None
+
     def tx_bytes(self, data):
         if self.transport == "e77":
             for attempt in range(3):

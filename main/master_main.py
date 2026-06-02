@@ -20,6 +20,7 @@ MODULE_CONTINUITY_AUTO_CHECK_MS = 4000
 DISCOVER_IDLE_TIMEOUT_MS = 3000
 DISCOVER_MAX_SCAN_MS = 30000
 SPEED_TEST_TIMEOUT_MS = 2000
+OTA_CHUNK_SIZE = 160
 
 SRC_ID = 0x01
 DEVICE_DB_PATH = "nfcp_devices.json"
@@ -182,6 +183,18 @@ def set_local_radio_network(network_id, timeout_ms=1000):
     )
 
 
+def get_local_radio_info(timeout_ms=1000):
+    if TRANSPORT != "e77":
+        return None
+
+    frame = local_radio_command(e77_radio.CMD_GET_INFO, b"", timeout_ms)
+    if not frame:
+        return None
+    if frame.cmd != e77_radio.CMD_GET_INFO or (frame.flags & e77_radio.FLAG_ERROR):
+        return None
+    return e77_radio.parse_get_info(frame.payload)
+
+
 def check_radio_ready(network_id):
     if TRANSPORT != "e77":
         return True
@@ -301,6 +314,32 @@ def parse_continuity_rsp(data, cue_count):
         return out
 
     return [False] * cue_count
+
+
+def read_text_field(data, index):
+    if index >= len(data):
+        return "", index
+    n = data[index]
+    index += 1
+    if index + n > len(data):
+        return "", len(data)
+    try:
+        text = bytes(data[index:index + n]).decode()
+    except:
+        text = ""
+    return text, index + n
+
+
+def parse_info_rsp(data):
+    index = 0
+    app_name, index = read_text_field(data, index)
+    app_version, index = read_text_field(data, index)
+    radio_version, index = read_text_field(data, index)
+    return {
+        "app_name": app_name,
+        "app_version": app_version,
+        "radio_version": radio_version
+    }
 
 
 def poll_responses(max_packets=8):
@@ -481,6 +520,66 @@ def request_ping_for_uid(uid_int, timeout_ms=SPEED_TEST_TIMEOUT_MS):
     return None
 
 
+def request_info_for_uid(uid_int, timeout_ms=1000):
+    drain_uart()
+    rs485_write(nfcp_tx.build_info_request(uid_int))
+
+    deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
+    while time.ticks_diff(deadline, time.ticks_ms()) > 0:
+        packets = poll_responses()
+        for pkt in packets:
+            if pkt["cmd"] != nfcp.CMD_INFO_RSP:
+                continue
+            if (pkt["src_unique"] & 0xFFFFFFFF) != (uid_int & 0xFFFFFFFF):
+                continue
+
+            update_radio_link_from_packet(pkt)
+            return parse_info_rsp(pkt.get("data", b""))
+
+        time.sleep_ms(2)
+
+    return None
+
+
+def info_scan(timeout_ms=1000):
+    db = load_device_db()
+    changed = False
+    results = []
+
+    for dev in db.get("devices", []):
+        uid_text = dev.get("unique_id", "0x00000000")
+        try:
+            uid = int(uid_text, 16) & 0xFFFFFFFF
+        except:
+            continue
+
+        info = request_info_for_uid(uid, timeout_ms)
+        if info:
+            dev["app_name"] = info.get("app_name", "")
+            dev["app_version"] = info.get("app_version", "")
+            dev["radio_firmware_version"] = info.get("radio_version", "")
+            dev["info_last_epoch"] = time.time()
+
+            link = get_last_radio_link(uid_text)
+            if link:
+                if link.get("radio_rssi", None) is not None:
+                    dev["radio_rssi"] = link["radio_rssi"]
+                if link.get("radio_snr", None) is not None:
+                    dev["radio_snr"] = link["radio_snr"]
+                dev["radio_last_epoch"] = link.get("radio_last_epoch", time.time())
+
+            results.append({
+                "unique_id": uid_text,
+                "info": info
+            })
+            changed = True
+
+    if changed:
+        save_device_db(db)
+
+    return results
+
+
 def continuity_scan(timeout_ms=300):
     db = load_device_db()
     changed = False
@@ -613,6 +712,82 @@ def request_set_network_for_uid(uid_int, new_network, timeout_ms=800):
     return False
 
 
+def wait_for_ack(uid_int, orig_cmd, timeout_ms=1000):
+    deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
+    while time.ticks_diff(deadline, time.ticks_ms()) > 0:
+        packets = poll_responses()
+        for pkt in packets:
+            if (pkt["src_unique"] & 0xFFFFFFFF) != (uid_int & 0xFFFFFFFF):
+                continue
+
+            data = pkt.get("data", b"")
+            if pkt["cmd"] == nfcp.CMD_ACK and len(data) >= 2:
+                if data[0] == orig_cmd:
+                    return data[1] == nfcp.ACK_OK
+
+            if pkt["cmd"] == nfcp.CMD_NACK and len(data) >= 2:
+                if data[0] == orig_cmd:
+                    return False
+
+        time.sleep_ms(2)
+
+    return False
+
+
+def simple_checksum_file(path):
+    checksum = 0
+    size = 0
+    with open(path, "rb") as f:
+        while True:
+            data = f.read(128)
+            if not data:
+                break
+            size += len(data)
+            for b in data:
+                if not isinstance(b, int):
+                    b = ord(b)
+                checksum = (checksum + b) & 0xFFFFFFFF
+    return size, checksum
+
+
+def ota_send_file_for_uid(uid_int, source_path, target_path, progress_cb=None):
+    size, checksum = simple_checksum_file(source_path)
+
+    drain_uart()
+    rs485_write(nfcp_tx.build_ota_begin(uid_int, target_path, size, checksum))
+    if not wait_for_ack(uid_int, nfcp.CMD_OTA_BEGIN, 2000):
+        return False
+
+    offset = 0
+    try:
+        with open(source_path, "rb") as f:
+            while offset < size:
+                chunk = f.read(OTA_CHUNK_SIZE)
+                if not chunk:
+                    break
+
+                drain_uart()
+                rs485_write(nfcp_tx.build_ota_write(uid_int, offset, chunk))
+                if not wait_for_ack(uid_int, nfcp.CMD_OTA_WRITE, 2000):
+                    rs485_write(nfcp_tx.build_ota_abort(uid_int))
+                    return False
+
+                offset += len(chunk)
+                if progress_cb:
+                    progress_cb(offset, size)
+
+        drain_uart()
+        rs485_write(nfcp_tx.build_ota_end(uid_int))
+        return wait_for_ack(uid_int, nfcp.CMD_OTA_END, 3000)
+    except Exception as e:
+        print("OTA send failed:", e)
+        try:
+            rs485_write(nfcp_tx.build_ota_abort(uid_int))
+        except:
+            pass
+        return False
+
+
 nfcp.load_device_db = load_device_db
 nfcp.save_device_db = save_device_db
 nfcp.clear_device_db = clear_device_db
@@ -627,11 +802,14 @@ nfcp.request_continuity_for_uid = request_continuity_for_uid
 nfcp.continuity_scan = continuity_scan
 nfcp.request_ping_for_uid = request_ping_for_uid
 nfcp.speed_test_scan = speed_test_scan
+nfcp.request_info_for_uid = request_info_for_uid
+nfcp.info_scan = info_scan
 nfcp.arm = arm
 nfcp.disarm = disarm
 nfcp.fire_unique = fire_unique
 nfcp.set_group = set_group
 nfcp.request_set_network_for_uid = request_set_network_for_uid
+nfcp.ota_send_file_for_uid = ota_send_file_for_uid
 
 
 class NFCPGui:
@@ -730,6 +908,7 @@ class NFCPGui:
             "arm_label",
             "speed_label",
             "radio_link_label",
+            "version_label",
             "summary",
             "grid_box",
             "cue_buttons",
@@ -909,6 +1088,26 @@ class NFCPGui:
             self.format_rssi(self.selected_module),
             self.format_snr(self.selected_module)
         )
+
+    def format_selected_versions(self):
+        if not self.selected_module:
+            return "FW: --   Radio: --"
+
+        app_name = self.selected_module.get("app_name", "")
+        app_version = self.selected_module.get("app_version", "")
+        radio_version = self.selected_module.get("radio_firmware_version", "")
+
+        if app_name and app_version:
+            fw_text = "%s %s" % (app_name, app_version)
+        elif app_version:
+            fw_text = app_version
+        else:
+            fw_text = "--"
+
+        if not radio_version:
+            radio_version = "--"
+
+        return "FW: %s   Radio: %s" % (fw_text, radio_version)
 
     def format_module_continuity_summary(self, module):
         cue_count = self.get_module_cue_count(module)
@@ -1414,13 +1613,22 @@ class NFCPGui:
         radio_title.set_text("Radio")
         radio_title.set_pos(430, 85)
 
+        radio_info = get_local_radio_info(300)
+        radio_version = "--"
+        if radio_info:
+            radio_version = radio_info.get("firmware_version", "") or "--"
+
+        radio_version_label = lv.label(scr)
+        radio_version_label.set_text("Radio FW: %s" % radio_version)
+        radio_version_label.set_pos(430, 105)
+
         self.make_button(
             scr,
             "RADIO UPDATE",
             430,
-            125,
+            135,
             250,
-            65,
+            55,
             self.show_radio_update
         )
 
@@ -1448,7 +1656,180 @@ class NFCPGui:
             self.pair_modules_to_network
         )
 
+        self.make_button(
+            scr,
+            "MODULE OTA",
+            430,
+            310,
+            250,
+            55,
+            self.show_module_ota
+        )
+
         self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_main_menu)
+
+    def file_exists(self, path):
+        try:
+            os.stat(path)
+            return True
+        except:
+            return False
+
+    def find_module_ota_manifest(self):
+        self.mount_sd_for_radio_update()
+        paths = (
+            "/sd/module_ota.json",
+            "/sd/firmware/module_ota.json",
+            "/module_ota.json",
+            "module_ota.json",
+        )
+
+        for path in paths:
+            if self.file_exists(path):
+                try:
+                    with open(path, "r") as f:
+                        manifest = json.load(f)
+                    manifest["manifest_path"] = path
+                    return manifest
+                except Exception as e:
+                    print("Module OTA manifest read failed:", e)
+                    return None
+
+        return None
+
+    def resolve_module_ota_source(self, manifest_path, source):
+        if source.startswith("/"):
+            return source
+
+        base = "/sd"
+        if manifest_path.startswith("/sd/firmware/"):
+            base = "/sd/firmware"
+        elif manifest_path.startswith("/"):
+            base = "/"
+
+        if base == "/":
+            return "/" + source
+        return base + "/" + source
+
+    def show_module_ota(self, event=None):
+        scr = self.new_screen("Module OTA", "module_ota")
+        self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_settings)
+
+        manifest = self.find_module_ota_manifest()
+
+        label = lv.label(scr)
+        if not manifest:
+            label.set_text(
+                "No module OTA manifest found.\n"
+                "Use /sd/module_ota.json."
+            )
+            label.align(lv.ALIGN.CENTER, 0, -35)
+            return
+
+        files = manifest.get("files", [])
+        label.set_text(
+            "Manifest found:\n%s\nFiles: %d\nModules: %d" %
+            (
+                manifest.get("manifest_path", "--"),
+                len(files),
+                len(self.modules)
+            )
+        )
+        label.align(lv.ALIGN.CENTER, 0, -60)
+
+        self.make_button(
+            scr,
+            "START OTA",
+            250,
+            285,
+            300,
+            75,
+            self.run_module_ota
+        )
+
+    def module_matches_ota_file(self, module, item):
+        target_type = item.get("device_type", None)
+        if target_type is None:
+            return True
+
+        try:
+            module_type = int(module.get("device_type", "0"), 16)
+        except:
+            module_type = -1
+
+        try:
+            if isinstance(target_type, str):
+                target_type = int(target_type, 16)
+            else:
+                target_type = int(target_type)
+        except:
+            return False
+
+        return module_type == target_type
+
+    def run_module_ota(self, event=None):
+        manifest = self.find_module_ota_manifest()
+        if not manifest:
+            self.set_status("No module OTA manifest")
+            self.show_module_ota()
+            return
+
+        files = manifest.get("files", [])
+        if not files:
+            self.set_status("Module OTA manifest empty")
+            self.show_module_ota()
+            return
+
+        self.load_modules_from_db()
+        total_ok = 0
+        total_failed = 0
+
+        for module in self.modules:
+            uid_text = module.get("unique_id", "0x00000000")
+            try:
+                uid = int(uid_text, 16) & 0xFFFFFFFF
+            except:
+                continue
+
+            for item in files:
+                if not self.module_matches_ota_file(module, item):
+                    continue
+
+                source = item.get("source", "")
+                target = item.get("target", "")
+                if not source or not target:
+                    total_failed += 1
+                    continue
+
+                source_path = self.resolve_module_ota_source(
+                    manifest.get("manifest_path", ""),
+                    source
+                )
+                if not self.file_exists(source_path):
+                    print("Module OTA source missing:", source_path)
+                    total_failed += 1
+                    continue
+
+                self.show_loading_screen(
+                    "Module OTA...\n%s -> %s" %
+                    (self.format_uid(uid_text), target)
+                )
+
+                def progress(done, size):
+                    if hasattr(self, "loading_label"):
+                        self.loading_label.set_text(
+                            "Module OTA...\n%s %d/%d" %
+                            (self.format_uid(uid_text), done, size)
+                        )
+                        self.flush_ui()
+
+                if nfcp.ota_send_file_for_uid(uid, source_path, target, progress):
+                    total_ok += 1
+                else:
+                    total_failed += 1
+
+        self.show_module_ota()
+        self.set_status("Module OTA complete - %d ok, %d failed" % (total_ok, total_failed))
 
     def mount_sd_for_radio_update(self):
         if sdcard_driver is None:
@@ -2274,6 +2655,14 @@ class NFCPGui:
             self.set_status("Speed test failed")
             speed_results = []
 
+        try:
+            self.show_loading_screen("Refreshing modules...\nReading versions...")
+            info_results = nfcp.info_scan()
+        except Exception as e:
+            print("Info scan failed:", e)
+            self.set_status("Info scan failed")
+            info_results = []
+
         self.load_modules_from_db()
         self.update_script_module_mismatch()
         self.update_open_script_cues()
@@ -2281,11 +2670,16 @@ class NFCPGui:
 
         count = len(results) if results else 0
         speed_count = len(speed_results) if speed_results else 0
+        info_count = len(info_results) if info_results else 0
         print("Continuity checked:", count)
         print("Speed tested:", speed_count)
+        print("Versions checked:", info_count)
 
         self.show_modules_menu()
-        self.set_status("Refresh complete - %d checked, %d speed tested" % (count, speed_count))
+        self.set_status(
+            "Refresh complete - %d checked, %d speed, %d versions" %
+            (count, speed_count, info_count)
+        )
 
     def reset_modules(self, event=None):
         self.set_status("Clearing module database...")
@@ -2316,6 +2710,7 @@ class NFCPGui:
         final_status = "Discovery complete"
         cont_count = 0
         speed_count = 0
+        info_count = 0
 
         try:
             self.modules = nfcp.discover()
@@ -2328,6 +2723,10 @@ class NFCPGui:
             self.show_loading_screen("Discovering modules...\nRunning speed tests...")
             speed_results = nfcp.speed_test_scan()
             speed_count = len(speed_results) if speed_results else 0
+
+            self.show_loading_screen("Discovering modules...\nReading versions...")
+            info_results = nfcp.info_scan()
+            info_count = len(info_results) if info_results else 0
 
             self.load_modules_from_db()
             self.update_script_module_mismatch()
@@ -2343,8 +2742,8 @@ class NFCPGui:
         self.update_arm_button()
         if final_status == "Discovery complete":
             self.set_status(
-                "Discovery complete - %d checked, %d speed tested" %
-                (cont_count, speed_count)
+                "Discovery complete - %d checked, %d speed, %d versions" %
+                (cont_count, speed_count, info_count)
             )
         else:
             self.set_status(final_status)
@@ -2366,9 +2765,10 @@ class NFCPGui:
         self.continuity = self.get_module_saved_continuity(module)
         self.last_module_continuity_auto_ms = time.ticks_ms()
 
-        self.show_loading_screen("Opening module...\nRunning speed and continuity checks...")
+        self.show_loading_screen("Opening module...\nRunning speed, continuity, and version checks...")
         self.request_selected_speed_test()
         self.request_selected_continuity()
+        self.request_selected_info()
         self.show_module_continuity()
 
     def show_module_continuity(self, event=None):
@@ -2421,6 +2821,10 @@ class NFCPGui:
         self.radio_link_label = lv.label(scr)
         self.radio_link_label.set_text(self.format_selected_radio_link())
         self.radio_link_label.set_pos(25, 82)
+
+        self.version_label = lv.label(scr)
+        self.version_label.set_text(self.format_selected_versions())
+        self.version_label.set_pos(25, 102)
 
         self.build_fixed_cue_grid(scr)
 
@@ -2549,6 +2953,39 @@ class NFCPGui:
             print("Speed test failed:", e)
             self.set_status("Speed test failed")
 
+    def request_selected_info(self):
+        if not self.selected_module:
+            self.set_status("No module selected")
+            return
+
+        uid_text = self.selected_module.get("unique_id", "0x00000000")
+
+        try:
+            uid = int(uid_text, 16) & 0xFFFFFFFF
+        except:
+            self.set_status("Bad UID")
+            return
+
+        self.set_status("Reading versions...")
+
+        try:
+            info = nfcp.request_info_for_uid(uid)
+            if info:
+                self.save_selected_module_info(info)
+                self.set_status("Versions updated")
+            else:
+                self.set_status("Version read timeout")
+
+            if hasattr(self, "version_label"):
+                self.version_label.set_text(self.format_selected_versions())
+
+            if hasattr(self, "radio_link_label"):
+                self.radio_link_label.set_text(self.format_selected_radio_link())
+
+        except Exception as e:
+            print("Info read failed:", e)
+            self.set_status("Version read failed")
+
     def save_selected_module_speed_test(self, ping_ms):
         if not self.selected_module:
             return
@@ -2598,6 +3035,56 @@ class NFCPGui:
             self.load_modules_from_db()
         except Exception as e:
             print("Speed test DB save failed:", e)
+
+    def save_selected_module_info(self, info):
+        if not self.selected_module:
+            return
+
+        uid_text = self.selected_module.get("unique_id", None)
+
+        if not uid_text:
+            return
+
+        try:
+            db = nfcp.load_device_db()
+            idx = nfcp.index_db_by_unique(db)
+        except Exception as e:
+            print("Info DB load failed:", e)
+            return
+
+        dev = idx.get(uid_text)
+
+        if not dev:
+            dev = self.selected_module
+
+        dev["app_name"] = info.get("app_name", "")
+        dev["app_version"] = info.get("app_version", "")
+        dev["radio_firmware_version"] = info.get("radio_version", "")
+        dev["info_last_epoch"] = time.time()
+
+        link = nfcp.get_last_radio_link(uid_text)
+        if link:
+            if link.get("radio_rssi", None) is not None:
+                dev["radio_rssi"] = link["radio_rssi"]
+            if link.get("radio_snr", None) is not None:
+                dev["radio_snr"] = link["radio_snr"]
+            dev["radio_last_epoch"] = link.get("radio_last_epoch", time.time())
+
+        idx[uid_text] = dev
+        self.selected_module = dev
+
+        db["devices"] = sorted(
+            idx.values(),
+            key=lambda d: self.group_to_int_value(
+                d.get("group_id", None)
+            )
+        )
+
+        try:
+            nfcp.save_device_db(db)
+            self.load_modules_from_db()
+        except Exception as e:
+            print("Info DB save failed:", e)
 
     def save_selected_module_continuity(self, ok):
         if not self.selected_module:

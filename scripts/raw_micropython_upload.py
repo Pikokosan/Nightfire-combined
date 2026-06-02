@@ -43,6 +43,16 @@ def wait_for(port, marker, timeout=10):
     raise RuntimeError("Timed out waiting for %r. Last output: %r" % (marker, bytes(out[-500:])))
 
 
+def write_stdout_bytes(data):
+    stdout_buffer = getattr(sys.stdout, "buffer", None)
+    if stdout_buffer:
+        stdout_buffer.write(data)
+        stdout_buffer.flush()
+    else:
+        sys.stdout.write(data.decode("utf-8", "replace"))
+        sys.stdout.flush()
+
+
 def stop_running_program(port, timeout=12):
     end = time.time() + timeout
     out = bytearray()
@@ -53,8 +63,7 @@ def stop_running_program(port, timeout=12):
         chunk = read_available(port, 0.05)
         if chunk:
             out.extend(chunk)
-            sys.stdout.buffer.write(chunk)
-            sys.stdout.buffer.flush()
+            write_stdout_bytes(chunk)
             if b">>>" in out:
                 return
 
@@ -149,7 +158,7 @@ def main():
 
         try:
             for copy in args.copies:
-                local_path, remote_path = copy.split(":", 1)
+                local_path, remote_path = copy.rsplit(":", 1)
                 upload_file(port, local_path, remote_path)
 
             print("Resetting device...")

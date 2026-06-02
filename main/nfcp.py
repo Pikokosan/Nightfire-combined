@@ -33,6 +33,14 @@ CMD_DISCOVER_RSP = 0x41
 CMD_ACK          = 0x50
 CMD_NACK         = 0x51
 
+CMD_INFO_REQ     = 0x52
+CMD_INFO_RSP     = 0x53
+
+CMD_OTA_BEGIN    = 0x60
+CMD_OTA_WRITE    = 0x61
+CMD_OTA_END      = 0x62
+CMD_OTA_ABORT    = 0x63
+
 # speed test / ping
 CMD_PING         = 0x7F   # Unique-only ping for latency/throughput tests
 PING_REPLY_BYTE  = 0xAA   # Used when CMD_PING payload is empty
@@ -46,6 +54,7 @@ NACK_REJECTED_ARMED = 0x01
 NACK_BAD_LENGTH     = 0x02
 NACK_INVALID_VALUE  = 0x03
 NACK_INTERNAL_ERROR = 0x04
+NACK_BUSY           = 0x05
 
 
 def crc16_ccitt(data: bytes, crc=0xFFFF) -> int:
@@ -191,6 +200,58 @@ class NFCP:
             (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
             bytes([CMD_PING]) +
             data
+        )
+        return self._frame(SOF_UNIQUE, payload)
+
+    def build_info_request(self, target_unique: int) -> bytes:
+        payload = (
+            bytes([self.node_id]) +
+            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes([CMD_INFO_REQ])
+        )
+        return self._frame(SOF_UNIQUE, payload)
+
+    def build_ota_begin(self, target_unique: int, path: str, size: int, checksum: int) -> bytes:
+        path_bytes = path.encode()
+        if len(path_bytes) > 64:
+            raise NFCPError("OTA path too long")
+        data = (
+            (size & 0xFFFFFFFF).to_bytes(4, "big") +
+            (checksum & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes([len(path_bytes) & 0xFF]) +
+            path_bytes
+        )
+        payload = (
+            bytes([self.node_id]) +
+            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes([CMD_OTA_BEGIN]) +
+            data
+        )
+        return self._frame(SOF_UNIQUE, payload)
+
+    def build_ota_write(self, target_unique: int, offset: int, chunk: bytes) -> bytes:
+        payload = (
+            bytes([self.node_id]) +
+            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes([CMD_OTA_WRITE]) +
+            (offset & 0xFFFFFFFF).to_bytes(4, "big") +
+            chunk
+        )
+        return self._frame(SOF_UNIQUE, payload)
+
+    def build_ota_end(self, target_unique: int) -> bytes:
+        payload = (
+            bytes([self.node_id]) +
+            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes([CMD_OTA_END])
+        )
+        return self._frame(SOF_UNIQUE, payload)
+
+    def build_ota_abort(self, target_unique: int) -> bytes:
+        payload = (
+            bytes([self.node_id]) +
+            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes([CMD_OTA_ABORT])
         )
         return self._frame(SOF_UNIQUE, payload)
 
@@ -409,7 +470,17 @@ class NFCPStreamParser:
             pkt["target"] = int.from_bytes(payload[1:3], "big")
             pkt["cmd"] = payload[3]
             pkt["data"] = payload[4:]
-            if pkt["cmd"] in (CMD_SET_GROUP, CMD_SET_UNIQUE, CMD_SET_NETWORK, CMD_CONTINUITY_REQ):
+            if pkt["cmd"] in (
+                CMD_SET_GROUP,
+                CMD_SET_UNIQUE,
+                CMD_SET_NETWORK,
+                CMD_CONTINUITY_REQ,
+                CMD_INFO_REQ,
+                CMD_OTA_BEGIN,
+                CMD_OTA_WRITE,
+                CMD_OTA_END,
+                CMD_OTA_ABORT,
+            ):
                 return None
 
         elif self.frame_type == SOF_UNIQUE:
@@ -429,7 +500,17 @@ class NFCPStreamParser:
 
         if pkt["cmd"] == CMD_FIRE and self.frame_type == SOF_BROADCAST:
             return None
-        if pkt["cmd"] in (CMD_SET_GROUP, CMD_SET_UNIQUE, CMD_SET_NETWORK, CMD_CONTINUITY_REQ) and self.frame_type != SOF_UNIQUE:
+        if pkt["cmd"] in (
+            CMD_SET_GROUP,
+            CMD_SET_UNIQUE,
+            CMD_SET_NETWORK,
+            CMD_CONTINUITY_REQ,
+            CMD_INFO_REQ,
+            CMD_OTA_BEGIN,
+            CMD_OTA_WRITE,
+            CMD_OTA_END,
+            CMD_OTA_ABORT,
+        ) and self.frame_type != SOF_UNIQUE:
             return None
 
         return pkt

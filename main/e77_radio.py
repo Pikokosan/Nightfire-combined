@@ -77,6 +77,32 @@ def build_set_network(seq, network_id):
     return build_frame(seq, CMD_SET_NETWORK, int_to_be(network_id & 0xFFFF, 2))
 
 
+def build_get_info(seq):
+    return build_frame(seq, CMD_GET_INFO)
+
+
+def parse_get_info(payload):
+    if len(payload) < 8:
+        return None
+
+    info = {
+        "node_id": int_from_be(payload[0:4]),
+        "group_id": int_from_be(payload[4:6]),
+        "network_id": int_from_be(payload[6:8]),
+        "firmware_version": "",
+    }
+
+    if len(payload) > 8:
+        version_len = byte_value(payload, 8)
+        if version_len > 0 and len(payload) >= 9 + version_len:
+            try:
+                info["firmware_version"] = bytes(payload[9:9 + version_len]).decode()
+            except:
+                info["firmware_version"] = ""
+
+    return info
+
+
 def parse_nfcp_rx(payload):
     if len(payload) < 3:
         return None

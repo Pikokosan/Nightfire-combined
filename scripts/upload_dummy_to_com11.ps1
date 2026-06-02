@@ -32,6 +32,7 @@ try {
     Invoke-MpRemote @("connect", $Port, "fs", "cp", ".\main\nfcp.py", ":nfcp.py")
     Invoke-MpRemote @("connect", $Port, "fs", "cp", ".\main\e77_radio.py", ":e77_radio.py")
     Invoke-MpRemote @("connect", $Port, "fs", "cp", ".\main\module_transport.py", ":module_transport.py")
+    Invoke-MpRemote @("connect", $Port, "fs", "cp", ".\main\module_ota.py", ":module_ota.py")
     Invoke-MpRemote @("connect", $Port, "fs", "cp", ".\main\e77_bootloader.py", ":e77_bootloader.py")
 
     Write-Host "Resetting device..."

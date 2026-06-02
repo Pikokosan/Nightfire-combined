@@ -11,6 +11,7 @@ Current firmware is set up for the E77 radio transport.
 - `main/nfcp.py` - shared NFCP framing, escaping, CRC, commands, and packet builders.
 - `main/e77_radio.py` - local UART protocol used to send NFCP frames through the E77 radio.
 - `main/module_transport.py` - shared dummy/slave UART transport and radio update helper.
+- `main/module_ota.py` - shared dummy/slave staged-file OTA update helper.
 - `main/e77_bootloader.py` - device-side E77 radio firmware updater.
 - `main/master_main.py` - Waveshare ESP32-S3-LCD-4.3 master controller GUI.
 - `main/slave_main.py` - real 16-cue module firmware using the MC33996 driver.
@@ -18,6 +19,8 @@ Current firmware is set up for the E77 radio transport.
 - `scripts/upload_master_to_com7.ps1` - installs master firmware as `main.py`.
 - `scripts/upload_slave_to_com10.ps1` - installs slave firmware as `main.py`.
 - `scripts/upload_dummy_to_com11.ps1` - installs dummy firmware as `main.py`.
+- `scripts/build_module_ota_package.ps1` - builds the customer update package.
+- `scripts/install_master_update.ps1` - installs packaged master firmware over USB.
 - `scripts/update_e77_radio_firmware.py` - PC-side E77 radio firmware updater for a radio connected directly to the computer.
 
 ## Default Ports
@@ -39,6 +42,7 @@ The VS Code build tasks run the same scripts:
 - `Master device: upload`
 - `Slave device: upload`
 - `Dummy device: upload`
+- `Nightfire update package: build`
 
 ## Device Firmware Updates
 
@@ -60,6 +64,7 @@ Slave upload includes:
 - `nfcp.py`
 - `e77_radio.py`
 - `module_transport.py`
+- `module_ota.py`
 - `e77_bootloader.py`
 - `mc33996_driver.py`
 
@@ -69,7 +74,39 @@ Dummy upload includes:
 - `nfcp.py`
 - `e77_radio.py`
 - `module_transport.py`
+- `module_ota.py`
 - `e77_bootloader.py`
+
+## Customer Update Package
+
+Build a full customer package with the VS Code task
+`Nightfire update package: build`, or run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_module_ota_package.ps1
+```
+
+The task writes:
+
+- `dist/nightfire_update_package/`
+- `dist/nightfire_update_<version>.zip`
+
+The package contains:
+
+- `master_update/` - master controller firmware files and `master_update.json`
+- root-level module OTA files - copied to the master SD card for module updates
+- `install_master_update.ps1` - PC-side master updater
+- `raw_micropython_upload.py` - upload helper used by the master updater
+
+To update the master from the package:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install_master_update.ps1 -Port COM7
+```
+
+To update modules, copy the package root files to the master SD card, then use
+Settings > Module OTA on the master. Keep `module_ota.json`, and when present
+`e77_radio.bin`, `latest.json`, and `radio_update.flag`, at the SD card root.
 
 ## Radio Firmware Updates From The Master
 
@@ -104,6 +141,68 @@ Example `latest.json`:
 
 The `crc32` field is optional. If present, the updater verifies the `.bin`
 before writing it.
+
+## Module Firmware Versioning And OTA Updates
+
+Slave and dummy modules report their module firmware name/version and attached
+E77 radio firmware version through NFCP `INFO_REQ` / `INFO_RSP`. The master reads
+this information during Discover and Refresh and shows it in the module detail
+screen.
+
+The master also has a Settings > Module OTA option. It reads
+`/sd/module_ota.json` or `/sd/firmware/module_ota.json` and sends each listed
+file to matching discovered modules over NFCP. The module writes to a temporary
+`.ota` file, verifies the simple 32-bit additive checksum, then renames it into
+place.
+
+Example `module_ota.json`:
+
+```json
+{
+  "files": [
+    {
+      "source": "slave_main.py",
+      "target": "/main.py",
+      "device_type": "0x20"
+    },
+    {
+      "source": "dummy_main.py",
+      "target": "/main.py",
+      "device_type": "0x10"
+    },
+    {
+      "source": "module_transport.py",
+      "target": "/module_transport.py"
+    },
+    {
+      "source": "module_ota.py",
+      "target": "/module_ota.py"
+    }
+  ]
+}
+```
+
+Customer OTA packages can be built with the VS Code task
+`Nightfire update package: build`. The task writes:
+
+- `dist/nightfire_update_package/`
+- `dist/nightfire_update_<version>.zip`
+
+Copy the package folder contents to the root of the master's SD card. If the
+E77 radio firmware build is available, the package also includes the radio
+firmware update alongside the module app update:
+
+- `e77_radio.bin`
+- `latest.json`
+- `radio_update.flag`
+
+Those files are sent to each module with the app update. After updating
+`main.py`, reset the module. On the next boot the module sees
+`radio_update.flag`, flashes the attached E77 radio using `latest.json`, clears
+the flag after success, and then returns to normal operation.
+
+The module talks to the radio app at the configured app baud rate, while the
+STM32 ROM bootloader update step still uses `115200`.
 
 ## Radio Firmware Updates From Dummy Or Slave Devices
 

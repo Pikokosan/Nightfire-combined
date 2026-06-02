@@ -4,6 +4,7 @@ import urandom
 from nfcp import *
 import e77_radio
 from module_transport import ModuleTransport
+from module_ota import ModuleOtaSession
 
 
 UART_ID = 0
@@ -12,6 +13,8 @@ RADIO_BOOT_PING = True
 RADIO_UPDATE_ON_BOOT = True
 RADIO_APP_BAUD = 256000
 RADIO_BOOTLOADER_BAUD = 115200
+APP_FIRMWARE_NAME = "dummy"
+APP_FIRMWARE_VERSION = "0.2.0"
 
 UART_BAUD = RADIO_APP_BAUD if TRANSPORT == "e77" else 256000
 UART_TX_PIN = 0
@@ -113,6 +116,7 @@ transport = ModuleTransport(
 
 parser = NFCPStreamParser()
 nfcp = NFCP(node_id=0x01)
+ota_session = ModuleOtaSession()
 
 ARMED = False
 GROUP_ID, UNIQUE_ID, CUE_COUNT, DEVICE_TYPE, RADIO_NETWORK_ID = load_cfg()
@@ -149,6 +153,55 @@ def tx_bytes(data: bytes):
 transport.run_radio_update_if_requested(RADIO_UPDATE_ON_BOOT)
 transport.radio_boot_ping(RADIO_BOOT_PING)
 set_local_radio_network(RADIO_NETWORK_ID)
+
+
+def encode_text_field(text):
+    try:
+        data = text.encode()
+    except:
+        data = b""
+    if len(data) > 63:
+        data = data[:63]
+    return bytes([len(data)]) + data
+
+
+def build_info_payload():
+    radio_info = transport.get_radio_info(300)
+    radio_version = ""
+    if radio_info:
+        radio_version = radio_info.get("firmware_version", "")
+
+    return (
+        encode_text_field(APP_FIRMWARE_NAME) +
+        encode_text_field(APP_FIRMWARE_VERSION) +
+        encode_text_field(radio_version)
+    )
+
+
+def handle_ota_begin(data):
+    if len(data) < 9:
+        return False
+
+    size = int.from_bytes(data[0:4], "big")
+    checksum = int.from_bytes(data[4:8], "big")
+    path_len = data[8]
+    if len(data) != 9 + path_len:
+        return False
+
+    try:
+        path = bytes(data[9:]).decode()
+    except:
+        return False
+
+    return ota_session.begin(path, size, checksum)
+
+
+def handle_ota_write(data):
+    if len(data) < 4:
+        return False
+
+    offset = int.from_bytes(data[0:4], "big")
+    return ota_session.write(offset, data[4:])
 
 
 def address_matches(pkt):
@@ -246,6 +299,10 @@ def handle(pkt):
         tx_bytes(nfcp.build_response(UNIQUE_ID, CMD_PING, data))
         return
 
+    if cmd == CMD_INFO_REQ:
+        tx_bytes(nfcp.build_response(UNIQUE_ID, CMD_INFO_RSP, build_info_payload()))
+        return
+
 
     if cmd == CMD_ARM:
         ARMED = True
@@ -265,6 +322,35 @@ def handle(pkt):
     # FIRE intentionally ignored in this test device
     if cmd == CMD_FIRE:
         print("FIRE received (ignored - dummy device)")
+        return
+
+    if cmd == CMD_OTA_BEGIN:
+        if ARMED:
+            tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_OTA_BEGIN, NACK_REJECTED_ARMED))
+            return
+        if handle_ota_begin(pkt.get("data", b"")):
+            tx_bytes(nfcp.build_ack(UNIQUE_ID, CMD_OTA_BEGIN, ACK_OK))
+        else:
+            tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_OTA_BEGIN, NACK_INVALID_VALUE))
+        return
+
+    if cmd == CMD_OTA_WRITE:
+        if handle_ota_write(pkt.get("data", b"")):
+            tx_bytes(nfcp.build_ack(UNIQUE_ID, CMD_OTA_WRITE, ACK_OK))
+        else:
+            tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_OTA_WRITE, NACK_INVALID_VALUE))
+        return
+
+    if cmd == CMD_OTA_END:
+        if ota_session.end():
+            tx_bytes(nfcp.build_ack(UNIQUE_ID, CMD_OTA_END, ACK_OK))
+        else:
+            tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_OTA_END, NACK_INVALID_VALUE))
+        return
+
+    if cmd == CMD_OTA_ABORT:
+        ota_session.abort()
+        tx_bytes(nfcp.build_ack(UNIQUE_ID, CMD_OTA_ABORT, ACK_OK))
         return
 
     # Continuity allowed even when ARMED, but rate-limited
