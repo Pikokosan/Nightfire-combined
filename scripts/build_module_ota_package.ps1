@@ -36,9 +36,11 @@ $masterFiles = @(
     @{ Source = "main\nfcp.py";           PackageName = "nfcp.py";           Target = "/nfcp.py" },
     @{ Source = "main\e77_radio.py";      PackageName = "e77_radio.py";      Target = "/e77_radio.py" },
     @{ Source = "main\e77_bootloader.py"; PackageName = "e77_bootloader.py"; Target = "/e77_bootloader.py" },
+    @{ Source = "main\adafruit_trellis.py"; PackageName = "adafruit_trellis.py"; Target = "/adafruit_trellis.py" },
     @{ Source = "main\display_driver.py"; PackageName = "display_driver.py"; Target = "/display_driver.py" },
     @{ Source = "main\sdcard_driver.py";  PackageName = "sdcard_driver.py";  Target = "/sdcard_driver.py" },
-    @{ Source = "main\ch422g.py";         PackageName = "ch422g.py";         Target = "/ch422g.py" }
+    @{ Source = "main\ch422g.py";         PackageName = "ch422g.py";         Target = "/ch422g.py" },
+    @{ Source = "assets\fonts\timer_96.bin"; PackageName = "timer_96.bin";   Target = "/timer_96.bin" }
 )
 
 $manifestFiles = @()

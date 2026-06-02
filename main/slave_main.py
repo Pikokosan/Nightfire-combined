@@ -71,7 +71,8 @@ TX_TURNAROUND_MS = 2
 CONT_MIN_INTERVAL_MS = 100  # 10/sec max
 _last_cont_ms = 0
 
-FIRE_PULSE_MS = 100
+FIRE_PULSE_MS = 5
+LOG_FIRE_EVENTS = False
 ALLOW_FIRE_WHEN_DISARMED = False
 
 CUE_COUNT = 16
@@ -344,12 +345,13 @@ def handle_fire(pkt):
 
     # Safety: only allow real 16 cue bits.
     mask16 &= 0xFFFF
-    print("FIRE mask=0x%04X pulse=%dms" % (mask16, FIRE_PULSE_MS))
+    if LOG_FIRE_EVENTS:
+        print("FIRE mask=0x%04X pulse=%dms" % (mask16, FIRE_PULSE_MS))
     try:
         mc.digitalWriteMask(mask16)
         time.sleep_ms(FIRE_PULSE_MS)
         mc.digitalWriteMask(0x0000)
-        tx_bytes(nfcp.build_ack(UNIQUE_ID, CMD_FIRE, ACK_OK))
+        # Successful fire is intentionally one-way; only failures return NACK.
     except Exception as e:
         mc.digitalWriteMask(0x0000)
         print("FIRE error:", e)
@@ -516,12 +518,17 @@ def handle_uart_byte(b):
 
 try:
     while True:
-        if transport.any():
+        had_data = False
+
+        while transport.any():
             b = transport.read_byte()
             if b is not None:
+                had_data = True
                 last_rx_ms = time.ticks_ms()
                 handle_uart_byte(b)
-        time.sleep_ms(1)
+
+        if not had_data:
+            time.sleep_ms(1)
 finally:
     # In case of soft reset/exception, try to leave outputs safe.
     try:

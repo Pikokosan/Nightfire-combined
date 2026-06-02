@@ -56,6 +56,7 @@ Master upload includes:
 - `nfcp.py`
 - `e77_radio.py`
 - `e77_bootloader.py`
+- `adafruit_trellis.py`
 - display and SD card support files
 
 Slave upload includes:
@@ -276,6 +277,20 @@ slave modules store their paired radio network ID in `nfcp_cfg.bin` and apply it
 to the attached E77 radio during boot. New modules ship on the default E77
 network; use Settings > Pair on the master to scan that default network and move
 responding modules to the master's selected network.
+
+## Master Trellis Board
+
+The master checks the Adafruit Trellis board during boot. It verifies the board
+is reachable over I2C, reads all 16 keys, and fails boot into a visible Trellis
+error screen if any key is held down or the board cannot be reached. If the key
+check passes, the master sweeps through the 16 Trellis LEDs before continuing.
+
+Default Trellis settings in `main/master_main.py`:
+
+- I2C bus: `0`
+- SCL: GPIO `9`
+- SDA: GPIO `8`
+- Address: `0x70`
 
 ## Notes
 

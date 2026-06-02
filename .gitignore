@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.pyo
 dist/
+tools/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

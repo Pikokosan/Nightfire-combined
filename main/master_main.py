@@ -4,7 +4,7 @@
 # LVGL 9.2.2
 # Uses shared nfcp.py for packet protocol
 
-from machine import UART, Pin
+from machine import UART, Pin, I2C
 import time
 import os
 import lvgl as lv
@@ -13,6 +13,13 @@ import ujson as json
 import urandom as random
 import nfcp
 import e77_radio
+from adafruit_trellis import Trellis
+
+try:
+    import fs_driver
+except Exception as e:
+    fs_driver = None
+    print("LVGL FS driver failed:", e)
 
 DEFAULT_CUE_COUNT = 16
 MAX_CUE_COUNT = 64
@@ -21,6 +28,14 @@ DISCOVER_IDLE_TIMEOUT_MS = 3000
 DISCOVER_MAX_SCAN_MS = 30000
 SPEED_TEST_TIMEOUT_MS = 2000
 OTA_CHUNK_SIZE = 160
+TRELLIS_ENABLED = True
+TRELLIS_I2C_ID = 0
+TRELLIS_SCL_PIN = 9
+TRELLIS_SDA_PIN = 8
+TRELLIS_ADDRESS = 0x70
+TRELLIS_I2C_FREQ = 100000
+TRELLIS_LED_SWEEP_DELAY_MS = 45
+SCRIPT_TIMER_FONT_PATH = "timer_96.bin"
 
 SRC_ID = 0x01
 DEVICE_DB_PATH = "nfcp_devices.json"
@@ -56,6 +71,8 @@ radio_rx = e77_radio.E77FrameParser()
 radio_seq = 1
 _last_packets = []
 _last_radio_links = {}
+lvgl_fs_drv = None
+script_clock_font = None
 
 try:
     import sdcard_driver
@@ -69,6 +86,37 @@ def load_screen(scr):
         lv.screen_load(scr)
     else:
         lv.scr_load(scr)
+
+
+def get_script_clock_font():
+    global lvgl_fs_drv
+    global script_clock_font
+
+    if script_clock_font is not None:
+        return script_clock_font
+
+    if fs_driver is None:
+        return None
+
+    try:
+        os.stat(SCRIPT_TIMER_FONT_PATH)
+    except Exception as e:
+        print("Script timer font missing:", e)
+        return None
+
+    try:
+        if lvgl_fs_drv is None:
+            lvgl_fs_drv = lv.fs_drv_t()
+            fs_driver.fs_register(lvgl_fs_drv, "S")
+
+        script_clock_font = lv.binfont_create("S:" + SCRIPT_TIMER_FONT_PATH)
+        if script_clock_font is None:
+            print("Script timer font load returned None")
+    except Exception as e:
+        script_clock_font = None
+        print("Script timer font load failed:", e)
+
+    return script_clock_font
 
 
 def delete_device_db_on_startup():
@@ -206,6 +254,77 @@ def check_radio_ready(network_id):
         return False
 
     return radio_ping(1000)
+
+
+def trellis_pressed_keys(trellis):
+    pressed = []
+    for key in range(16):
+        if trellis.is_key_pressed(key):
+            pressed.append(key)
+    return pressed
+
+
+def trellis_sweep_leds(trellis):
+    trellis.clear()
+    trellis.write_display()
+
+    for led in range(16):
+        trellis.clear()
+        trellis.set_led(led)
+        trellis.write_display()
+        time.sleep_ms(TRELLIS_LED_SWEEP_DELAY_MS)
+
+    trellis.clear()
+    trellis.write_display()
+
+
+def init_trellis_boot_check():
+    if not TRELLIS_ENABLED:
+        return None, None
+
+    try:
+        i2c_bus = I2C(
+            TRELLIS_I2C_ID,
+            scl=Pin(TRELLIS_SCL_PIN),
+            sda=Pin(TRELLIS_SDA_PIN),
+            freq=TRELLIS_I2C_FREQ
+        )
+    except Exception as e:
+        return None, "Trellis I2C init failed: %s" % str(e)
+
+    try:
+        devices = i2c_bus.scan()
+    except Exception as e:
+        return None, "Trellis I2C scan failed: %s" % str(e)
+
+    if TRELLIS_ADDRESS not in devices:
+        return None, "Trellis not found at 0x%02X" % TRELLIS_ADDRESS
+
+    try:
+        trellis = Trellis(i2c_bus, TRELLIS_ADDRESS)
+        trellis.begin()
+    except Exception as e:
+        return None, "Trellis init failed: %s" % str(e)
+
+    try:
+        trellis.read_switches()
+        time.sleep_ms(20)
+        trellis.read_switches()
+        pressed = trellis_pressed_keys(trellis)
+    except Exception as e:
+        return trellis, "Trellis button read failed: %s" % str(e)
+
+    if pressed:
+        return trellis, "Trellis buttons held on boot: %s" % (
+            ", ".join(str(key) for key in pressed)
+        )
+
+    try:
+        trellis_sweep_leds(trellis)
+    except Exception as e:
+        return trellis, "Trellis LED sweep failed: %s" % str(e)
+
+    return trellis, None
 
 
 def load_device_db(path=DEVICE_DB_PATH):
@@ -682,6 +801,16 @@ def fire_unique(uid_int, cue_index_0based):
     rs485_write(nfcp_tx.build_unique_fire(uid_int, 1 << cue_index_0based))
 
 
+def fire_unique_mask(uid_int, cue_mask):
+    if cue_mask <= 0:
+        raise ValueError("cue mask is empty")
+
+    if cue_mask >> MAX_CUE_COUNT:
+        raise ValueError("cue mask out of range")
+
+    rs485_write(nfcp_tx.build_unique_fire(uid_int, cue_mask))
+
+
 def set_group(uid_int, new_group):
     rs485_write(nfcp_tx.build_set_group(uid_int, new_group))
 
@@ -807,6 +936,7 @@ nfcp.info_scan = info_scan
 nfcp.arm = arm
 nfcp.disarm = disarm
 nfcp.fire_unique = fire_unique
+nfcp.fire_unique_mask = fire_unique_mask
 nfcp.set_group = set_group
 nfcp.request_set_network_for_uid = request_set_network_for_uid
 nfcp.ota_send_file_for_uid = ota_send_file_for_uid
@@ -827,6 +957,21 @@ class NFCPGui:
         self.current_view = "main"
         self.discover_busy = False
         self.modules_page = 0
+        self.manual_fire_modules = []
+        self.manual_fire_index = 0
+        self.manual_fire_last_poll_ms = time.ticks_ms()
+        self.script_fire_mode = "auto"
+        self.script_fire_running = False
+        self.script_fire_elapsed_ms = 0
+        self.script_fire_started_ms = time.ticks_ms()
+        self.script_fire_last_clock_ms = time.ticks_ms()
+        self.script_fire_step_index = 0
+        self.script_fire_auto_index = 0
+        self.script_fire_last_trellis_poll_ms = time.ticks_ms()
+        self.last_lvgl_handler_ms = time.ticks_ms()
+        self.script_fire_prepared = False
+        self.script_fire_auto_fired = 0
+        self.script_fire_auto_packets = 0
         self.last_module_continuity_auto_ms = time.ticks_ms()
         self.settings = load_app_settings()
         self.auto_module_continuity = bool(
@@ -839,9 +984,17 @@ class NFCPGui:
             self.settings.get("radio_network_id", RADIO_NETWORK_ID)
         ) & 0xFFFF
         self.radio_error = None
+        self.trellis = None
+        self.trellis_error = None
 
         self.group_edit_value = 1
         self.group_edit_text = ""
+
+        self.trellis, self.trellis_error = init_trellis_boot_check()
+        if self.trellis_error:
+            print(self.trellis_error)
+            self.show_trellis_error()
+            return
 
         if not check_radio_ready(self.radio_network_id):
             self.radio_error = "E77 radio not responding"
@@ -871,8 +1024,14 @@ class NFCPGui:
         self.loaded_script_duplicate_channels = []
 
         self.loaded_script_pyro_events = []
+        self.loaded_script_steps = []
         self.open_script_cue_count = 0
         self.extra_connected_cue_count = 0
+        self.script_fire_step_index = 0
+        self.script_fire_auto_index = 0
+        self.script_fire_prepared = False
+        self.script_fire_auto_fired = 0
+        self.script_fire_auto_packets = 0
 
     def update_background(self):
         color = lv.color_hex(0x400000) if self.armed else lv.color_hex(0x101010)
@@ -900,7 +1059,9 @@ class NFCPGui:
         names = (
             "status",
             "manual_fire_btn",
+            "script_fire_btn",
             "arm_btn",
+            "arm_btn_label",
             "discover_btn",
             "refresh_btn",
             "module_list",
@@ -920,6 +1081,16 @@ class NFCPGui:
             "group_edit_label",
             "network_edit_box",
             "network_edit_label",
+            "manual_channel_label",
+            "manual_module_label",
+            "manual_summary_label",
+            "manual_cue_buttons",
+            "manual_cue_labels",
+            "script_name_label",
+            "script_clock_label",
+            "script_status_label",
+            "script_auto_btn",
+            "script_step_btn",
         )
 
         for name in names:
@@ -931,6 +1102,7 @@ class NFCPGui:
 
     def new_screen(self, title_text, view_name=None):
         old_screen = self.current_screen
+        old_view = self.current_view
         self.clear_screen_refs()
         scr = lv.obj()
 
@@ -942,6 +1114,9 @@ class NFCPGui:
         scr.set_style_text_color(lv.color_hex(0xFFFFFF), 0)
         load_screen(scr)
         self.delete_old_screen(old_screen)
+
+        if old_view in ("manual_fire", "script_fire") and view_name != old_view:
+            self.clear_trellis_leds()
 
         self.status = lv.label(scr)
         self.status.set_text("Status: Ready")
@@ -970,6 +1145,22 @@ class NFCPGui:
 
         return btn
 
+    def apply_largest_font(self, obj):
+        for name in (
+            "font_montserrat_48",
+            "font_montserrat_46",
+            "font_montserrat_44",
+            "font_montserrat_42",
+            "font_montserrat_40",
+            "font_montserrat_38",
+            "font_montserrat_36",
+        ):
+            try:
+                obj.set_style_text_font(getattr(lv, name), 0)
+                return
+            except:
+                pass
+
     def show_radio_error(self):
         scr = self.new_screen("Radio Error", "radio_error")
 
@@ -992,6 +1183,37 @@ class NFCPGui:
 
         self.radio_error = "E77 radio not responding"
         self.show_radio_error()
+
+    def show_trellis_error(self):
+        scr = self.new_screen("Trellis Error", "trellis_error")
+
+        label = lv.label(scr)
+        label.set_text(
+            "Trellis board failed boot check.\n"
+            "%s\n"
+            "Check I2C wiring, address, power, and stuck buttons." %
+            (self.trellis_error or "Unknown Trellis error")
+        )
+        label.align(lv.ALIGN.CENTER, 0, -35)
+
+        retry = self.make_button(scr, "RETRY", 250, 310, 300, 70, self.retry_trellis_boot_check)
+        retry.set_style_bg_color(lv.color_hex(0x2F4F8F), 0)
+
+    def retry_trellis_boot_check(self, event=None):
+        self.trellis, self.trellis_error = init_trellis_boot_check()
+        if self.trellis_error:
+            print(self.trellis_error)
+            self.show_trellis_error()
+            return
+
+        if not check_radio_ready(self.radio_network_id):
+            self.radio_error = "E77 radio not responding"
+            print(self.radio_error)
+            self.show_radio_error()
+            return
+
+        self.load_modules_from_db()
+        self.show_main_menu()
 
     def group_to_int_display(self, group_value):
         try:
@@ -1210,10 +1432,18 @@ class NFCPGui:
     def show_main_menu(self, event=None):
         scr = self.new_screen("NFCP Master Controller", "main")
 
-        self.make_button(scr, "VIEW SCRIPT", 60, 90, 300, 80, self.show_view_script)
+        self.make_button(scr, "MODULES", 60, 90, 300, 80, self.show_modules_menu)
         self.make_button(scr, "LOAD SCRIPT", 440, 90, 300, 80, self.show_load_script)
 
-        self.make_button(scr, "MODULES", 60, 200, 300, 80, self.show_modules_menu)
+        self.script_fire_btn = self.make_button(
+            scr,
+            "SCRIPT FIRE",
+            60,
+            200,
+            300,
+            80,
+            self.show_script_fire
+        )
         self.make_button(scr, "SETTINGS", 440, 200, 300, 80, self.show_settings)
 
         self.manual_fire_btn = self.make_button(
@@ -1226,17 +1456,17 @@ class NFCPGui:
             self.show_manual_fire
         )
 
-        self.arm_btn = self.make_button(
-            scr,
-            "DISARM" if self.armed else "ARM",
-            440,
-            315,
-            300,
-            80,
-            self.toggle_arm
-        )
+        self.arm_btn = lv.button(scr)
+        self.arm_btn.set_pos(440, 315)
+        self.arm_btn.set_size(300, 80)
+        self.arm_btn.add_event_cb(self.toggle_arm, lv.EVENT.CLICKED, None)
+
+        self.arm_btn_label = lv.label(self.arm_btn)
+        self.arm_btn_label.set_text("DISARM" if self.armed else "ARM")
+        self.arm_btn_label.center()
 
         self.update_manual_fire_button()
+        self.update_script_fire_button()
         self.update_arm_button()
 
     def update_manual_fire_button(self):
@@ -1250,6 +1480,551 @@ class NFCPGui:
                 self.manual_fire_btn.add_state(lv.STATE.DISABLED)
         except Exception as e:
             print("Manual fire button state update failed:", e)
+
+    def update_script_fire_button(self):
+        if not hasattr(self, "script_fire_btn"):
+            return
+
+        try:
+            if self.armed and self.selected_script:
+                self.script_fire_btn.remove_state(lv.STATE.DISABLED)
+            else:
+                self.script_fire_btn.add_state(lv.STATE.DISABLED)
+        except Exception as e:
+            print("Script fire button state update failed:", e)
+
+    def show_script_fire(self, event=None):
+        if not self.selected_script:
+            self.set_status("Script fire disabled - no script loaded")
+            return
+
+        if not self.armed:
+            self.set_status("Script fire disabled - not armed")
+            return
+
+        scr = self.new_screen("Script Fire", "script_fire")
+
+        self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_main_menu)
+
+        self.script_name_label = lv.label(scr)
+        self.script_name_label.set_text(
+            "Script: %s   Events: %d   Pyro: %d   Open: %d/%d +%d" %
+            (
+                self.loaded_script_name or self.selected_script,
+                self.loaded_script_event_count,
+                self.loaded_script_fire_count,
+                self.open_script_cue_count,
+                self.loaded_script_fire_count,
+                self.extra_connected_cue_count
+            )
+        )
+        self.script_name_label.set_pos(35, 58)
+
+        self.script_clock_label = lv.label(scr)
+        self.script_clock_label.set_text(self.format_script_fire_time())
+        clock_font = get_script_clock_font()
+        if clock_font:
+            self.script_clock_label.set_style_text_font(clock_font, 0)
+        else:
+            self.apply_largest_font(self.script_clock_label)
+            try:
+                self.script_clock_label.set_style_transform_zoom(420, 0)
+            except:
+                pass
+        self.script_clock_label.align(lv.ALIGN.CENTER, -70, -40)
+
+        self.script_status_label = lv.label(scr)
+        if self.script_fire_running:
+            status_text = "Playing"
+        elif self.script_fire_elapsed_ms > 0:
+            status_text = "Paused"
+        else:
+            status_text = "Stopped"
+        self.script_status_label.set_text(status_text)
+        self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
+
+        self.make_button(scr, "PLAY", 150, 325, 140, 65, self.script_fire_play)
+        self.make_button(scr, "PAUSE", 330, 325, 140, 65, self.script_fire_pause)
+        self.make_button(scr, "STOP", 510, 325, 140, 65, self.script_fire_stop)
+
+        self.script_auto_btn = self.make_button(
+            scr,
+            "AUTO",
+            660,
+            45,
+            120,
+            170,
+            self.select_script_fire_auto
+        )
+
+        self.script_step_btn = self.make_button(
+            scr,
+            "STEP",
+            660,
+            220,
+            120,
+            170,
+            self.select_script_fire_step
+        )
+
+        self.update_script_fire_mode_buttons()
+        self.update_script_fire_clock(force=True)
+        if self.script_fire_mode == "step":
+            self.update_script_fire_step_status()
+
+    def format_script_fire_time(self):
+        elapsed = self.script_fire_elapsed_ms
+
+        if self.script_fire_running:
+            elapsed = time.ticks_diff(time.ticks_ms(), self.script_fire_started_ms)
+
+        if elapsed < 0:
+            elapsed = 0
+
+        minutes = elapsed // 60000
+        seconds = (elapsed // 1000) % 60
+        tenths = (elapsed // 100) % 10
+
+        return "%02d:%02d.%d" % (minutes, seconds, tenths)
+
+    def update_script_fire_clock(self, force=False):
+        if not hasattr(self, "script_clock_label"):
+            return
+
+        now = time.ticks_ms()
+        min_interval = 50 if self.script_fire_running else 100
+        if not force and time.ticks_diff(now, self.script_fire_last_clock_ms) < min_interval:
+            return
+
+        self.script_fire_last_clock_ms = now
+        self.script_clock_label.set_text(self.format_script_fire_time())
+        self.script_clock_label.align(lv.ALIGN.CENTER, -70, -40)
+
+    def parse_script_time_ms(self, text):
+        try:
+            text = str(text).strip()
+            if text.endswith("s") or text.endswith("S"):
+                text = text[:-1]
+
+            parts = text.split(":")
+            if len(parts) == 3:
+                hours = int(parts[0])
+                minutes = int(parts[1])
+                seconds_text = parts[2]
+            elif len(parts) == 2:
+                hours = 0
+                minutes = int(parts[0])
+                seconds_text = parts[1]
+            else:
+                hours = 0
+                minutes = 0
+                seconds_text = parts[0]
+
+            if "." in seconds_text:
+                seconds_part, frac_part = seconds_text.split(".", 1)
+            else:
+                seconds_part = seconds_text
+                frac_part = ""
+
+            seconds = int(seconds_part)
+            frac_part = frac_part[:3]
+            while len(frac_part) < 3:
+                frac_part += "0"
+
+            millis = int(frac_part) if frac_part else 0
+
+            return (
+                (hours * 3600000) +
+                (minutes * 60000) +
+                (seconds * 1000) +
+                millis
+            )
+        except Exception as e:
+            print("Script time parse failed:", text, e)
+            return 0
+
+    def build_script_fire_steps(self):
+        self.loaded_script_steps = []
+        steps_by_time = {}
+
+        for event in self.loaded_script_pyro_events:
+            event_time = event.get("event_time", "")
+
+            if event_time in steps_by_time:
+                steps_by_time[event_time]["events"].append(event)
+            else:
+                step = {
+                    "event_time": event_time,
+                    "event_ms": self.parse_script_time_ms(event_time),
+                    "events": [event],
+                    "packets": [],
+                    "fired_cues": 0,
+                    "packet_count": 0
+                }
+                steps_by_time[event_time] = step
+                self.loaded_script_steps.append(step)
+
+        self.loaded_script_steps.sort(key=lambda step: step.get("event_ms", 0))
+
+        if self.script_fire_step_index >= len(self.loaded_script_steps):
+            self.script_fire_step_index = 0
+        if self.script_fire_auto_index >= len(self.loaded_script_steps):
+            self.script_fire_auto_index = 0
+        self.script_fire_prepared = False
+
+    def get_script_trigger_key(self):
+        try:
+            button = int(str(self.loaded_script_trigger_button).strip())
+        except:
+            return None
+
+        if button < 1 or button > 16:
+            return None
+
+        return button - 1
+
+    def update_script_fire_step_led(self):
+        if self.current_view != "script_fire":
+            return
+        if self.script_fire_mode != "step":
+            self.clear_trellis_leds()
+            return
+        if not self.trellis:
+            return
+
+        trigger_key = self.get_script_trigger_key()
+        if trigger_key is None:
+            self.clear_trellis_leds()
+            return
+
+        try:
+            self.trellis.clear()
+            self.trellis.set_led(trigger_key)
+            self.trellis.write_display()
+        except Exception as e:
+            print("Script step LED update failed:", e)
+
+    def update_script_fire_step_status(self, prefix=None):
+        if not hasattr(self, "script_status_label"):
+            return
+
+        total = len(self.loaded_script_steps)
+        if total:
+            text = "Step %d / %d" % (self.script_fire_step_index + 1, total)
+            if prefix:
+                text = prefix + "   " + text
+        else:
+            text = "No pyro steps"
+
+        self.script_status_label.set_text(text)
+        self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
+
+    def count_mask_bits(self, mask):
+        count = 0
+
+        while mask:
+            if mask & 1:
+                count += 1
+            mask >>= 1
+
+        return count
+
+    def build_script_step_channel_masks(self, events):
+        channel_masks = {}
+
+        for event in events:
+            try:
+                channel = int(event.get("channel"))
+                cue = int(event.get("cue"))
+            except:
+                continue
+
+            if cue < 1 or cue > MAX_CUE_COUNT:
+                continue
+
+            channel_masks[channel] = channel_masks.get(channel, 0) | (1 << (cue - 1))
+
+        return channel_masks
+
+    def build_script_channel_uid_map(self):
+        channel_uids = {}
+
+        for module in self.modules:
+            channel = self.parse_group_id(module.get("group_id", None))
+            if channel is None:
+                continue
+
+            try:
+                uid = int(module.get("unique_id", "0x00000000"), 16) & 0xFFFFFFFF
+            except:
+                continue
+
+            if channel not in channel_uids:
+                channel_uids[channel] = []
+
+            channel_uids[channel].append(uid)
+
+        return channel_uids
+
+    def prepare_script_fire_packets(self):
+        self.load_modules_from_db()
+        channel_uids = self.build_script_channel_uid_map()
+
+        for step in self.loaded_script_steps:
+            packets = []
+            fired_cues = 0
+            channel_masks = self.build_script_step_channel_masks(
+                step.get("events", [])
+            )
+
+            for channel, cue_mask in channel_masks.items():
+                uids = channel_uids.get(channel, [])
+                if uids:
+                    fired_cues += self.count_mask_bits(cue_mask)
+
+                for uid in uids:
+                    packets.append(nfcp_tx.build_unique_fire(uid, cue_mask))
+
+            step["packets"] = packets
+            step["fired_cues"] = fired_cues
+            step["packet_count"] = len(packets)
+
+        self.script_fire_prepared = True
+
+    def fire_prepared_script_step(self, step):
+        packets_sent = 0
+
+        if not self.script_fire_prepared:
+            self.prepare_script_fire_packets()
+
+        for pkt in step.get("packets", []):
+            try:
+                rs485_write(pkt)
+                packets_sent += 1
+            except Exception as e:
+                print("Script step fire mask failed:", e)
+
+        return step.get("fired_cues", 0), packets_sent
+
+    def advance_script_fire_step(self):
+        if not self.armed:
+            self.set_status("Script step blocked - not armed")
+            return
+
+        if not self.loaded_script_steps:
+            self.set_status("No script steps loaded")
+            self.update_script_fire_step_status()
+            return
+
+        if self.script_fire_step_index >= len(self.loaded_script_steps):
+            self.script_fire_step_index = 0
+
+        step = self.loaded_script_steps[self.script_fire_step_index]
+        fired, packets = self.fire_prepared_script_step(step)
+
+        event_time = step.get("event_time", "--")
+        self.script_fire_step_index += 1
+        if self.script_fire_step_index >= len(self.loaded_script_steps):
+            self.script_fire_step_index = 0
+
+        self.update_script_fire_step_status(
+            "Fired %d cues @ %s" % (fired, event_time)
+        )
+        self.set_status(
+            "Script step fired %d cue(s), %d packet(s)" %
+            (fired, packets)
+        )
+        self.update_script_fire_step_led()
+
+    def get_script_fire_elapsed_ms(self):
+        if self.script_fire_running:
+            return time.ticks_diff(time.ticks_ms(), self.script_fire_started_ms)
+
+        return self.script_fire_elapsed_ms
+
+    def prepare_script_fire_auto_index(self):
+        elapsed = self.get_script_fire_elapsed_ms()
+        self.script_fire_auto_index = 0
+
+        if not self.script_fire_prepared:
+            self.prepare_script_fire_packets()
+
+        while self.script_fire_auto_index < len(self.loaded_script_steps):
+            step = self.loaded_script_steps[self.script_fire_auto_index]
+            if step.get("event_ms", 0) >= elapsed:
+                break
+            self.script_fire_auto_index += 1
+
+    def poll_script_fire_auto(self):
+        if self.current_view != "script_fire":
+            return
+        if self.script_fire_mode != "auto":
+            return
+        if not self.script_fire_running:
+            return
+
+        if not self.loaded_script_steps:
+            self.script_fire_running = False
+            self.set_status("No script steps loaded")
+            return
+
+        elapsed = self.get_script_fire_elapsed_ms()
+        total_fired = 0
+        total_packets = 0
+
+        if not self.script_fire_prepared:
+            self.prepare_script_fire_packets()
+
+        while self.script_fire_auto_index < len(self.loaded_script_steps):
+            step = self.loaded_script_steps[self.script_fire_auto_index]
+            if step.get("event_ms", 0) > elapsed:
+                break
+
+            fired, packets = self.fire_prepared_script_step(step)
+            total_fired += fired
+            total_packets += packets
+            self.script_fire_auto_index += 1
+
+        if total_fired:
+            self.script_fire_auto_fired += total_fired
+            self.script_fire_auto_packets += total_packets
+
+        if self.script_fire_auto_index >= len(self.loaded_script_steps):
+            self.script_fire_elapsed_ms = elapsed
+            self.script_fire_running = False
+            if hasattr(self, "script_status_label"):
+                self.script_status_label.set_text(
+                    "Auto complete   %d cues   %d packets" %
+                    (
+                        self.script_fire_auto_fired,
+                        self.script_fire_auto_packets
+                    )
+                )
+                self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
+            self.set_status("Script fire auto complete")
+
+    def poll_script_fire_trellis(self):
+        if self.current_view != "script_fire":
+            return
+        if self.script_fire_mode != "step":
+            return
+        if not self.trellis:
+            return
+
+        trigger_key = self.get_script_trigger_key()
+        if trigger_key is None:
+            return
+
+        now = time.ticks_ms()
+        if time.ticks_diff(now, self.script_fire_last_trellis_poll_ms) < 35:
+            return
+
+        self.script_fire_last_trellis_poll_ms = now
+
+        try:
+            changed = self.trellis.read_switches()
+            if not changed:
+                return
+
+            if self.trellis.just_pressed(trigger_key):
+                self.advance_script_fire_step()
+        except Exception as e:
+            print("Script fire Trellis poll failed:", e)
+            self.set_status("Script fire Trellis poll failed")
+
+    def script_fire_play(self, event=None):
+        if self.script_fire_running:
+            return
+
+        if self.script_fire_mode == "auto":
+            self.script_fire_auto_fired = 0
+            self.script_fire_auto_packets = 0
+            self.prepare_script_fire_auto_index()
+        elif not self.script_fire_prepared:
+            self.prepare_script_fire_packets()
+
+        self.script_fire_started_ms = time.ticks_add(
+            time.ticks_ms(),
+            -self.script_fire_elapsed_ms
+        )
+        self.script_fire_running = True
+
+        if hasattr(self, "script_status_label"):
+            self.script_status_label.set_text("Playing")
+            self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
+
+        self.set_status("Script fire playing")
+
+    def script_fire_pause(self, event=None):
+        if self.script_fire_running:
+            self.script_fire_elapsed_ms = time.ticks_diff(time.ticks_ms(), self.script_fire_started_ms)
+
+        self.script_fire_running = False
+        self.update_script_fire_clock(force=True)
+
+        if hasattr(self, "script_status_label"):
+            self.script_status_label.set_text("Paused")
+            self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
+
+        self.set_status("Script fire paused")
+
+    def script_fire_stop(self, event=None):
+        self.script_fire_running = False
+        self.script_fire_elapsed_ms = 0
+        self.script_fire_step_index = 0
+        self.script_fire_auto_index = 0
+        self.update_script_fire_clock(force=True)
+
+        if hasattr(self, "script_status_label"):
+            self.script_status_label.set_text("Stopped")
+            self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
+
+        self.set_status("Script fire stopped")
+
+    def select_script_fire_auto(self, event=None):
+        self.script_fire_mode = "auto"
+        self.update_script_fire_mode_buttons()
+        self.clear_trellis_leds()
+        if hasattr(self, "script_status_label"):
+            self.script_status_label.set_text(
+                "Playing" if self.script_fire_running else "Stopped"
+            )
+            self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
+        self.set_status("Script fire mode: Auto")
+
+    def select_script_fire_step(self, event=None):
+        if self.script_fire_running:
+            self.script_fire_elapsed_ms = self.get_script_fire_elapsed_ms()
+            self.script_fire_running = False
+
+        self.script_fire_mode = "step"
+        self.update_script_fire_mode_buttons()
+        self.update_script_fire_step_led()
+        self.update_script_fire_step_status()
+        if self.get_script_trigger_key() is None:
+            self.set_status("Script trigger button not set")
+        else:
+            self.set_status("Script fire mode: Step")
+
+    def update_script_fire_mode_buttons(self):
+        if not hasattr(self, "script_auto_btn") or not hasattr(self, "script_step_btn"):
+            return
+
+        selected_color = lv.color_hex(0x1F7A1F)
+        normal_color = lv.color_hex(0x2F4F8F)
+
+        if self.script_fire_mode == "auto":
+            self.script_auto_btn.set_style_bg_color(selected_color, 0)
+            self.script_auto_btn.add_state(lv.STATE.DISABLED)
+            self.script_step_btn.set_style_bg_color(normal_color, 0)
+            self.script_step_btn.remove_state(lv.STATE.DISABLED)
+        else:
+            self.script_step_btn.set_style_bg_color(selected_color, 0)
+            self.script_step_btn.add_state(lv.STATE.DISABLED)
+            self.script_auto_btn.set_style_bg_color(normal_color, 0)
+            self.script_auto_btn.remove_state(lv.STATE.DISABLED)
+
+        self.update_script_fire_step_led()
 
     def has_scanned_modules(self):
         return len(self.modules) > 0
@@ -1413,15 +2188,54 @@ class NFCPGui:
         self.selected_script = filename
         self.clear_loaded_script(filename)
 
-        lower = filename.lower()
-
-        if lower == "cobra.csv":
+        if self.is_cobra_script_file(filename):
             self.load_cobra_script(filename)
         else:
             self.set_status("Selected script: " + filename)
 
         print("Selected script:", filename)
+        self.update_script_fire_button()
         self.show_view_script()
+
+    def is_cobra_script_file(self, filename):
+        path = "/sd/" + filename
+        has_trigger_header = False
+        has_event_header = False
+
+        try:
+            f = open(path, "r")
+        except Exception as e:
+            print("Script type check open failed:", e)
+            return False
+
+        try:
+            for _ in range(40):
+                line = f.readline()
+                if not line:
+                    break
+
+                line = line.strip()
+
+                if line.startswith("#Trigger Channel"):
+                    has_trigger_header = True
+                elif line.startswith("#Event Time"):
+                    has_event_header = True
+
+                if has_trigger_header and has_event_header:
+                    try:
+                        f.close()
+                    except:
+                        pass
+                    return True
+        except Exception as e:
+            print("Script type check failed:", e)
+
+        try:
+            f.close()
+        except:
+            pass
+
+        return False
 
     def csv_split_simple(self, line):
         out = []
@@ -1538,6 +2352,7 @@ class NFCPGui:
                             cq = int(cue)
 
                             self.loaded_script_pyro_events.append({
+                                "event_time": event_time,
                                 "channel": ch,
                                 "cue": cq,
                                 "open": None
@@ -1554,6 +2369,7 @@ class NFCPGui:
 
             self.loaded_script_channels.sort()
             self.loaded_script_channel_count = len(self.loaded_script_channels)
+            self.build_script_fire_steps()
             self.update_open_script_cues()
             self.update_extra_connected_cues()
 
@@ -2191,13 +3007,231 @@ class NFCPGui:
             self.set_status("Manual fire disabled - not armed")
             return
 
+        self.load_modules_from_db()
+        self.manual_fire_modules = list(self.modules)
+
+        if not self.manual_fire_modules:
+            self.set_status("Manual fire disabled - no modules")
+            return
+
+        if self.manual_fire_index < 0:
+            self.manual_fire_index = 0
+        if self.manual_fire_index >= len(self.manual_fire_modules):
+            self.manual_fire_index = len(self.manual_fire_modules) - 1
+
         scr = self.new_screen("Manual Fire", "manual_fire")
 
-        label = lv.label(scr)
-        label.set_text("Manual fire screen not loaded yet.")
-        label.align(lv.ALIGN.CENTER, 0, 0)
+        self.make_button(scr, "BACK", 20, 400, 140, 55, self.leave_manual_fire)
 
-        self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_main_menu)
+        self.make_button(scr, "CHANNEL +", 35, 95, 170, 95, self.manual_channel_up)
+        self.make_button(scr, "CHANNEL -", 35, 230, 170, 95, self.manual_channel_down)
+
+        self.manual_module_label = lv.label(scr)
+        self.manual_module_label.set_pos(250, 72)
+
+        self.manual_summary_label = lv.label(scr)
+        self.manual_summary_label.set_pos(250, 102)
+
+        channel_title = lv.label(scr)
+        channel_title.set_text("CHANNEL")
+        channel_title.align(lv.ALIGN.TOP_RIGHT, -60, 75)
+
+        self.manual_channel_label = lv.label(scr)
+        self.manual_channel_label.set_pos(610, 115)
+        try:
+            self.manual_channel_label.set_style_text_font(lv.font_montserrat_48, 0)
+        except:
+            pass
+
+        self.build_manual_fire_cue_grid(scr)
+        self.refresh_manual_fire_screen()
+
+    def leave_manual_fire(self, event=None):
+        self.clear_trellis_leds()
+        self.show_main_menu()
+
+    def get_manual_fire_module(self):
+        if not self.manual_fire_modules:
+            return None
+
+        if self.manual_fire_index < 0:
+            self.manual_fire_index = 0
+        if self.manual_fire_index >= len(self.manual_fire_modules):
+            self.manual_fire_index = len(self.manual_fire_modules) - 1
+
+        return self.manual_fire_modules[self.manual_fire_index]
+
+    def manual_channel_up(self, event=None):
+        if not self.manual_fire_modules:
+            return
+
+        self.manual_fire_index += 1
+        if self.manual_fire_index >= len(self.manual_fire_modules):
+            self.manual_fire_index = 0
+
+        self.refresh_manual_fire_screen()
+
+    def manual_channel_down(self, event=None):
+        if not self.manual_fire_modules:
+            return
+
+        self.manual_fire_index -= 1
+        if self.manual_fire_index < 0:
+            self.manual_fire_index = len(self.manual_fire_modules) - 1
+
+        self.refresh_manual_fire_screen()
+
+    def build_manual_fire_cue_grid(self, parent):
+        self.manual_cue_buttons = []
+        self.manual_cue_labels = []
+
+        x0 = 240
+        y0 = 155
+        btn_w = 110
+        btn_h = 70
+        gap_x = 12
+        gap_y = 12
+
+        for i in range(16):
+            row = i // 4
+            col = i % 4
+            x = x0 + col * (btn_w + gap_x)
+            y = y0 + row * (btn_h + gap_y)
+
+            btn = lv.button(parent)
+            btn.set_pos(x, y)
+            btn.set_size(btn_w, btn_h)
+            btn.add_event_cb(self.make_manual_fire_cb(i), lv.EVENT.CLICKED, None)
+
+            lbl = lv.label(btn)
+            lbl.set_text("%02d" % (i + 1))
+            lbl.center()
+
+            self.manual_cue_buttons.append(btn)
+            self.manual_cue_labels.append(lbl)
+
+    def make_manual_fire_cb(self, cue_index):
+        def cb(event):
+            self.fire_manual_cue(cue_index)
+
+        return cb
+
+    def refresh_manual_fire_screen(self):
+        module = self.get_manual_fire_module()
+        if not module:
+            self.clear_trellis_leds()
+            return
+
+        self.selected_module = module
+        self.continuity = self.get_module_saved_continuity(module)
+
+        channel_text = self.group_to_int_display(module.get("group_id", "--"))
+        uid_text = module.get("unique_id", "0x00000000")
+        cue_count = self.get_module_cue_count(module)
+        continuity = self.get_module_continuity_list(module)
+        good = 0
+
+        if hasattr(self, "manual_channel_label"):
+            self.manual_channel_label.set_text(str(channel_text))
+
+        if hasattr(self, "manual_module_label"):
+            self.manual_module_label.set_text(
+                "UID: %s   Cues: %d" %
+                (self.format_uid(uid_text), cue_count)
+            )
+
+        for i in range(16):
+            cue_ok = i < len(continuity) and bool(continuity[i])
+            cue_exists = i < cue_count
+            if cue_ok:
+                good += 1
+
+            if hasattr(self, "manual_cue_labels") and i < len(self.manual_cue_labels):
+                if cue_exists:
+                    self.manual_cue_labels[i].set_text("%02d" % (i + 1))
+                else:
+                    self.manual_cue_labels[i].set_text("--")
+                self.manual_cue_labels[i].center()
+
+            if hasattr(self, "manual_cue_buttons") and i < len(self.manual_cue_buttons):
+                if not cue_exists:
+                    color = lv.color_hex(0x4A4A4A)
+                    self.manual_cue_buttons[i].add_state(lv.STATE.DISABLED)
+                elif cue_ok:
+                    color = lv.color_hex(0x1F7A1F)
+                    self.manual_cue_buttons[i].remove_state(lv.STATE.DISABLED)
+                else:
+                    color = lv.color_hex(0x7A1F1F)
+                    self.manual_cue_buttons[i].remove_state(lv.STATE.DISABLED)
+
+                self.manual_cue_buttons[i].set_style_bg_color(color, 0)
+
+        if hasattr(self, "manual_summary_label"):
+            self.manual_summary_label.set_text(
+                "Continuity: %d / %d   Module %d / %d" %
+                (
+                    good,
+                    cue_count,
+                    self.manual_fire_index + 1,
+                    len(self.manual_fire_modules)
+                )
+            )
+
+        self.update_trellis_continuity_leds(continuity, cue_count)
+        self.set_status("Manual fire channel %s selected" % channel_text)
+
+    def clear_trellis_leds(self):
+        if not self.trellis:
+            return
+
+        try:
+            self.trellis.clear()
+            self.trellis.write_display()
+        except Exception as e:
+            print("Trellis clear failed:", e)
+
+    def update_trellis_continuity_leds(self, continuity, cue_count):
+        if not self.trellis:
+            return
+
+        try:
+            self.trellis.clear()
+            limit = min(16, cue_count)
+            for i in range(limit):
+                if i < len(continuity) and bool(continuity[i]):
+                    self.trellis.set_led(i)
+            self.trellis.write_display()
+        except Exception as e:
+            print("Trellis LED update failed:", e)
+
+    def fire_manual_cue(self, cue_index):
+        module = self.get_manual_fire_module()
+        if not module:
+            self.set_status("No manual fire channel selected")
+            return
+
+        self.selected_module = module
+        self.continuity = self.get_module_saved_continuity(module)
+        self.fire_cue(cue_index)
+
+    def poll_manual_fire_trellis(self):
+        if self.current_view != "manual_fire":
+            return
+        if not self.trellis:
+            return
+
+        try:
+            changed = self.trellis.read_switches()
+            if not changed:
+                return
+
+            for key in range(16):
+                if self.trellis.just_pressed(key):
+                    self.fire_manual_cue(key)
+                    return
+        except Exception as e:
+            print("Trellis poll failed:", e)
+            self.set_status("Trellis poll failed")
 
     # -------------------------
     # Modules screen helpers
@@ -3466,8 +4500,16 @@ class NFCPGui:
             except Exception as e:
                 print("Arm label update failed:", e)
 
+        if hasattr(self, "arm_btn_label"):
+            try:
+                self.arm_btn_label.set_text("DISARM" if self.armed else "ARM")
+                self.arm_btn_label.center()
+            except Exception as e:
+                print("Arm button label update failed:", e)
+
         self.update_background()
         self.update_manual_fire_button()
+        self.update_script_fire_button()
         self.update_arm_button()
 
     # -------------------------
@@ -3565,7 +4607,34 @@ class NFCPGui:
 
         print(text)
 
+    def script_fire_timing_active(self):
+        return (
+            self.current_view == "script_fire" and
+            self.script_fire_mode == "auto" and
+            self.script_fire_running
+        )
+
+    def loop_sleep_ms(self):
+        if self.script_fire_timing_active():
+            return 1
+
+        return 10
+
+    def lvgl_handler_due(self):
+        if not self.script_fire_timing_active():
+            return True
+
+        return time.ticks_diff(time.ticks_ms(), self.last_lvgl_handler_ms) >= 20
+
     def update(self):
+        if self.current_view == "manual_fire":
+            self.poll_manual_fire_trellis()
+
+        if self.current_view == "script_fire":
+            self.update_script_fire_clock()
+            self.poll_script_fire_auto()
+            self.poll_script_fire_trellis()
+
         if (
             self.auto_module_continuity and
             self.current_view == "module_continuity" and
@@ -3585,11 +4654,15 @@ gui = NFCPGui()
 
 while True:
     gui.update()
-    gui.poll_nfcp_responses()
 
-    try:
-        lv.timer_handler()
-    except Exception:
-        pass
+    if not gui.script_fire_timing_active():
+        gui.poll_nfcp_responses()
 
-    time.sleep_ms(10)
+    if gui.lvgl_handler_due():
+        try:
+            lv.timer_handler()
+            gui.last_lvgl_handler_ms = time.ticks_ms()
+        except Exception:
+            pass
+
+    time.sleep_ms(gui.loop_sleep_ms())

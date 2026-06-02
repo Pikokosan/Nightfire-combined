@@ -21,9 +21,11 @@ try {
         ".\main\nfcp.py:nfcp.py" `
         ".\main\e77_radio.py:e77_radio.py" `
         ".\main\e77_bootloader.py:e77_bootloader.py" `
+        ".\main\adafruit_trellis.py:adafruit_trellis.py" `
         ".\main\display_driver.py:display_driver.py" `
         ".\main\sdcard_driver.py:sdcard_driver.py" `
-        ".\main\ch422g.py:ch422g.py"
+        ".\main\ch422g.py:ch422g.py" `
+        ".\assets\fonts\timer_96.bin:timer_96.bin"
 
     if ($LASTEXITCODE -ne 0) {
         throw "Master upload failed with exit code $LASTEXITCODE."
