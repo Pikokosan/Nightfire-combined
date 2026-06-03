@@ -28,6 +28,7 @@ class ModuleTransport:
 
         self.radio_seq = 1
         self.radio_parser = e77_radio.E77FrameParser()
+        self.pending_nfcp = bytearray()
         self.uart = None
         self.de = None
         self.restore_uart()
@@ -47,13 +48,40 @@ class ModuleTransport:
             self.de = Pin(self.rs485_de_pin, Pin.OUT, value=0)
 
     def any(self):
-        return self.uart.any()
+        return bool(self.pending_nfcp) or self.uart.any()
 
     def read_byte(self):
         data = self.uart.read(1)
         if data:
             return data[0]
         return None
+
+    def read_nfcp_bytes(self):
+        if self.transport != "e77":
+            b = self.read_byte()
+            if b is None:
+                return b""
+            return bytes([b])
+
+        if self.pending_nfcp:
+            b = self.pending_nfcp[0]
+            self.pending_nfcp = self.pending_nfcp[1:]
+            return bytes([b])
+
+        b = self.read_byte()
+        if b is None:
+            return b""
+        return self.nfcp_bytes_from_uart_byte(b)
+
+    def cache_radio_frame(self, frame):
+        if frame.cmd != e77_radio.CMD_NFCP_RX:
+            return
+
+        rx_info = e77_radio.parse_nfcp_rx(frame.payload)
+        if not rx_info:
+            return
+
+        self.pending_nfcp += rx_info.get("nfcp_frame", b"")
 
     def next_radio_seq(self):
         seq = self.radio_seq & 0xFF
@@ -189,6 +217,9 @@ class ModuleTransport:
                     for b in rx_data:
                         frame = self.radio_parser.feed(b)
                         if not frame:
+                            continue
+                        if frame.cmd == e77_radio.CMD_NFCP_RX:
+                            self.cache_radio_frame(frame)
                             continue
                         if frame.cmd == e77_radio.CMD_SEND_NFCP and frame.seq == seq:
                             if frame.payload and frame.payload[0] == 0:

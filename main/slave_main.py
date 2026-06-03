@@ -509,8 +509,8 @@ def handle(pkt):
         return
 
 
-def handle_uart_byte(b):
-    for nfcp_b in transport.nfcp_bytes_from_uart_byte(b):
+def handle_nfcp_bytes(data):
+    for nfcp_b in data:
         pkt = parser.feed(nfcp_b)
         if pkt and address_matches(pkt):
             handle(pkt)
@@ -521,11 +521,11 @@ try:
         had_data = False
 
         while transport.any():
-            b = transport.read_byte()
-            if b is not None:
+            data = transport.read_nfcp_bytes()
+            if data:
                 had_data = True
                 last_rx_ms = time.ticks_ms()
-                handle_uart_byte(b)
+                handle_nfcp_bytes(data)
 
         if not had_data:
             time.sleep_ms(1)

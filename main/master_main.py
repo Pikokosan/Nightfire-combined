@@ -33,7 +33,9 @@ TRELLIS_I2C_ID = 0
 TRELLIS_SCL_PIN = 9
 TRELLIS_SDA_PIN = 8
 TRELLIS_ADDRESS = 0x70
-TRELLIS_I2C_FREQ = 100000
+TRELLIS_I2C_FREQ = 400000
+TRELLIS_POLL_MS = 4
+TRELLIS_STEP_DEBOUNCE_MS = 60
 TRELLIS_LED_SWEEP_DELAY_MS = 45
 SCRIPT_TIMER_FONT_PATH = "timer_96.bin"
 
@@ -968,10 +970,14 @@ class NFCPGui:
         self.script_fire_step_index = 0
         self.script_fire_auto_index = 0
         self.script_fire_last_trellis_poll_ms = time.ticks_ms()
+        self.script_fire_trigger_held = False
+        self.script_fire_last_trigger_ms = time.ticks_ms()
         self.last_lvgl_handler_ms = time.ticks_ms()
         self.script_fire_prepared = False
         self.script_fire_auto_fired = 0
         self.script_fire_auto_packets = 0
+        self.script_fire_step_status_pending = None
+        self.script_fire_last_step_status_ms = time.ticks_ms()
         self.last_module_continuity_auto_ms = time.ticks_ms()
         self.settings = load_app_settings()
         self.auto_module_continuity = bool(
@@ -1032,6 +1038,7 @@ class NFCPGui:
         self.script_fire_prepared = False
         self.script_fire_auto_fired = 0
         self.script_fire_auto_packets = 0
+        self.script_fire_step_status_pending = None
 
     def update_background(self):
         color = lv.color_hex(0x400000) if self.armed else lv.color_hex(0x101010)
@@ -1568,6 +1575,14 @@ class NFCPGui:
         )
 
         self.update_script_fire_mode_buttons()
+        self.script_fire_trigger_held = False
+        self.script_fire_last_trellis_poll_ms = time.ticks_ms()
+        self.script_fire_last_trigger_ms = time.ticks_ms()
+        if not self.script_fire_prepared:
+            try:
+                self.prepare_script_fire_packets()
+            except Exception as e:
+                print("Script fire packet prep failed:", e)
         self.update_script_fire_clock(force=True)
         if self.script_fire_mode == "step":
             self.update_script_fire_step_status()
@@ -1719,6 +1734,28 @@ class NFCPGui:
         self.script_status_label.set_text(text)
         self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
 
+    def queue_script_fire_step_status(self, text):
+        self.script_fire_step_status_pending = text
+
+    def update_pending_script_fire_step_status(self):
+        if self.current_view != "script_fire":
+            self.script_fire_step_status_pending = None
+            return
+        if self.script_fire_mode != "step":
+            self.script_fire_step_status_pending = None
+            return
+        if self.script_fire_step_status_pending is None:
+            return
+
+        now = time.ticks_ms()
+        if time.ticks_diff(now, self.script_fire_last_step_status_ms) < 75:
+            return
+
+        self.script_fire_last_step_status_ms = now
+        pending = self.script_fire_step_status_pending
+        self.script_fire_step_status_pending = None
+        self.update_script_fire_step_status(pending)
+
     def count_mask_bits(self, mask):
         count = 0
 
@@ -1820,21 +1857,16 @@ class NFCPGui:
             self.script_fire_step_index = 0
 
         step = self.loaded_script_steps[self.script_fire_step_index]
-        fired, packets = self.fire_prepared_script_step(step)
+        fired, _packets = self.fire_prepared_script_step(step)
 
         event_time = step.get("event_time", "--")
         self.script_fire_step_index += 1
         if self.script_fire_step_index >= len(self.loaded_script_steps):
             self.script_fire_step_index = 0
 
-        self.update_script_fire_step_status(
+        self.queue_script_fire_step_status(
             "Fired %d cues @ %s" % (fired, event_time)
         )
-        self.set_status(
-            "Script step fired %d cue(s), %d packet(s)" %
-            (fired, packets)
-        )
-        self.update_script_fire_step_led()
 
     def get_script_fire_elapsed_ms(self):
         if self.script_fire_running:
@@ -1913,22 +1945,28 @@ class NFCPGui:
 
         trigger_key = self.get_script_trigger_key()
         if trigger_key is None:
+            self.script_fire_trigger_held = False
             return
 
         now = time.ticks_ms()
-        if time.ticks_diff(now, self.script_fire_last_trellis_poll_ms) < 35:
+        if time.ticks_diff(now, self.script_fire_last_trellis_poll_ms) < TRELLIS_POLL_MS:
             return
 
         self.script_fire_last_trellis_poll_ms = now
 
         try:
-            changed = self.trellis.read_switches()
-            if not changed:
-                return
-
-            if self.trellis.just_pressed(trigger_key):
+            self.trellis.read_switches()
+            pressed = self.trellis.is_key_pressed(trigger_key)
+            debounced = (
+                time.ticks_diff(now, self.script_fire_last_trigger_ms) >=
+                TRELLIS_STEP_DEBOUNCE_MS
+            )
+            if pressed and not self.script_fire_trigger_held and debounced:
+                self.script_fire_last_trigger_ms = now
                 self.advance_script_fire_step()
+            self.script_fire_trigger_held = pressed
         except Exception as e:
+            self.script_fire_trigger_held = False
             print("Script fire Trellis poll failed:", e)
             self.set_status("Script fire Trellis poll failed")
 
@@ -1983,6 +2021,8 @@ class NFCPGui:
 
     def select_script_fire_auto(self, event=None):
         self.script_fire_mode = "auto"
+        self.script_fire_trigger_held = False
+        self.script_fire_last_trigger_ms = time.ticks_ms()
         self.update_script_fire_mode_buttons()
         self.clear_trellis_leds()
         if hasattr(self, "script_status_label"):
@@ -1998,6 +2038,9 @@ class NFCPGui:
             self.script_fire_running = False
 
         self.script_fire_mode = "step"
+        self.script_fire_trigger_held = False
+        self.script_fire_last_trellis_poll_ms = time.ticks_ms()
+        self.script_fire_last_trigger_ms = time.ticks_ms()
         self.update_script_fire_mode_buttons()
         self.update_script_fire_step_led()
         self.update_script_fire_step_status()
@@ -4614,17 +4657,23 @@ class NFCPGui:
             self.script_fire_running
         )
 
+    def trellis_polling_active(self):
+        return self.current_view == "manual_fire" or self.current_view == "script_fire"
+
     def loop_sleep_ms(self):
         if self.script_fire_timing_active():
+            return 1
+
+        if self.trellis_polling_active():
             return 1
 
         return 10
 
     def lvgl_handler_due(self):
-        if not self.script_fire_timing_active():
-            return True
+        if self.script_fire_timing_active() or self.trellis_polling_active():
+            return time.ticks_diff(time.ticks_ms(), self.last_lvgl_handler_ms) >= 20
 
-        return time.ticks_diff(time.ticks_ms(), self.last_lvgl_handler_ms) >= 20
+        return True
 
     def update(self):
         if self.current_view == "manual_fire":
@@ -4634,6 +4683,7 @@ class NFCPGui:
             self.update_script_fire_clock()
             self.poll_script_fire_auto()
             self.poll_script_fire_trellis()
+            self.update_pending_script_fire_step_status()
 
         if (
             self.auto_module_continuity and

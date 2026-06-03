@@ -2,7 +2,7 @@ param(
     [string]$Version = "0.2.1",
     [string]$OutputDir = ".\dist\nightfire_update_package",
     [string]$RadioFirmware = "..\..\Nightfire-E77\build\release\e77_radio.bin",
-    [string]$RadioVersion = "0.2.4"
+    [string]$RadioVersion = "0.2.5"
 )
 
 $ErrorActionPreference = "Stop"
