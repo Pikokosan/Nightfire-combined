@@ -1575,9 +1575,7 @@ class NFCPGui:
         )
 
         self.update_script_fire_mode_buttons()
-        self.script_fire_trigger_held = False
-        self.script_fire_last_trellis_poll_ms = time.ticks_ms()
-        self.script_fire_last_trigger_ms = time.ticks_ms()
+        self.reset_script_fire_trigger_state()
         if not self.script_fire_prepared:
             try:
                 self.prepare_script_fire_packets()
@@ -1614,6 +1612,19 @@ class NFCPGui:
         self.script_fire_last_clock_ms = now
         self.script_clock_label.set_text(self.format_script_fire_time())
         self.script_clock_label.align(lv.ALIGN.CENTER, -70, -40)
+
+    def set_script_fire_status_label(self, text):
+        if not hasattr(self, "script_status_label"):
+            return
+
+        self.script_status_label.set_text(text)
+        self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
+
+    def reset_script_fire_trigger_state(self):
+        now = time.ticks_ms()
+        self.script_fire_trigger_held = False
+        self.script_fire_last_trellis_poll_ms = now
+        self.script_fire_last_trigger_ms = now
 
     def parse_script_time_ms(self, text):
         try:
@@ -1720,9 +1731,6 @@ class NFCPGui:
             print("Script step LED update failed:", e)
 
     def update_script_fire_step_status(self, prefix=None):
-        if not hasattr(self, "script_status_label"):
-            return
-
         total = len(self.loaded_script_steps)
         if total:
             text = "Step %d / %d" % (self.script_fire_step_index + 1, total)
@@ -1731,8 +1739,7 @@ class NFCPGui:
         else:
             text = "No pyro steps"
 
-        self.script_status_label.set_text(text)
-        self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
+        self.set_script_fire_status_label(text)
 
     def queue_script_fire_step_status(self, text):
         self.script_fire_step_status_pending = text
@@ -1924,15 +1931,13 @@ class NFCPGui:
         if self.script_fire_auto_index >= len(self.loaded_script_steps):
             self.script_fire_elapsed_ms = elapsed
             self.script_fire_running = False
-            if hasattr(self, "script_status_label"):
-                self.script_status_label.set_text(
-                    "Auto complete   %d cues   %d packets" %
-                    (
-                        self.script_fire_auto_fired,
-                        self.script_fire_auto_packets
-                    )
+            self.set_script_fire_status_label(
+                "Auto complete   %d cues   %d packets" %
+                (
+                    self.script_fire_auto_fired,
+                    self.script_fire_auto_packets
                 )
-                self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
+            )
             self.set_status("Script fire auto complete")
 
     def poll_script_fire_trellis(self):
@@ -1987,23 +1992,20 @@ class NFCPGui:
         )
         self.script_fire_running = True
 
-        if hasattr(self, "script_status_label"):
-            self.script_status_label.set_text("Playing")
-            self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
-
+        self.set_script_fire_status_label("Playing")
         self.set_status("Script fire playing")
 
     def script_fire_pause(self, event=None):
         if self.script_fire_running:
-            self.script_fire_elapsed_ms = time.ticks_diff(time.ticks_ms(), self.script_fire_started_ms)
+            self.script_fire_elapsed_ms = time.ticks_diff(
+                time.ticks_ms(),
+                self.script_fire_started_ms
+            )
 
         self.script_fire_running = False
         self.update_script_fire_clock(force=True)
 
-        if hasattr(self, "script_status_label"):
-            self.script_status_label.set_text("Paused")
-            self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
-
+        self.set_script_fire_status_label("Paused")
         self.set_status("Script fire paused")
 
     def script_fire_stop(self, event=None):
@@ -2013,23 +2015,17 @@ class NFCPGui:
         self.script_fire_auto_index = 0
         self.update_script_fire_clock(force=True)
 
-        if hasattr(self, "script_status_label"):
-            self.script_status_label.set_text("Stopped")
-            self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
-
+        self.set_script_fire_status_label("Stopped")
         self.set_status("Script fire stopped")
 
     def select_script_fire_auto(self, event=None):
         self.script_fire_mode = "auto"
-        self.script_fire_trigger_held = False
-        self.script_fire_last_trigger_ms = time.ticks_ms()
+        self.reset_script_fire_trigger_state()
         self.update_script_fire_mode_buttons()
         self.clear_trellis_leds()
-        if hasattr(self, "script_status_label"):
-            self.script_status_label.set_text(
-                "Playing" if self.script_fire_running else "Stopped"
-            )
-            self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
+        self.set_script_fire_status_label(
+            "Playing" if self.script_fire_running else "Stopped"
+        )
         self.set_status("Script fire mode: Auto")
 
     def select_script_fire_step(self, event=None):
@@ -2038,9 +2034,7 @@ class NFCPGui:
             self.script_fire_running = False
 
         self.script_fire_mode = "step"
-        self.script_fire_trigger_held = False
-        self.script_fire_last_trellis_poll_ms = time.ticks_ms()
-        self.script_fire_last_trigger_ms = time.ticks_ms()
+        self.reset_script_fire_trigger_state()
         self.update_script_fire_mode_buttons()
         self.update_script_fire_step_led()
         self.update_script_fire_step_status()

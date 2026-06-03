@@ -56,22 +56,35 @@ class ModuleTransport:
             return data[0]
         return None
 
+    def read_available(self, max_bytes=64):
+        n = self.uart.any()
+        if not n:
+            return b""
+        if n > max_bytes:
+            n = max_bytes
+        return self.uart.read(n) or b""
+
+    def read_pending_nfcp(self):
+        if not self.pending_nfcp:
+            return b""
+        data = bytes(self.pending_nfcp)
+        self.pending_nfcp = bytearray()
+        return data
+
     def read_nfcp_bytes(self):
         if self.transport != "e77":
-            b = self.read_byte()
-            if b is None:
-                return b""
-            return bytes([b])
+            return self.read_available()
 
         if self.pending_nfcp:
-            b = self.pending_nfcp[0]
-            self.pending_nfcp = self.pending_nfcp[1:]
-            return bytes([b])
+            return self.read_pending_nfcp()
 
-        b = self.read_byte()
-        if b is None:
-            return b""
-        return self.nfcp_bytes_from_uart_byte(b)
+        out = bytearray()
+        for b in self.read_available():
+            data = self.nfcp_bytes_from_uart_byte(b)
+            if data:
+                out.extend(data)
+
+        return bytes(out)
 
     def cache_radio_frame(self, frame):
         if frame.cmd != e77_radio.CMD_NFCP_RX:
@@ -81,7 +94,7 @@ class ModuleTransport:
         if not rx_info:
             return
 
-        self.pending_nfcp += rx_info.get("nfcp_frame", b"")
+        self.pending_nfcp.extend(rx_info.get("nfcp_frame", b""))
 
     def next_radio_seq(self):
         seq = self.radio_seq & 0xFF
