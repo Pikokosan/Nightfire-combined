@@ -56,6 +56,24 @@
             }
         },
         {
+            "label": "E77 MicroPython app: upload",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\scripts\\upload_e77_micropython_app.ps1"
+            ],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
             "label": "Nightfire update package: build",
             "type": "shell",
             "command": "powershell",

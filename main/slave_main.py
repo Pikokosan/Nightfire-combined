@@ -23,7 +23,7 @@ RADIO_UPDATE_ON_BOOT = True
 RADIO_APP_BAUD = 256000
 RADIO_BOOTLOADER_BAUD = 115200
 APP_FIRMWARE_NAME = "slave"
-APP_FIRMWARE_VERSION = "0.2.1"
+APP_FIRMWARE_VERSION = "0.3.0"
 
 UART_BAUD = RADIO_APP_BAUD if TRANSPORT == "e77" else 256000
 UART_TX_PIN = 0
@@ -74,6 +74,9 @@ _last_cont_ms = 0
 FIRE_PULSE_MS = 5
 LOG_FIRE_EVENTS = False
 ALLOW_FIRE_WHEN_DISARMED = False
+SCRIPT_MAX_ENTRIES = 192
+SCRIPT_HEARTBEAT_TIMEOUT_MS = 3000
+LOG_SCRIPT_EVENTS = True
 
 CUE_COUNT = 16
 
@@ -213,6 +216,13 @@ mc.begin()
 ARMED = False
 GROUP_ID, UNIQUE_ID, _stored_cues, DEVICE_TYPE, RADIO_NETWORK_ID = load_cfg()
 CUE_COUNT = 16  # this hardware is fixed at 16 cues
+script_id_loaded = None
+script_entries = []
+script_running = False
+script_start_ms = 0
+script_next_index = 0
+script_last_heartbeat_ms = 0
+script_last_event = "boot"
 
 print("NFCP MC33996 16-cue module started - DEFAULT: DISARMED")
 print(
@@ -260,7 +270,28 @@ def build_info_payload():
     return (
         encode_text_field(APP_FIRMWARE_NAME) +
         encode_text_field(APP_FIRMWARE_VERSION) +
-        encode_text_field(radio_version)
+        encode_text_field(radio_version) +
+        encode_text_field(build_script_status_text())
+    )
+
+
+def build_script_status_text():
+    if script_id_loaded is None:
+        script_id_text = "--"
+    else:
+        script_id_text = "%04X" % script_id_loaded
+
+    hb_age = -1
+    if script_last_heartbeat_ms:
+        hb_age = time.ticks_diff(time.ticks_ms(), script_last_heartbeat_ms)
+
+    return "id=%s entries=%d run=%d next=%d hb=%d %s" % (
+        script_id_text,
+        len(script_entries),
+        1 if script_running else 0,
+        script_next_index,
+        hb_age,
+        script_last_event
     )
 
 
@@ -300,6 +331,16 @@ def address_matches(pkt):
     return False
 
 
+def reply_ack_if_unique(pkt, orig_cmd, code=ACK_OK):
+    if pkt.get("frame_type") == SOF_UNIQUE:
+        tx_bytes(nfcp.build_ack(UNIQUE_ID, orig_cmd, code))
+
+
+def reply_nack_if_unique(pkt, orig_cmd, code):
+    if pkt.get("frame_type") == SOF_UNIQUE:
+        tx_bytes(nfcp.build_nack(UNIQUE_ID, orig_cmd, code))
+
+
 def handle_discover(pkt):
     nonce = None
     if pkt.get("data") and len(pkt["data"]) >= 2:
@@ -328,20 +369,13 @@ def handle_discover(pkt):
         break
 
 
-def handle_fire(pkt):
-    data = pkt.get("data", b"")
-    mask16 = mask_from_payload(data)
-    if mask16 is None:
-        tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_FIRE, NACK_BAD_LENGTH))
-        return
-
+def fire_mask(mask16, report_errors=True):
     if (not ARMED) and (not ALLOW_FIRE_WHEN_DISARMED):
         print("FIRE rejected - DISARMED mask=0x%04X" % mask16)
-        tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_FIRE, NACK_REJECTED_ARMED))
-        return
+        return NACK_REJECTED_ARMED
 
     if mask16 == 0:
-        return
+        return ACK_OK
 
     # Safety: only allow real 16 cue bits.
     mask16 &= 0xFFFF
@@ -351,15 +385,205 @@ def handle_fire(pkt):
         mc.digitalWriteMask(mask16)
         time.sleep_ms(FIRE_PULSE_MS)
         mc.digitalWriteMask(0x0000)
-        # Successful fire is intentionally one-way; only failures return NACK.
+        return ACK_OK
     except Exception as e:
         mc.digitalWriteMask(0x0000)
         print("FIRE error:", e)
-        tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_FIRE, NACK_INTERNAL_ERROR))
+        return NACK_INTERNAL_ERROR
+
+
+def handle_fire(pkt):
+    data = pkt.get("data", b"")
+    mask16 = mask_from_payload(data)
+    if mask16 is None:
+        tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_FIRE, NACK_BAD_LENGTH))
+        return
+
+    result = fire_mask(mask16)
+    if result not in (ACK_OK, None):
+        tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_FIRE, result))
+
+
+def clear_script(script_id=None):
+    global script_id_loaded, script_entries, script_running, script_start_ms, script_next_index
+    global script_last_heartbeat_ms, script_last_event
+
+    script_id_loaded = script_id
+    script_entries = []
+    script_running = False
+    script_start_ms = 0
+    script_next_index = 0
+    script_last_heartbeat_ms = 0
+    script_last_event = "clear"
+    if LOG_SCRIPT_EVENTS:
+        print("SCRIPT CLEAR id=%s" % ("--" if script_id is None else "%04X" % script_id))
+
+
+def handle_script_clear(pkt):
+    data = pkt.get("data", b"")
+    if len(data) != 2:
+        reply_nack_if_unique(pkt, CMD_SCRIPT_CLEAR, NACK_BAD_LENGTH)
+        return
+
+    clear_script(int.from_bytes(data, "big") & 0xFFFF)
+    reply_ack_if_unique(pkt, CMD_SCRIPT_CLEAR)
+
+
+def handle_script_load(pkt):
+    global script_id_loaded, script_entries, script_last_event
+
+    data = pkt.get("data", b"")
+    if len(data) < 4:
+        reply_nack_if_unique(pkt, CMD_SCRIPT_LOAD, NACK_BAD_LENGTH)
+        return
+
+    script_id = int.from_bytes(data[0:2], "big") & 0xFFFF
+    entry_count = data[3]
+    payload = data[4:]
+    if len(payload) != entry_count * 6:
+        reply_nack_if_unique(pkt, CMD_SCRIPT_LOAD, NACK_BAD_LENGTH)
+        return
+
+    if script_id_loaded != script_id:
+        clear_script(script_id)
+
+    if len(script_entries) + entry_count > SCRIPT_MAX_ENTRIES:
+        reply_nack_if_unique(pkt, CMD_SCRIPT_LOAD, NACK_BUSY)
+        return
+
+    pos = 0
+    for _ in range(entry_count):
+        event_ms = int.from_bytes(payload[pos:pos + 4], "big")
+        cue_mask = int.from_bytes(payload[pos + 4:pos + 6], "big") & 0xFFFF
+        pos += 6
+        if cue_mask:
+            script_entries.append((event_ms, cue_mask))
+
+    script_entries.sort(key=lambda item: item[0])
+    script_last_event = "load"
+    if LOG_SCRIPT_EVENTS:
+        print(
+            "SCRIPT LOAD id=%04X chunk=%d add=%d total=%d" %
+            (script_id, data[2], entry_count, len(script_entries))
+        )
+    reply_ack_if_unique(pkt, CMD_SCRIPT_LOAD)
+
+
+def handle_script_start(pkt):
+    global script_running, script_start_ms, script_next_index, script_last_heartbeat_ms, script_last_event
+
+    if not ARMED:
+        script_last_event = "start disarmed"
+        if LOG_SCRIPT_EVENTS:
+            print("SCRIPT START rejected - disarmed")
+        reply_nack_if_unique(pkt, CMD_SCRIPT_START, NACK_REJECTED_ARMED)
+        return
+
+    data = pkt.get("data", b"")
+    if len(data) < 4:
+        reply_nack_if_unique(pkt, CMD_SCRIPT_START, NACK_BAD_LENGTH)
+        return
+
+    script_id = int.from_bytes(data[0:2], "big") & 0xFFFF
+    start_delay_ms = int.from_bytes(data[2:4], "big")
+    offset_ms = 0
+    if len(data) >= 8:
+        offset_ms = int.from_bytes(data[4:8], "big")
+
+    if script_id_loaded != script_id or not script_entries:
+        script_last_event = "start invalid"
+        if LOG_SCRIPT_EVENTS:
+            print(
+                "SCRIPT START rejected id=%04X loaded=%s entries=%d" %
+                (
+                    script_id,
+                    "--" if script_id_loaded is None else "%04X" % script_id_loaded,
+                    len(script_entries)
+                )
+            )
+        reply_nack_if_unique(pkt, CMD_SCRIPT_START, NACK_INVALID_VALUE)
+        return
+
+    script_next_index = 0
+    while script_next_index < len(script_entries):
+        if script_entries[script_next_index][0] >= offset_ms:
+            break
+        script_next_index += 1
+
+    script_start_ms = time.ticks_add(time.ticks_ms(), start_delay_ms - offset_ms)
+    script_running = True
+    script_last_heartbeat_ms = time.ticks_ms()
+    script_last_event = "start"
+    if LOG_SCRIPT_EVENTS:
+        print(
+            "SCRIPT START id=%04X entries=%d delay=%d offset=%d next=%d" %
+            (script_id, len(script_entries), start_delay_ms, offset_ms, script_next_index)
+        )
+    reply_ack_if_unique(pkt, CMD_SCRIPT_START)
+
+
+def handle_script_stop(pkt):
+    global script_running, script_last_heartbeat_ms, script_last_event
+
+    script_running = False
+    script_last_heartbeat_ms = 0
+    script_last_event = "stop"
+    mc.digitalWriteMask(0x0000)
+    if LOG_SCRIPT_EVENTS:
+        print("SCRIPT STOP")
+    reply_ack_if_unique(pkt, CMD_SCRIPT_STOP)
+
+
+def handle_script_heartbeat(pkt):
+    global script_last_heartbeat_ms, script_last_event
+
+    data = pkt.get("data", b"")
+    if len(data) < 2:
+        return
+
+    script_id = int.from_bytes(data[0:2], "big") & 0xFFFF
+    if script_running and script_id_loaded == script_id:
+        script_last_heartbeat_ms = time.ticks_ms()
+        script_last_event = "heartbeat"
+
+
+def run_script_scheduler():
+    global script_running, script_next_index, script_last_event
+
+    if not script_running:
+        return
+    if not ARMED:
+        script_running = False
+        mc.digitalWriteMask(0x0000)
+        script_last_event = "stopped disarmed"
+        return
+    if time.ticks_diff(time.ticks_ms(), script_last_heartbeat_ms) > SCRIPT_HEARTBEAT_TIMEOUT_MS:
+        script_running = False
+        mc.digitalWriteMask(0x0000)
+        script_last_event = "hb timeout"
+        print("SCRIPT stopped - heartbeat timeout")
+        return
+
+    elapsed = time.ticks_diff(time.ticks_ms(), script_start_ms)
+    while script_next_index < len(script_entries):
+        event_ms, cue_mask = script_entries[script_next_index]
+        if event_ms > elapsed:
+            break
+        script_last_event = "fire"
+        if LOG_SCRIPT_EVENTS:
+            print("SCRIPT FIRE mask=0x%04X event=%d elapsed=%d" % (cue_mask, event_ms, elapsed))
+        fire_mask(cue_mask, report_errors=False)
+        script_next_index += 1
+
+    if script_next_index >= len(script_entries):
+        script_running = False
+        script_last_event = "complete"
+        if LOG_SCRIPT_EVENTS:
+            print("SCRIPT COMPLETE")
 
 
 def handle(pkt):
-    global ARMED, GROUP_ID, UNIQUE_ID, DEVICE_TYPE, RADIO_NETWORK_ID, _last_cont_ms
+    global ARMED, GROUP_ID, UNIQUE_ID, DEVICE_TYPE, RADIO_NETWORK_ID, _last_cont_ms, script_running
 
     cmd = pkt["cmd"]
 
@@ -379,12 +603,15 @@ def handle(pkt):
     if cmd == CMD_ARM:
         ARMED = True
         print("ARMED")
+        reply_ack_if_unique(pkt, CMD_ARM)
         return
 
     if cmd == CMD_DISARM:
         ARMED = False
+        script_running = False
         mc.digitalWriteMask(0x0000)
         print("DISARMED - outputs off")
+        reply_ack_if_unique(pkt, CMD_DISARM)
         return
 
     if cmd == CMD_DISCOVER:
@@ -394,6 +621,26 @@ def handle(pkt):
 
     if cmd == CMD_FIRE:
         handle_fire(pkt)
+        return
+
+    if cmd == CMD_SCRIPT_CLEAR:
+        handle_script_clear(pkt)
+        return
+
+    if cmd == CMD_SCRIPT_LOAD:
+        handle_script_load(pkt)
+        return
+
+    if cmd == CMD_SCRIPT_START:
+        handle_script_start(pkt)
+        return
+
+    if cmd == CMD_SCRIPT_STOP:
+        handle_script_stop(pkt)
+        return
+
+    if cmd == CMD_SCRIPT_HEARTBEAT:
+        handle_script_heartbeat(pkt)
         return
 
     if cmd == CMD_OTA_BEGIN:
@@ -528,7 +775,10 @@ try:
                 handle_nfcp_bytes(data)
 
         if not had_data:
+            run_script_scheduler()
             time.sleep_ms(1)
+        else:
+            run_script_scheduler()
 finally:
     # In case of soft reset/exception, try to leave outputs safe.
     try:

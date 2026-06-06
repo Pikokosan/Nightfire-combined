@@ -41,6 +41,12 @@ CMD_OTA_WRITE    = 0x61
 CMD_OTA_END      = 0x62
 CMD_OTA_ABORT    = 0x63
 
+CMD_SCRIPT_CLEAR = 0x70
+CMD_SCRIPT_LOAD  = 0x71
+CMD_SCRIPT_START = 0x72
+CMD_SCRIPT_STOP  = 0x73
+CMD_SCRIPT_HEARTBEAT = 0x74
+
 # speed test / ping
 CMD_PING         = 0x7F   # Unique-only ping for latency/throughput tests
 PING_REPLY_BYTE  = 0xAA   # Used when CMD_PING payload is empty
@@ -120,8 +126,8 @@ class NFCP:
 
     # Broadcast: ONLY ARM/DISARM/DISCOVER
     def build_broadcast(self, cmd: int, data: bytes = b"") -> bytes:
-        if cmd not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER):
-            raise NFCPError("Broadcast only allowed for ARM/DISARM/DISCOVER")
+        if cmd not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER, CMD_SCRIPT_START, CMD_SCRIPT_STOP, CMD_SCRIPT_HEARTBEAT):
+            raise NFCPError("Broadcast only allowed for ARM/DISARM/DISCOVER/SCRIPT")
         return self._frame(SOF_BROADCAST, bytes([self.node_id, cmd]) + data)
 
     def build_arm_broadcast(self) -> bytes:
@@ -155,6 +161,21 @@ class NFCP:
             mask_bytes
         )
         return self._frame(SOF_UNIQUE, payload)
+
+    def build_unique_command(self, target_unique: int, cmd: int, data: bytes = b"") -> bytes:
+        payload = (
+            bytes([self.node_id]) +
+            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes([cmd & 0xFF]) +
+            data
+        )
+        return self._frame(SOF_UNIQUE, payload)
+
+    def build_arm_unique(self, target_unique: int) -> bytes:
+        return self.build_unique_command(target_unique, CMD_ARM)
+
+    def build_disarm_unique(self, target_unique: int) -> bytes:
+        return self.build_unique_command(target_unique, CMD_DISARM)
 
     # Setters (unique only)
     def build_set_group(self, target_unique: int, new_group: int) -> bytes:
@@ -210,6 +231,73 @@ class NFCP:
             bytes([CMD_INFO_REQ])
         )
         return self._frame(SOF_UNIQUE, payload)
+
+    def build_script_clear(self, target_unique: int, script_id: int) -> bytes:
+        payload = (
+            bytes([self.node_id]) +
+            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes([CMD_SCRIPT_CLEAR]) +
+            (script_id & 0xFFFF).to_bytes(2, "big")
+        )
+        return self._frame(SOF_UNIQUE, payload)
+
+    def build_script_load(self, target_unique: int, script_id: int, chunk_index: int, entries) -> bytes:
+        data = bytearray()
+        data += (script_id & 0xFFFF).to_bytes(2, "big")
+        data.append(chunk_index & 0xFF)
+        data.append(len(entries) & 0xFF)
+
+        for event_ms, cue_mask in entries:
+            data += (int(event_ms) & 0xFFFFFFFF).to_bytes(4, "big")
+            data += (int(cue_mask) & 0xFFFF).to_bytes(2, "big")
+
+        payload = (
+            bytes([self.node_id]) +
+            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes([CMD_SCRIPT_LOAD]) +
+            bytes(data)
+        )
+        return self._frame(SOF_UNIQUE, payload)
+
+    def build_script_start_broadcast(self, script_id: int, start_delay_ms: int, offset_ms: int = 0) -> bytes:
+        data = (
+            (script_id & 0xFFFF).to_bytes(2, "big") +
+            (start_delay_ms & 0xFFFF).to_bytes(2, "big") +
+            (offset_ms & 0xFFFFFFFF).to_bytes(4, "big")
+        )
+        return self.build_broadcast(CMD_SCRIPT_START, data)
+
+    def build_script_start(self, target_unique: int, script_id: int, start_delay_ms: int, offset_ms: int = 0) -> bytes:
+        data = (
+            (script_id & 0xFFFF).to_bytes(2, "big") +
+            (start_delay_ms & 0xFFFF).to_bytes(2, "big") +
+            (offset_ms & 0xFFFFFFFF).to_bytes(4, "big")
+        )
+        return self.build_unique_command(target_unique, CMD_SCRIPT_START, data)
+
+    def build_script_stop_broadcast(self, script_id: int = 0) -> bytes:
+        return self.build_broadcast(CMD_SCRIPT_STOP, (script_id & 0xFFFF).to_bytes(2, "big"))
+
+    def build_script_stop(self, target_unique: int, script_id: int = 0) -> bytes:
+        return self.build_unique_command(
+            target_unique,
+            CMD_SCRIPT_STOP,
+            (script_id & 0xFFFF).to_bytes(2, "big")
+        )
+
+    def build_script_heartbeat_broadcast(self, script_id: int, elapsed_ms: int = 0) -> bytes:
+        data = (
+            (script_id & 0xFFFF).to_bytes(2, "big") +
+            (elapsed_ms & 0xFFFFFFFF).to_bytes(4, "big")
+        )
+        return self.build_broadcast(CMD_SCRIPT_HEARTBEAT, data)
+
+    def build_script_heartbeat(self, target_unique: int, script_id: int, elapsed_ms: int = 0) -> bytes:
+        data = (
+            (script_id & 0xFFFF).to_bytes(2, "big") +
+            (elapsed_ms & 0xFFFFFFFF).to_bytes(4, "big")
+        )
+        return self.build_unique_command(target_unique, CMD_SCRIPT_HEARTBEAT, data)
 
     def build_ota_begin(self, target_unique: int, path: str, size: int, checksum: int) -> bytes:
         path_bytes = path.encode()
@@ -460,7 +548,7 @@ class NFCPStreamParser:
             pkt["src"] = payload[0]
             pkt["cmd"] = payload[1]
             pkt["data"] = payload[2:]
-            if pkt["cmd"] not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER):
+            if pkt["cmd"] not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER, CMD_SCRIPT_START, CMD_SCRIPT_STOP, CMD_SCRIPT_HEARTBEAT):
                 return None
 
         elif self.frame_type == SOF_GROUP:
@@ -480,6 +568,8 @@ class NFCPStreamParser:
                 CMD_OTA_WRITE,
                 CMD_OTA_END,
                 CMD_OTA_ABORT,
+                CMD_SCRIPT_CLEAR,
+                CMD_SCRIPT_LOAD,
             ):
                 return None
 
@@ -510,6 +600,8 @@ class NFCPStreamParser:
             CMD_OTA_WRITE,
             CMD_OTA_END,
             CMD_OTA_ABORT,
+            CMD_SCRIPT_CLEAR,
+            CMD_SCRIPT_LOAD,
         ) and self.frame_type != SOF_UNIQUE:
             return None
 

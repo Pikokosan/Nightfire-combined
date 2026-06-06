@@ -16,9 +16,12 @@ Current firmware is set up for the E77 radio transport.
 - `main/master_main.py` - Waveshare ESP32-S3-LCD-4.3 master controller GUI.
 - `main/slave_main.py` - real 16-cue module firmware using the MC33996 driver.
 - `main/dummy_main.py` - simulated module firmware for testing.
+- `main/e77_main.py` - E77 module MicroPython NFCP radio slave app.
+- `main/e77_gfsk.py` - STM32WL SUBGHZ GFSK radio driver used by `e77_main.py`.
 - `scripts/upload_master_to_com7.ps1` - installs master firmware as `main.py`.
 - `scripts/upload_slave_to_com10.ps1` - installs slave firmware as `main.py`.
 - `scripts/upload_dummy_to_com11.ps1` - installs dummy firmware as `main.py`.
+- `scripts/upload_e77_micropython_app.ps1` - installs the E77 MicroPython radio slave app.
 - `scripts/build_module_ota_package.ps1` - builds the customer update package.
 - `scripts/install_master_update.ps1` - installs packaged master firmware over USB.
 - `scripts/update_e77_radio_firmware.py` - PC-side E77 radio firmware updater for a radio connected directly to the computer.
@@ -35,6 +38,7 @@ Each upload script accepts a different port:
 powershell -ExecutionPolicy Bypass -File .\scripts\upload_master_to_com7.ps1 -Port COM7
 powershell -ExecutionPolicy Bypass -File .\scripts\upload_slave_to_com10.ps1 -Port COM10
 powershell -ExecutionPolicy Bypass -File .\scripts\upload_dummy_to_com11.ps1 -Port COM11
+powershell -ExecutionPolicy Bypass -File .\scripts\upload_e77_micropython_app.ps1 -Port COM17
 ```
 
 The VS Code build tasks run the same scripts:
@@ -77,6 +81,13 @@ Dummy upload includes:
 - `module_transport.py`
 - `module_ota.py`
 - `e77_bootloader.py`
+
+E77 MicroPython app upload includes:
+
+- `main/e77_main.py` compiled as `e77_main.mpy`
+- `main/nfcp.py` compiled as `nfcp.mpy`
+- `main/e77_gfsk.py` compiled as `e77_gfsk.mpy`
+- a tiny device `main.py` stub that imports `e77_main`
 
 ## Customer Update Package
 

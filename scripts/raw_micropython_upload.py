@@ -137,10 +137,26 @@ def upload_file(port, local_path, remote_path, chunk_size=256):
             exec_raw(port, code)
 
 
+def remove_remote_files(port, paths):
+    if not paths:
+        return
+
+    lines = ["import os"]
+    for path in paths:
+        lines.append(
+            "try:\n"
+            "    os.remove(%r)\n"
+            "except OSError:\n"
+            "    pass" % path
+        )
+    exec_raw(port, "\n".join(lines) + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", required=True)
     parser.add_argument("--baud", type=int, default=115200)
+    parser.add_argument("--delete", action="append", default=[], help="Remote file to remove before uploading")
     parser.add_argument("copies", nargs="+", help="Pairs of local_path:remote_path")
     args = parser.parse_args()
 
@@ -157,6 +173,8 @@ def main():
         enter_raw_repl(port)
 
         try:
+            remove_remote_files(port, args.delete)
+
             for copy in args.copies:
                 local_path, remote_path = copy.rsplit(":", 1)
                 upload_file(port, local_path, remote_path)

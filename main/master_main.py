@@ -28,6 +28,10 @@ DISCOVER_IDLE_TIMEOUT_MS = 3000
 DISCOVER_MAX_SCAN_MS = 30000
 SPEED_TEST_TIMEOUT_MS = 2000
 OTA_CHUNK_SIZE = 160
+SCRIPT_LOAD_CHUNK_ENTRIES = 32
+SCRIPT_START_DELAY_MS = 2000
+SCRIPT_START_BROADCAST_REPEATS = 3
+SCRIPT_HEARTBEAT_MS = 200
 TRELLIS_ENABLED = True
 TRELLIS_I2C_ID = 0
 TRELLIS_SCL_PIN = 9
@@ -35,6 +39,8 @@ TRELLIS_SDA_PIN = 8
 TRELLIS_ADDRESS = 0x70
 TRELLIS_I2C_FREQ = 400000
 TRELLIS_POLL_MS = 4
+MANUAL_FIRE_DEBOUNCE_MS = 180
+MANUAL_FIRE_BLINK_MS = 250
 TRELLIS_STEP_DEBOUNCE_MS = 60
 TRELLIS_LED_SWEEP_DELAY_MS = 45
 SCRIPT_TIMER_FONT_PATH = "timer_96.bin"
@@ -43,16 +49,14 @@ SRC_ID = 0x01
 DEVICE_DB_PATH = "nfcp_devices.json"
 SETTINGS_PATH = "nfcp_settings.json"
 
-TRANSPORT = "e77"
 RADIO_NETWORK_ID = e77_radio.DEFAULT_NETWORK_ID
 RADIO_APP_BAUD = 256000
 RADIO_BOOTLOADER_BAUD = 115200
 
 UART_ID = 2
-BAUDRATE = RADIO_APP_BAUD if TRANSPORT == "e77" else 256000
+BAUDRATE = RADIO_APP_BAUD
 TX_PIN = 15
 RX_PIN = 16
-RS485_DE_RE_PIN = None if TRANSPORT == "e77" else 6
 
 uart = UART(
     UART_ID,
@@ -60,12 +64,6 @@ uart = UART(
     tx=Pin(TX_PIN),
     rx=Pin(RX_PIN)
 )
-
-if RS485_DE_RE_PIN is not None:
-    de = Pin(RS485_DE_RE_PIN, Pin.OUT)
-    de.value(0)
-else:
-    de = None
 
 nfcp_tx = nfcp.NFCP(SRC_ID)
 nfcp_rx = nfcp.NFCPStreamParser()
@@ -141,28 +139,8 @@ def next_radio_seq():
     return seq
 
 
-def transport_write(pkt):
-    if TRANSPORT == "e77":
-        uart.write(e77_radio.build_send_nfcp(next_radio_seq(), pkt))
-        return
-
-    if de is not None:
-        de.value(1)
-        time.sleep_us(500)
-
-    uart.write(pkt)
-
-    bits = len(pkt) * 10
-    tx_time_us = int((bits * 1000000) // BAUDRATE)
-    time.sleep_us(tx_time_us + 3000)
-
-    if de is not None:
-        de.value(0)
-        time.sleep_us(500)
-
-
-def rs485_write(pkt):
-    transport_write(pkt)
+def radio_write_nfcp(pkt):
+    uart.write(e77_radio.build_send_nfcp(next_radio_seq(), pkt))
 
 
 def uart_read_some(max_bytes=256):
@@ -180,9 +158,6 @@ def drain_uart():
 
 
 def local_radio_command(cmd, payload=b"", timeout_ms=1000):
-    if TRANSPORT != "e77":
-        return None
-
     global radio_rx
 
     drain_uart()
@@ -209,17 +184,11 @@ def local_radio_command(cmd, payload=b"", timeout_ms=1000):
 
 
 def radio_ping(timeout_ms=1000):
-    if TRANSPORT != "e77":
-        return True
-
     frame = local_radio_command(e77_radio.CMD_PING, b"", timeout_ms)
     return bool(frame and frame.cmd == e77_radio.CMD_PONG and not (frame.flags & e77_radio.FLAG_ERROR))
 
 
 def set_local_radio_network(network_id, timeout_ms=1000):
-    if TRANSPORT != "e77":
-        return True
-
     frame = local_radio_command(
         e77_radio.CMD_SET_NETWORK,
         (network_id & 0xFFFF).to_bytes(2, "big"),
@@ -234,9 +203,6 @@ def set_local_radio_network(network_id, timeout_ms=1000):
 
 
 def get_local_radio_info(timeout_ms=1000):
-    if TRANSPORT != "e77":
-        return None
-
     frame = local_radio_command(e77_radio.CMD_GET_INFO, b"", timeout_ms)
     if not frame:
         return None
@@ -246,9 +212,6 @@ def get_local_radio_info(timeout_ms=1000):
 
 
 def check_radio_ready(network_id):
-    if TRANSPORT != "e77":
-        return True
-
     if not radio_ping(1000):
         return False
 
@@ -369,6 +332,14 @@ def load_app_settings(path=SETTINGS_PATH):
     except:
         radio_network_id = RADIO_NETWORK_ID
 
+    if radio_network_id == 1 and RADIO_NETWORK_ID != 1:
+        radio_network_id = RADIO_NETWORK_ID
+        settings["radio_network_id"] = radio_network_id
+        try:
+            save_app_settings(settings, path)
+        except:
+            pass
+
     return {
         "auto_module_continuity": bool(settings.get("auto_module_continuity", True)),
         "color_cues_without_script": bool(settings.get("color_cues_without_script", True)),
@@ -379,6 +350,24 @@ def load_app_settings(path=SETTINGS_PATH):
 def save_app_settings(settings, path=SETTINGS_PATH):
     with open(path, "w") as f:
         json.dump(settings, f)
+
+
+def ack_code_text(code):
+    if code is None:
+        return "timeout"
+    if code == nfcp.ACK_OK:
+        return "ok"
+    if code == nfcp.NACK_REJECTED_ARMED:
+        return "disarmed"
+    if code == nfcp.NACK_BAD_LENGTH:
+        return "bad length"
+    if code == nfcp.NACK_INVALID_VALUE:
+        return "invalid script"
+    if code == nfcp.NACK_INTERNAL_ERROR:
+        return "internal error"
+    if code == nfcp.NACK_BUSY:
+        return "busy"
+    return "code %d" % code
 
 
 def index_db_by_unique(db):
@@ -456,10 +445,12 @@ def parse_info_rsp(data):
     app_name, index = read_text_field(data, index)
     app_version, index = read_text_field(data, index)
     radio_version, index = read_text_field(data, index)
+    script_status, index = read_text_field(data, index)
     return {
         "app_name": app_name,
         "app_version": app_version,
-        "radio_version": radio_version
+        "radio_version": radio_version,
+        "script_status": script_status
     }
 
 
@@ -472,22 +463,17 @@ def poll_responses(max_packets=8):
         return packets
 
     for b in data:
-        if TRANSPORT == "e77":
-            frame = radio_rx.feed(b)
-            if not frame:
-                continue
-            if frame.cmd != e77_radio.CMD_NFCP_RX:
-                continue
-            rx_info = e77_radio.parse_nfcp_rx(frame.payload)
-            if not rx_info:
-                continue
-            nfcp_data = rx_info.get("nfcp_frame", b"")
-            radio_rssi = rx_info.get("rssi", None)
-            radio_snr = rx_info.get("snr", None)
-        else:
-            nfcp_data = bytes([b])
-            radio_rssi = None
-            radio_snr = None
+        frame = radio_rx.feed(b)
+        if not frame:
+            continue
+        if frame.cmd != e77_radio.CMD_NFCP_RX:
+            continue
+        rx_info = e77_radio.parse_nfcp_rx(frame.payload)
+        if not rx_info:
+            continue
+        nfcp_data = rx_info.get("nfcp_frame", b"")
+        radio_rssi = rx_info.get("rssi", None)
+        radio_snr = rx_info.get("snr", None)
 
         for nfcp_b in nfcp_data:
             pkt = nfcp_rx.feed(nfcp_b)
@@ -549,7 +535,7 @@ def discover(idle_ms=DISCOVER_IDLE_TIMEOUT_MS, max_scan_ms=DISCOVER_MAX_SCAN_MS)
     drain_uart()
 
     nonce = random.getrandbits(16)
-    rs485_write(nfcp_tx.build_discover_broadcast(nonce))
+    radio_write_nfcp(nfcp_tx.build_discover_broadcast(nonce))
 
     db = load_device_db()
     idx = index_db_by_unique(db)
@@ -586,7 +572,7 @@ def discover(idle_ms=DISCOVER_IDLE_TIMEOUT_MS, max_scan_ms=DISCOVER_MAX_SCAN_MS)
 
 def request_continuity_for_uid(uid_int, cue_count_hint=16, timeout_ms=300):
     drain_uart()
-    rs485_write(nfcp_tx.build_continuity_request(uid_int))
+    radio_write_nfcp(nfcp_tx.build_continuity_request(uid_int))
 
     deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
     while time.ticks_diff(deadline, time.ticks_ms()) > 0:
@@ -620,7 +606,7 @@ def request_ping_for_uid(uid_int, timeout_ms=SPEED_TEST_TIMEOUT_MS):
 
     # Speed tests are unique-addressed only. The target UID is also echoed in
     # the payload so stale or unrelated ping responses cannot be accepted.
-    rs485_write(nfcp_tx.build_ping(uid_int, payload))
+    radio_write_nfcp(nfcp_tx.build_ping(uid_int, payload))
 
     deadline = time.ticks_add(start, timeout_ms)
     while time.ticks_diff(deadline, time.ticks_ms()) > 0:
@@ -643,7 +629,7 @@ def request_ping_for_uid(uid_int, timeout_ms=SPEED_TEST_TIMEOUT_MS):
 
 def request_info_for_uid(uid_int, timeout_ms=1000):
     drain_uart()
-    rs485_write(nfcp_tx.build_info_request(uid_int))
+    radio_write_nfcp(nfcp_tx.build_info_request(uid_int))
 
     deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
     while time.ticks_diff(deadline, time.ticks_ms()) > 0:
@@ -789,18 +775,30 @@ def speed_test_scan(timeout_ms=SPEED_TEST_TIMEOUT_MS):
 
 
 def arm():
-    rs485_write(nfcp_tx.build_arm_broadcast())
+    radio_write_nfcp(nfcp_tx.build_arm_broadcast())
 
 
 def disarm():
-    rs485_write(nfcp_tx.build_disarm_broadcast())
+    radio_write_nfcp(nfcp_tx.build_disarm_broadcast())
+
+
+def arm_for_uid(uid_int, timeout_ms=SPEED_TEST_TIMEOUT_MS):
+    drain_uart()
+    radio_write_nfcp(nfcp_tx.build_arm_unique(uid_int))
+    return wait_for_ack(uid_int, nfcp.CMD_ARM, timeout_ms)
+
+
+def disarm_for_uid(uid_int, timeout_ms=SPEED_TEST_TIMEOUT_MS):
+    drain_uart()
+    radio_write_nfcp(nfcp_tx.build_disarm_unique(uid_int))
+    return wait_for_ack(uid_int, nfcp.CMD_DISARM, timeout_ms)
 
 
 def fire_unique(uid_int, cue_index_0based):
     if cue_index_0based < 0 or cue_index_0based >= MAX_CUE_COUNT:
         raise ValueError("cue index out of range")
 
-    rs485_write(nfcp_tx.build_unique_fire(uid_int, 1 << cue_index_0based))
+    radio_write_nfcp(nfcp_tx.build_unique_fire(uid_int, 1 << cue_index_0based))
 
 
 def fire_unique_mask(uid_int, cue_mask):
@@ -810,16 +808,16 @@ def fire_unique_mask(uid_int, cue_mask):
     if cue_mask >> MAX_CUE_COUNT:
         raise ValueError("cue mask out of range")
 
-    rs485_write(nfcp_tx.build_unique_fire(uid_int, cue_mask))
+    radio_write_nfcp(nfcp_tx.build_unique_fire(uid_int, cue_mask))
 
 
 def set_group(uid_int, new_group):
-    rs485_write(nfcp_tx.build_set_group(uid_int, new_group))
+    radio_write_nfcp(nfcp_tx.build_set_group(uid_int, new_group))
 
 
 def request_set_network_for_uid(uid_int, new_network, timeout_ms=800):
     drain_uart()
-    rs485_write(nfcp_tx.build_set_network(uid_int, new_network))
+    radio_write_nfcp(nfcp_tx.build_set_network(uid_int, new_network))
 
     deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
     while time.ticks_diff(deadline, time.ticks_ms()) > 0:
@@ -844,6 +842,11 @@ def request_set_network_for_uid(uid_int, new_network, timeout_ms=800):
 
 
 def wait_for_ack(uid_int, orig_cmd, timeout_ms=1000):
+    ok, _code = wait_for_ack_detail(uid_int, orig_cmd, timeout_ms)
+    return ok
+
+
+def wait_for_ack_detail(uid_int, orig_cmd, timeout_ms=1000):
     deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
     while time.ticks_diff(deadline, time.ticks_ms()) > 0:
         packets = poll_responses()
@@ -854,15 +857,15 @@ def wait_for_ack(uid_int, orig_cmd, timeout_ms=1000):
             data = pkt.get("data", b"")
             if pkt["cmd"] == nfcp.CMD_ACK and len(data) >= 2:
                 if data[0] == orig_cmd:
-                    return data[1] == nfcp.ACK_OK
+                    return data[1] == nfcp.ACK_OK, data[1]
 
             if pkt["cmd"] == nfcp.CMD_NACK and len(data) >= 2:
                 if data[0] == orig_cmd:
-                    return False
+                    return False, data[1]
 
         time.sleep_ms(2)
 
-    return False
+    return False, None
 
 
 def simple_checksum_file(path):
@@ -885,7 +888,7 @@ def ota_send_file_for_uid(uid_int, source_path, target_path, progress_cb=None):
     size, checksum = simple_checksum_file(source_path)
 
     drain_uart()
-    rs485_write(nfcp_tx.build_ota_begin(uid_int, target_path, size, checksum))
+    radio_write_nfcp(nfcp_tx.build_ota_begin(uid_int, target_path, size, checksum))
     if not wait_for_ack(uid_int, nfcp.CMD_OTA_BEGIN, 2000):
         return False
 
@@ -898,9 +901,9 @@ def ota_send_file_for_uid(uid_int, source_path, target_path, progress_cb=None):
                     break
 
                 drain_uart()
-                rs485_write(nfcp_tx.build_ota_write(uid_int, offset, chunk))
+                radio_write_nfcp(nfcp_tx.build_ota_write(uid_int, offset, chunk))
                 if not wait_for_ack(uid_int, nfcp.CMD_OTA_WRITE, 2000):
-                    rs485_write(nfcp_tx.build_ota_abort(uid_int))
+                    radio_write_nfcp(nfcp_tx.build_ota_abort(uid_int))
                     return False
 
                 offset += len(chunk)
@@ -908,15 +911,101 @@ def ota_send_file_for_uid(uid_int, source_path, target_path, progress_cb=None):
                     progress_cb(offset, size)
 
         drain_uart()
-        rs485_write(nfcp_tx.build_ota_end(uid_int))
+        radio_write_nfcp(nfcp_tx.build_ota_end(uid_int))
         return wait_for_ack(uid_int, nfcp.CMD_OTA_END, 3000)
     except Exception as e:
         print("OTA send failed:", e)
         try:
-            rs485_write(nfcp_tx.build_ota_abort(uid_int))
+            radio_write_nfcp(nfcp_tx.build_ota_abort(uid_int))
         except:
             pass
         return False
+
+
+def script_clear_status_for_uid(uid_int, script_id, timeout_ms=SPEED_TEST_TIMEOUT_MS):
+    for attempt in range(3):
+        drain_uart()
+        radio_write_nfcp(nfcp_tx.build_script_clear(uid_int, script_id))
+        ok, code = wait_for_ack_detail(uid_int, nfcp.CMD_SCRIPT_CLEAR, timeout_ms)
+        if ok or code is not None:
+            return ok, code
+        time.sleep_ms(100 + attempt * 100)
+
+    return False, None
+
+
+def script_clear_for_uid(uid_int, script_id, timeout_ms=SPEED_TEST_TIMEOUT_MS):
+    ok, _code = script_clear_status_for_uid(uid_int, script_id, timeout_ms)
+    return ok
+
+
+def script_load_for_uid(uid_int, script_id, entries, timeout_ms=SPEED_TEST_TIMEOUT_MS):
+    chunk_index = 0
+    offset = 0
+
+    while offset < len(entries):
+        chunk = entries[offset:offset + SCRIPT_LOAD_CHUNK_ENTRIES]
+        loaded = False
+        for attempt in range(2):
+            drain_uart()
+            radio_write_nfcp(nfcp_tx.build_script_load(uid_int, script_id, chunk_index, chunk))
+            ok, code = wait_for_ack_detail(uid_int, nfcp.CMD_SCRIPT_LOAD, timeout_ms)
+            if ok:
+                loaded = True
+                break
+            if code is not None:
+                return False
+            time.sleep_ms(100 + attempt * 100)
+
+        if not loaded:
+            return False
+
+        offset += len(chunk)
+        chunk_index += 1
+
+    return True
+
+
+def script_start_broadcast(script_id, start_delay_ms=SCRIPT_START_DELAY_MS, offset_ms=0):
+    for _ in range(SCRIPT_START_BROADCAST_REPEATS):
+        radio_write_nfcp(nfcp_tx.build_script_start_broadcast(script_id, start_delay_ms, offset_ms))
+        time.sleep_ms(20)
+
+
+def script_start_for_uid(uid_int, script_id, start_delay_ms=SCRIPT_START_DELAY_MS, offset_ms=0, timeout_ms=SPEED_TEST_TIMEOUT_MS):
+    drain_uart()
+    radio_write_nfcp(nfcp_tx.build_script_start(uid_int, script_id, start_delay_ms, offset_ms))
+    return wait_for_ack(uid_int, nfcp.CMD_SCRIPT_START, timeout_ms)
+
+
+def script_start_status_for_uid(uid_int, script_id, start_delay_ms=SCRIPT_START_DELAY_MS, offset_ms=0, timeout_ms=SPEED_TEST_TIMEOUT_MS):
+    for attempt in range(2):
+        drain_uart()
+        radio_write_nfcp(nfcp_tx.build_script_start(uid_int, script_id, start_delay_ms, offset_ms))
+        ok, code = wait_for_ack_detail(uid_int, nfcp.CMD_SCRIPT_START, timeout_ms)
+        if ok or code is not None:
+            return ok, code
+        time.sleep_ms(100 + attempt * 100)
+
+    return False, None
+
+
+def script_stop_broadcast(script_id=0):
+    radio_write_nfcp(nfcp_tx.build_script_stop_broadcast(script_id))
+
+
+def script_stop_for_uid(uid_int, script_id=0, timeout_ms=SPEED_TEST_TIMEOUT_MS):
+    drain_uart()
+    radio_write_nfcp(nfcp_tx.build_script_stop(uid_int, script_id))
+    return wait_for_ack(uid_int, nfcp.CMD_SCRIPT_STOP, timeout_ms)
+
+
+def script_heartbeat_broadcast(script_id, elapsed_ms=0):
+    radio_write_nfcp(nfcp_tx.build_script_heartbeat_broadcast(script_id, elapsed_ms))
+
+
+def script_heartbeat_for_uid(uid_int, script_id, elapsed_ms=0):
+    radio_write_nfcp(nfcp_tx.build_script_heartbeat(uid_int, script_id, elapsed_ms))
 
 
 nfcp.load_device_db = load_device_db
@@ -937,11 +1026,23 @@ nfcp.request_info_for_uid = request_info_for_uid
 nfcp.info_scan = info_scan
 nfcp.arm = arm
 nfcp.disarm = disarm
+nfcp.arm_for_uid = arm_for_uid
+nfcp.disarm_for_uid = disarm_for_uid
 nfcp.fire_unique = fire_unique
 nfcp.fire_unique_mask = fire_unique_mask
 nfcp.set_group = set_group
 nfcp.request_set_network_for_uid = request_set_network_for_uid
 nfcp.ota_send_file_for_uid = ota_send_file_for_uid
+nfcp.script_clear_status_for_uid = script_clear_status_for_uid
+nfcp.script_clear_for_uid = script_clear_for_uid
+nfcp.script_load_for_uid = script_load_for_uid
+nfcp.script_start_broadcast = script_start_broadcast
+nfcp.script_start_for_uid = script_start_for_uid
+nfcp.script_start_status_for_uid = script_start_status_for_uid
+nfcp.script_stop_broadcast = script_stop_broadcast
+nfcp.script_stop_for_uid = script_stop_for_uid
+nfcp.script_heartbeat_broadcast = script_heartbeat_broadcast
+nfcp.script_heartbeat_for_uid = script_heartbeat_for_uid
 
 
 class NFCPGui:
@@ -962,6 +1063,11 @@ class NFCPGui:
         self.manual_fire_modules = []
         self.manual_fire_index = 0
         self.manual_fire_last_poll_ms = time.ticks_ms()
+        self.manual_fire_last_fire_ms = time.ticks_ms()
+        self.manual_last_fire_uid = None
+        self.manual_last_fire_key = None
+        self.manual_last_fire_blink_on = False
+        self.manual_last_fire_blink_ms = time.ticks_ms()
         self.script_fire_mode = "auto"
         self.script_fire_running = False
         self.script_fire_elapsed_ms = 0
@@ -978,6 +1084,12 @@ class NFCPGui:
         self.script_fire_auto_packets = 0
         self.script_fire_step_status_pending = None
         self.script_fire_last_step_status_ms = time.ticks_ms()
+        self.script_fire_module_auto_active = False
+        self.script_fire_uploaded_id = None
+        self.script_fire_uploaded_uids = []
+        self.script_fire_upload_results = []
+        self.script_fire_upload_warning = False
+        self.script_fire_last_heartbeat_ms = time.ticks_ms()
         self.last_module_continuity_auto_ms = time.ticks_ms()
         self.settings = load_app_settings()
         self.auto_module_continuity = bool(
@@ -1039,6 +1151,12 @@ class NFCPGui:
         self.script_fire_auto_fired = 0
         self.script_fire_auto_packets = 0
         self.script_fire_step_status_pending = None
+        self.script_fire_module_auto_active = False
+        self.script_fire_uploaded_id = None
+        self.script_fire_uploaded_uids = []
+        self.script_fire_upload_results = []
+        self.script_fire_upload_warning = False
+        self.script_fire_last_heartbeat_ms = time.ticks_ms()
 
     def update_background(self):
         color = lv.color_hex(0x400000) if self.armed else lv.color_hex(0x101010)
@@ -1336,6 +1454,14 @@ class NFCPGui:
         if not radio_version:
             radio_version = "--"
 
+        script_status = self.selected_module.get("script_status", "")
+        if script_status:
+            return "FW: %s   Radio: %s\nScript: %s" % (
+                fw_text,
+                radio_version,
+                script_status
+            )
+
         return "FW: %s   Radio: %s" % (fw_text, radio_version)
 
     def format_module_continuity_summary(self, module):
@@ -1509,15 +1635,35 @@ class NFCPGui:
             self.set_status("Script fire disabled - not armed")
             return
 
+        if not self.script_fire_running:
+            self.script_fire_elapsed_ms = 0
+            self.script_fire_step_index = 0
+            self.script_fire_auto_index = 0
+            self.preload_script_fire_modules()
+
+        self.show_script_fire_page()
+
+    def show_script_fire_page(self):
+        if not self.selected_script:
+            self.set_status("Script fire disabled - no script loaded")
+            return
+
+        if not self.armed:
+            self.set_status("Script fire disabled - not armed")
+            return
+
         scr = self.new_screen("Script Fire", "script_fire")
 
         self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_main_menu)
 
         self.script_name_label = lv.label(scr)
-        self.script_name_label.set_text(
-            "Script: %s   Events: %d   Pyro: %d   Open: %d/%d +%d" %
+        self.script_name_label.set_text("Script: %s" % (self.loaded_script_name or self.selected_script))
+        self.script_name_label.set_pos(35, 58)
+
+        self.script_stats_label = lv.label(scr)
+        self.script_stats_label.set_text(
+            "Events: %d   Pyro: %d   Open: %d/%d +%d" %
             (
-                self.loaded_script_name or self.selected_script,
                 self.loaded_script_event_count,
                 self.loaded_script_fire_count,
                 self.open_script_cue_count,
@@ -1525,7 +1671,11 @@ class NFCPGui:
                 self.extra_connected_cue_count
             )
         )
-        self.script_name_label.set_pos(35, 58)
+        self.script_stats_label.set_pos(35, 82)
+
+        self.script_upload_label = lv.label(scr)
+        self.script_upload_label.set_text(self.format_script_upload_summary())
+        self.script_upload_label.set_pos(35, 106)
 
         self.script_clock_label = lv.label(scr)
         self.script_clock_label.set_text(self.format_script_fire_time())
@@ -1550,9 +1700,9 @@ class NFCPGui:
         self.script_status_label.set_text(status_text)
         self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
 
-        self.make_button(scr, "PLAY", 150, 325, 140, 65, self.script_fire_play)
-        self.make_button(scr, "PAUSE", 330, 325, 140, 65, self.script_fire_pause)
-        self.make_button(scr, "STOP", 510, 325, 140, 65, self.script_fire_stop)
+        self.script_play_btn = self.make_button(scr, "PLAY", 150, 325, 140, 65, self.script_fire_play)
+        self.script_pause_btn = self.make_button(scr, "PAUSE", 330, 325, 140, 65, self.script_fire_pause)
+        self.script_stop_btn = self.make_button(scr, "STOP", 510, 325, 140, 65, self.script_fire_stop)
 
         self.script_auto_btn = self.make_button(
             scr,
@@ -1575,6 +1725,7 @@ class NFCPGui:
         )
 
         self.update_script_fire_mode_buttons()
+        self.update_script_fire_transport_buttons()
         self.reset_script_fire_trigger_state()
         if not self.script_fire_prepared:
             try:
@@ -1584,6 +1735,8 @@ class NFCPGui:
         self.update_script_fire_clock(force=True)
         if self.script_fire_mode == "step":
             self.update_script_fire_step_status()
+        elif self.script_fire_upload_warning and not self.script_fire_running:
+            self.set_script_fire_status_label("Loaded with warnings")
 
     def format_script_fire_time(self):
         elapsed = self.script_fire_elapsed_ms
@@ -1619,6 +1772,54 @@ class NFCPGui:
 
         self.script_status_label.set_text(text)
         self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
+
+    def format_script_upload_summary(self):
+        if self.script_fire_mode != "auto":
+            return "Upload: Step mode"
+
+        if not self.script_fire_upload_results:
+            return "Upload: Not loaded"
+
+        ok_count = 0
+        fail_count = 0
+        fail_uid = None
+
+        for item in self.script_fire_upload_results:
+            if item.get("ok", False):
+                ok_count += 1
+            else:
+                fail_count += 1
+                if fail_uid is None:
+                    fail_uid = item.get("uid", 0)
+
+        if fail_count:
+            return "Upload: %d loaded, %d failed   First: %08X" % (
+                ok_count,
+                fail_count,
+                fail_uid & 0xFFFFFFFF
+            )
+
+        return "Upload: %d module(s) loaded" % ok_count
+
+    def update_script_fire_transport_buttons(self):
+        if not hasattr(self, "script_play_btn"):
+            return
+
+        try:
+            can_play = (
+                (not self.script_fire_running) and
+                bool(self.loaded_script_steps)
+            )
+
+            if self.script_fire_mode == "auto":
+                can_play = can_play and bool(self.script_fire_uploaded_uids)
+
+            if can_play:
+                self.script_play_btn.remove_state(lv.STATE.DISABLED)
+            else:
+                self.script_play_btn.add_state(lv.STATE.DISABLED)
+        except Exception as e:
+            print("Script play button update failed:", e)
 
     def reset_script_fire_trigger_state(self):
         now = time.ticks_ms()
@@ -1835,6 +2036,212 @@ class NFCPGui:
 
         self.script_fire_prepared = True
 
+    def make_script_fire_id(self):
+        try:
+            value = random.getrandbits(16)
+        except:
+            value = time.ticks_ms() & 0xFFFF
+        if value == 0:
+            value = 1
+        return value
+
+    def build_module_script_entries(self):
+        self.load_modules_from_db()
+        channel_uids = self.build_script_channel_uid_map()
+        uid_entries = {}
+
+        if not self.loaded_script_steps:
+            self.build_script_fire_steps()
+
+        for step in self.loaded_script_steps:
+            event_ms = int(step.get("event_ms", 0) or 0)
+            channel_masks = self.build_script_step_channel_masks(
+                step.get("events", [])
+            )
+
+            for channel, cue_mask in channel_masks.items():
+                for uid in channel_uids.get(channel, []):
+                    if uid not in uid_entries:
+                        uid_entries[uid] = []
+                    uid_entries[uid].append((event_ms, cue_mask & 0xFFFF))
+
+        return uid_entries
+
+    def preload_script_fire_modules(self):
+        self.script_fire_module_auto_active = False
+        self.script_fire_uploaded_id = None
+        self.script_fire_uploaded_uids = []
+        self.script_fire_upload_results = []
+        self.script_fire_upload_warning = False
+
+        if self.script_fire_mode != "auto":
+            return
+
+        self.show_loading_screen("Loading script...\nPreparing module schedules...")
+
+        script_id = self.upload_script_to_modules()
+        self.script_fire_upload_warning = self.script_fire_upload_has_failures()
+
+        if script_id is None:
+            self.set_status("Script preload failed")
+            return
+
+        if self.script_fire_upload_warning:
+            self.set_status("Script loaded with module warnings")
+        else:
+            self.set_status("Script loaded to modules")
+
+    def script_fire_upload_has_failures(self):
+        if not self.script_fire_upload_results:
+            return False
+
+        for item in self.script_fire_upload_results:
+            if not item.get("ok", False):
+                return True
+
+        return False
+
+    def upload_script_to_modules(self):
+        uid_entries = self.build_module_script_entries()
+        self.script_fire_upload_results = []
+        if not uid_entries:
+            self.set_script_fire_status_label(
+                "No module events: steps=%d modules=%d" %
+                (
+                    len(self.loaded_script_steps),
+                    len(self.modules)
+                )
+            )
+            self.set_status("No module script events to upload")
+            return None
+
+        script_id = self.make_script_fire_id()
+        total_modules = len(uid_entries)
+        total_entries = 0
+        for entries in uid_entries.values():
+            total_entries += len(entries)
+
+        self.set_script_fire_status_label(
+            "Upload ready: modules=%d entries=%d" %
+            (
+                total_modules,
+                total_entries
+            )
+        )
+        self.flush_ui()
+
+        loaded = 0
+
+        for uid, entries in uid_entries.items():
+            loaded += 1
+            try:
+                uid_text = "0x%08X" % (uid & 0xFFFFFFFF)
+            except:
+                uid_text = str(uid)
+            upload_text = "Upload %d/%d %s entries=%d" % (
+                loaded,
+                total_modules,
+                uid_text,
+                len(entries)
+            )
+            self.set_script_fire_status_label(upload_text)
+            self.set_status(upload_text)
+            self.flush_ui()
+
+            clear_ok, clear_code = nfcp.script_clear_status_for_uid(uid, script_id)
+            if not clear_ok:
+                reason = ack_code_text(clear_code)
+                self.script_fire_upload_results.append({
+                    "uid": uid,
+                    "entries": len(entries),
+                    "ok": False,
+                    "reason": "clear " + reason
+                })
+                self.set_script_fire_status_label(
+                    "Upload clear failed %s: %s" %
+                    (
+                        uid_text,
+                        reason
+                    )
+                )
+                self.set_status("Script upload clear failed: " + reason)
+                continue
+
+            if not nfcp.script_load_for_uid(uid, script_id, entries):
+                self.script_fire_upload_results.append({
+                    "uid": uid,
+                    "entries": len(entries),
+                    "ok": False,
+                    "reason": "load failed"
+                })
+                self.set_script_fire_status_label("Upload failed %s" % uid_text)
+                self.set_status("Script upload failed")
+                continue
+
+            self.script_fire_upload_results.append({
+                "uid": uid,
+                "entries": len(entries),
+                "ok": True,
+                "reason": "loaded"
+            })
+
+        self.script_fire_uploaded_id = script_id
+        self.script_fire_uploaded_uids = [
+            item.get("uid", 0)
+            for item in self.script_fire_upload_results
+            if item.get("ok", False)
+        ]
+
+        if not self.script_fire_uploaded_uids:
+            self.set_script_fire_status_label("No modules loaded")
+            self.set_status("Script preload failed - no modules loaded")
+            return None
+
+        self.set_script_fire_status_label(
+            "Uploaded id=%04X modules=%d/%d" %
+            (
+                script_id,
+                len(self.script_fire_uploaded_uids),
+                total_modules
+            )
+        )
+        self.set_status(
+            "Script uploaded to %d/%d module(s)" %
+            (
+                len(self.script_fire_uploaded_uids),
+                total_modules
+            )
+        )
+        return script_id
+
+    def send_script_heartbeat(self, force=False):
+        if not self.script_fire_module_auto_active:
+            return
+        if not self.script_fire_uploaded_id:
+            return
+
+        now = time.ticks_ms()
+        if not force and time.ticks_diff(now, self.script_fire_last_heartbeat_ms) < SCRIPT_HEARTBEAT_MS:
+            return
+
+        self.script_fire_last_heartbeat_ms = now
+        try:
+            elapsed_ms = self.get_script_fire_elapsed_ms()
+            if self.script_fire_uploaded_uids:
+                for uid in self.script_fire_uploaded_uids:
+                    nfcp.script_heartbeat_for_uid(
+                        uid,
+                        self.script_fire_uploaded_id,
+                        elapsed_ms
+                    )
+            else:
+                nfcp.script_heartbeat_broadcast(
+                    self.script_fire_uploaded_id,
+                    elapsed_ms
+                )
+        except Exception as e:
+            print("Script heartbeat failed:", e)
+
     def fire_prepared_script_step(self, step):
         packets_sent = 0
 
@@ -1843,7 +2250,7 @@ class NFCPGui:
 
         for pkt in step.get("packets", []):
             try:
-                rs485_write(pkt)
+                radio_write_nfcp(pkt)
                 packets_sent += 1
             except Exception as e:
                 print("Script step fire mask failed:", e)
@@ -1908,6 +2315,14 @@ class NFCPGui:
             return
 
         elapsed = self.get_script_fire_elapsed_ms()
+        if self.script_fire_module_auto_active:
+            self.send_script_heartbeat()
+            last_ms = self.loaded_script_steps[-1].get("event_ms", 0)
+            if elapsed >= last_ms:
+                self.script_fire_stop()
+                self.set_status("Module auto complete")
+            return
+
         total_fired = 0
         total_packets = 0
 
@@ -1929,15 +2344,7 @@ class NFCPGui:
             self.script_fire_auto_packets += total_packets
 
         if self.script_fire_auto_index >= len(self.loaded_script_steps):
-            self.script_fire_elapsed_ms = elapsed
-            self.script_fire_running = False
-            self.set_script_fire_status_label(
-                "Auto complete   %d cues   %d packets" %
-                (
-                    self.script_fire_auto_fired,
-                    self.script_fire_auto_packets
-                )
-            )
+            self.script_fire_stop()
             self.set_status("Script fire auto complete")
 
     def poll_script_fire_trellis(self):
@@ -1982,7 +2389,65 @@ class NFCPGui:
         if self.script_fire_mode == "auto":
             self.script_fire_auto_fired = 0
             self.script_fire_auto_packets = 0
-            self.prepare_script_fire_auto_index()
+            if not self.loaded_script_steps:
+                self.set_status("No script steps loaded")
+                return
+
+            script_id = self.script_fire_uploaded_id
+            if script_id is None or not self.script_fire_uploaded_uids:
+                self.set_status("Script not loaded to modules")
+                return
+
+            self.script_fire_module_auto_active = True
+            self.script_fire_uploaded_id = script_id
+            self.script_fire_last_heartbeat_ms = time.ticks_ms()
+            time.sleep_ms(100)
+
+            start_ok = True
+            start_code = nfcp.ACK_OK
+            start_uid = 0
+            for uid in self.script_fire_uploaded_uids:
+                ok, code = nfcp.script_start_status_for_uid(
+                    uid,
+                    script_id,
+                    SCRIPT_START_DELAY_MS,
+                    self.script_fire_elapsed_ms
+                )
+                if not ok:
+                    start_ok = False
+                    start_code = code
+                    start_uid = uid
+                    break
+
+            if not start_ok:
+                self.script_fire_module_auto_active = False
+                self.set_script_fire_status_label(
+                    "Start failed %08X: %s" %
+                    (
+                        start_uid & 0xFFFFFFFF,
+                        ack_code_text(start_code)
+                    )
+                )
+                self.set_status("Module auto start failed: " + ack_code_text(start_code))
+                return
+
+            nfcp.script_start_broadcast(script_id, SCRIPT_START_DELAY_MS, self.script_fire_elapsed_ms)
+            self.script_fire_started_ms = time.ticks_add(
+                time.ticks_ms(),
+                SCRIPT_START_DELAY_MS - self.script_fire_elapsed_ms
+            )
+            self.script_fire_running = True
+            self.send_script_heartbeat(force=True)
+            self.update_script_fire_transport_buttons()
+            self.set_script_fire_status_label(
+                "Playing id=%04X heartbeat=%dms" %
+                (
+                    script_id,
+                    SCRIPT_HEARTBEAT_MS
+                )
+            )
+            self.set_status("Module auto playing")
+            return
         elif not self.script_fire_prepared:
             self.prepare_script_fire_packets()
 
@@ -1991,6 +2456,7 @@ class NFCPGui:
             -self.script_fire_elapsed_ms
         )
         self.script_fire_running = True
+        self.update_script_fire_transport_buttons()
 
         self.set_script_fire_status_label("Playing")
         self.set_status("Script fire playing")
@@ -2002,18 +2468,42 @@ class NFCPGui:
                 self.script_fire_started_ms
             )
 
+        if self.script_fire_module_auto_active:
+            try:
+                if self.script_fire_uploaded_uids:
+                    for uid in self.script_fire_uploaded_uids:
+                        nfcp.script_stop_for_uid(uid, self.script_fire_uploaded_id or 0)
+                else:
+                    nfcp.script_stop_broadcast(self.script_fire_uploaded_id or 0)
+            except Exception as e:
+                print("Script pause stop broadcast failed:", e)
+            self.script_fire_module_auto_active = False
+
         self.script_fire_running = False
         self.update_script_fire_clock(force=True)
+        self.update_script_fire_transport_buttons()
 
         self.set_script_fire_status_label("Paused")
         self.set_status("Script fire paused")
 
     def script_fire_stop(self, event=None):
+        if self.script_fire_module_auto_active:
+            try:
+                if self.script_fire_uploaded_uids:
+                    for uid in self.script_fire_uploaded_uids:
+                        nfcp.script_stop_for_uid(uid, self.script_fire_uploaded_id or 0)
+                else:
+                    nfcp.script_stop_broadcast(self.script_fire_uploaded_id or 0)
+            except Exception as e:
+                print("Script stop broadcast failed:", e)
+
         self.script_fire_running = False
+        self.script_fire_module_auto_active = False
         self.script_fire_elapsed_ms = 0
         self.script_fire_step_index = 0
         self.script_fire_auto_index = 0
         self.update_script_fire_clock(force=True)
+        self.update_script_fire_transport_buttons()
 
         self.set_script_fire_status_label("Stopped")
         self.set_status("Script fire stopped")
@@ -2022,6 +2512,7 @@ class NFCPGui:
         self.script_fire_mode = "auto"
         self.reset_script_fire_trigger_state()
         self.update_script_fire_mode_buttons()
+        self.update_script_fire_transport_buttons()
         self.clear_trellis_leds()
         self.set_script_fire_status_label(
             "Playing" if self.script_fire_running else "Stopped"
@@ -2032,10 +2523,21 @@ class NFCPGui:
         if self.script_fire_running:
             self.script_fire_elapsed_ms = self.get_script_fire_elapsed_ms()
             self.script_fire_running = False
+            if self.script_fire_module_auto_active:
+                try:
+                    if self.script_fire_uploaded_uids:
+                        for uid in self.script_fire_uploaded_uids:
+                            nfcp.script_stop_for_uid(uid, self.script_fire_uploaded_id or 0)
+                    else:
+                        nfcp.script_stop_broadcast(self.script_fire_uploaded_id or 0)
+                except Exception as e:
+                    print("Script stop broadcast failed:", e)
+                self.script_fire_module_auto_active = False
 
         self.script_fire_mode = "step"
         self.reset_script_fire_trigger_state()
         self.update_script_fire_mode_buttons()
+        self.update_script_fire_transport_buttons()
         self.update_script_fire_step_led()
         self.update_script_fire_step_status()
         if self.get_script_trigger_key() is None:
@@ -2065,6 +2567,19 @@ class NFCPGui:
 
     def has_scanned_modules(self):
         return len(self.modules) > 0
+
+    def get_module_uids(self):
+        uids = []
+
+        for module in self.modules:
+            try:
+                uid = int(module.get("unique_id", "0x00000000"), 16) & 0xFFFFFFFF
+            except:
+                continue
+            if uid not in uids:
+                uids.append(uid)
+
+        return uids
 
     def update_arm_button(self):
         if not hasattr(self, "arm_btn"):
@@ -2606,7 +3121,11 @@ class NFCPGui:
             return True
 
         try:
-            module_type = int(module.get("device_type", "0"), 16)
+            module_type_value = module.get("device_type", "0")
+            if isinstance(module_type_value, str):
+                module_type = int(module_type_value, 16)
+            else:
+                module_type = int(module_type_value)
         except:
             module_type = -1
 
@@ -2646,6 +3165,15 @@ class NFCPGui:
 
             for item in files:
                 if not self.module_matches_ota_file(module, item):
+                    print(
+                        "Module OTA skip:",
+                        uid_text,
+                        item.get("source", ""),
+                        "module_type=",
+                        module.get("device_type", "--"),
+                        "target_type=",
+                        item.get("device_type", "--")
+                    )
                     continue
 
                 source = item.get("source", "")
@@ -3084,6 +3612,8 @@ class NFCPGui:
         self.refresh_manual_fire_screen()
 
     def leave_manual_fire(self, event=None):
+        self.manual_last_fire_uid = None
+        self.manual_last_fire_key = None
         self.clear_trellis_leds()
         self.show_main_menu()
 
@@ -3215,7 +3745,88 @@ class NFCPGui:
             )
 
         self.update_trellis_continuity_leds(continuity, cue_count)
+        self.update_manual_fire_last_indicator(force=True)
         self.set_status("Manual fire channel %s selected" % channel_text)
+
+    def get_manual_cue_base_color(self, cue_index, continuity, cue_count):
+        cue_exists = cue_index < cue_count
+        cue_ok = cue_index < len(continuity) and bool(continuity[cue_index])
+
+        if not cue_exists:
+            return lv.color_hex(0x4A4A4A)
+        if cue_ok:
+            return lv.color_hex(0x1F7A1F)
+        return lv.color_hex(0x7A1F1F)
+
+    def manual_last_fire_matches_current_module(self):
+        module = self.get_manual_fire_module()
+        if not module:
+            return False
+
+        uid_text = module.get("unique_id", "0x00000000")
+        try:
+            uid = int(uid_text, 16) & 0xFFFFFFFF
+        except:
+            return False
+
+        return self.manual_last_fire_uid == uid
+
+    def update_manual_fire_last_indicator(self, force=False):
+        if self.current_view != "manual_fire":
+            return
+
+        now = time.ticks_ms()
+        if (
+            not force and
+            time.ticks_diff(now, self.manual_last_fire_blink_ms) < MANUAL_FIRE_BLINK_MS
+        ):
+            return
+
+        self.manual_last_fire_blink_ms = now
+        if force:
+            self.manual_last_fire_blink_on = True
+        else:
+            self.manual_last_fire_blink_on = not self.manual_last_fire_blink_on
+
+        module = self.get_manual_fire_module()
+        if not module:
+            return
+
+        cue_count = self.get_module_cue_count(module)
+        continuity = self.get_module_continuity_list(module)
+        blink_key = self.manual_last_fire_key
+        blink_visible = (
+            blink_key is not None and
+            self.manual_last_fire_matches_current_module() and
+            0 <= blink_key < min(16, cue_count)
+        )
+
+        try:
+            if self.trellis:
+                self.trellis.clear()
+                limit = min(16, cue_count)
+                for i in range(limit):
+                    lit = i < len(continuity) and bool(continuity[i])
+                    if blink_visible and i == blink_key:
+                        lit = self.manual_last_fire_blink_on
+                    if lit:
+                        self.trellis.set_led(i)
+                self.trellis.write_display()
+        except Exception as e:
+            print("Manual Trellis blink failed:", e)
+
+        if not hasattr(self, "manual_cue_buttons"):
+            return
+
+        for i in range(min(16, len(self.manual_cue_buttons))):
+            color = self.get_manual_cue_base_color(i, continuity, cue_count)
+            if blink_visible and i == blink_key and self.manual_last_fire_blink_on:
+                color = lv.color_hex(0xD8C21F)
+            try:
+                self.manual_cue_buttons[i].set_style_bg_color(color, 0)
+            except Exception as e:
+                print("Manual cue blink update failed:", e)
+                return
 
     def clear_trellis_leds(self):
         if not self.trellis:
@@ -3242,14 +3853,36 @@ class NFCPGui:
             print("Trellis LED update failed:", e)
 
     def fire_manual_cue(self, cue_index):
+        now = time.ticks_ms()
+        if time.ticks_diff(now, self.manual_fire_last_fire_ms) < MANUAL_FIRE_DEBOUNCE_MS:
+            return
+
         module = self.get_manual_fire_module()
         if not module:
             self.set_status("No manual fire channel selected")
             return
 
+        cue_count = self.get_module_cue_count(module)
+        if cue_index < 0 or cue_index >= cue_count:
+            self.set_status("Manual fire cue out of range")
+            return
+
+        self.manual_fire_last_fire_ms = now
         self.selected_module = module
         self.continuity = self.get_module_saved_continuity(module)
         self.fire_cue(cue_index)
+
+        try:
+            self.manual_last_fire_uid = int(
+                module.get("unique_id", "0x00000000"),
+                16
+            ) & 0xFFFFFFFF
+        except:
+            self.manual_last_fire_uid = None
+        self.manual_last_fire_key = cue_index
+        self.manual_last_fire_blink_on = True
+        self.manual_last_fire_blink_ms = now
+        self.update_manual_fire_last_indicator(force=True)
 
     def poll_manual_fire_trellis(self):
         if self.current_view != "manual_fire":
@@ -3975,9 +4608,15 @@ class NFCPGui:
 
         cue_count = self.get_selected_module_cue_count()
 
-        self.set_status("Checking continuity...")
-
         try:
+            self.set_status("Running speed test...")
+            ping_ms = nfcp.request_ping_for_uid(uid)
+            self.save_selected_module_speed_test(ping_ms)
+
+            if hasattr(self, "speed_label"):
+                self.speed_label.set_text(self.format_selected_speed_test())
+
+            self.set_status("Checking continuity...")
             ok = nfcp.request_continuity_for_uid(uid, cue_count)
             self.set_continuity(ok)
             self.save_selected_module_continuity(ok)
@@ -4131,6 +4770,7 @@ class NFCPGui:
         dev["app_name"] = info.get("app_name", "")
         dev["app_version"] = info.get("app_version", "")
         dev["radio_firmware_version"] = info.get("radio_version", "")
+        dev["script_status"] = info.get("script_status", "")
         dev["info_last_epoch"] = time.time()
 
         link = nfcp.get_last_radio_link(uid_text)
@@ -4531,6 +5171,22 @@ class NFCPGui:
             print("Arm/disarm failed:", e)
             self.set_status("Arm/disarm failed")
 
+        ack_failed = 0
+        for uid in self.get_module_uids():
+            try:
+                if self.armed:
+                    ok = nfcp.arm_for_uid(uid)
+                else:
+                    ok = nfcp.disarm_for_uid(uid)
+                if not ok:
+                    ack_failed += 1
+            except Exception as e:
+                ack_failed += 1
+                print("Unique arm/disarm failed:", e)
+
+        if ack_failed:
+            self.set_status("Arm ACK failed for %d module(s)" % ack_failed)
+
         if hasattr(self, "arm_label"):
             try:
                 self.arm_label.set_text("ARM: ON" if self.armed else "ARM: OFF")
@@ -4672,6 +5328,7 @@ class NFCPGui:
     def update(self):
         if self.current_view == "manual_fire":
             self.poll_manual_fire_trellis()
+            self.update_manual_fire_last_indicator()
 
         if self.current_view == "script_fire":
             self.update_script_fire_clock()
