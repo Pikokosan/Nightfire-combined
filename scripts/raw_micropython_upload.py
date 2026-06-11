@@ -66,10 +66,22 @@ def stop_running_program(port, timeout=12):
             write_stdout_bytes(chunk)
             if b">>>" in out:
                 return
+            if b"raw REPL; CTRL-B to exit" in out and out.rstrip().endswith(b">"):
+                return
 
     port.write(b"\r\n")
     time.sleep(0.3)
     out.extend(read_available(port, 0.3))
+    if b">>>" in out:
+        return
+    if b"raw REPL; CTRL-B to exit" in out and out.rstrip().endswith(b">"):
+        return
+
+    port.write(CTRL_A)
+    time.sleep(0.3)
+    out.extend(read_available(port, 0.5))
+    if b"raw REPL; CTRL-B to exit" in out and out.rstrip().endswith(b">"):
+        return
     if b">>>" not in out:
         raise RuntimeError("Could not stop the running program and reach the MicroPython prompt.")
 

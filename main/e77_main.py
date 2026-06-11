@@ -3,6 +3,7 @@ import os
 from machine import Pin, SoftSPI
 
 from e77_gfsk import E77Gfsk
+from mc33996_driver import MC33996 as MC33996Driver
 from nfcp import *
 
 
@@ -13,7 +14,7 @@ DEFAULT_UNIQUE_ID = 0xE7700001
 DEFAULT_CUE_COUNT = 16
 DEVICE_TYPE = 0x20
 APP_FIRMWARE_NAME = "e77-micropython"
-APP_FIRMWARE_VERSION = "0.1.0"
+APP_FIRMWARE_VERSION = "0.1.3"
 
 DISCOVER_BACKOFF_MIN_MS = 10
 DISCOVER_BACKOFF_MAX_MS = 250
@@ -29,6 +30,10 @@ CONT_DRIVE_DURING_TEST = False
 CONT_DRIVE_SETTLE_MS = 5
 OPENLOAD_1_IS_OPEN = True
 OPENLOAD_DUMMY_READ = False
+# Hardware bring-up override:
+# bit0=OUT0/Cue1, 1=open, 0=good. OUT0-3 good, OUT4-15 open.
+# Set to None to use live MC33996 open-load reads.
+CONTINUITY_TEST_OPEN_MASK = None
 
 MC_SCK = "A8"
 MC_MOSI = "A10"
@@ -39,53 +44,28 @@ MC_RESET = "A12"
 
 class MC33996:
     def __init__(self):
-        self.sck = Pin(MC_SCK, Pin.OUT, value=0)
-        self.mosi = Pin(MC_MOSI, Pin.OUT, value=0)
-        self.miso = Pin(MC_MISO, Pin.IN)
-        self.spi = SoftSPI(baudrate=1000000, polarity=0, phase=1, sck=self.sck, mosi=self.mosi, miso=self.miso)
-        self.cs = Pin(MC_CS, Pin.OUT, value=1)
-        self.rst = Pin(MC_RESET, Pin.OUT, value=0)
+        self.spi = SoftSPI(
+            baudrate=500000,
+            polarity=0,
+            phase=1,
+            sck=Pin(MC_SCK),
+            mosi=Pin(MC_MOSI),
+            miso=Pin(MC_MISO),
+        )
+        self.driver = MC33996Driver(
+            spi=self.spi,
+            cs_pin=MC_CS,
+            reset_pin=MC_RESET,
+        )
         self.out = 0
 
-    def xfer(self, reg, val):
-        tx = bytes([reg & 0xFF, (val >> 8) & 0xFF, val & 0xFF])
-        rx = bytearray(3)
-        self.cs.value(0)
-        self.spi.write_readinto(tx, rx)
-        self.cs.value(1)
-        time.sleep_us(20)
-        return rx
-
-    def xfer_read_aligned(self, reg, val):
-        word = ((reg & 0xFF) << 16) | (val & 0xFFFF)
-        rx = 0
-        self.sck.value(0)
-        self.cs.value(0)
-        time.sleep_us(2)
-        for bit in range(23, -1, -1):
-            self.mosi.value((word >> bit) & 1)
-            self.sck.value(1)
-            time.sleep_us(2)
-            self.sck.value(0)
-            time.sleep_us(2)
-            rx = (rx << 1) | (self.miso.value() & 1)
-        time.sleep_us(2)
-        self.cs.value(1)
-        time.sleep_us(20)
-        return bytes([(rx >> 16) & 0xFF, (rx >> 8) & 0xFF, rx & 0xFF])
-
     def begin(self):
-        self.rst.value(0)
-        time.sleep_ms(50)
-        self.rst.value(1)
-        time.sleep_ms(50)
-        self.xfer(0x18, 0)
-        self.digital_write_mask(0)
-        self.xfer(0x04, 0xFFFF)
+        self.driver.begin()
+        self.out = 0
 
     def digital_write_mask(self, mask):
         self.out = mask & 0xFFFF
-        return self.xfer(0x00, self.out)
+        return self.driver.digitalWriteMask(self.out)
 
     def read_open_load(self, test_mask=None):
         saved_out = self.out
@@ -93,10 +73,7 @@ class MC33996:
             self.digital_write_mask(test_mask)
             time.sleep_ms(CONT_DRIVE_SETTLE_MS)
         try:
-            self.xfer_read_aligned(0x00, self.out)
-            time.sleep_us(1000)
-            rx = self.xfer_read_aligned(0x00, self.out)
-            return rx[0] & 0xFF, (((rx[1] & 0xFF) << 8) | (rx[2] & 0xFF)) & 0xFFFF
+            return self.driver.readOpenLoad()
         finally:
             if test_mask is not None:
                 self.digital_write_mask(saved_out)
@@ -264,14 +241,19 @@ def handle_continuity(pkt):
         valid_mask = (1 << CUE_COUNT) - 1
         valid_mask &= (1 << (nbytes * 8)) - 1
         test_mask = valid_mask if CONT_DRIVE_DURING_TEST else None
-        if OPENLOAD_DUMMY_READ:
-            mc.read_open_load(test_mask)
-        status, raw_openload = mc.read_open_load(test_mask)
-        raw_openload &= valid_mask
-        if OPENLOAD_1_IS_OPEN:
-            open_mask = raw_openload
+        status = 0
+
+        if CONTINUITY_TEST_OPEN_MASK is not None:
+            open_mask = CONTINUITY_TEST_OPEN_MASK & valid_mask
         else:
-            open_mask = (~raw_openload) & valid_mask
+            if OPENLOAD_DUMMY_READ:
+                mc.read_open_load(test_mask)
+            status, raw_openload = mc.read_open_load(test_mask)
+            raw_openload &= valid_mask
+            if OPENLOAD_1_IS_OPEN:
+                open_mask = raw_openload
+            else:
+                open_mask = (~raw_openload) & valid_mask
         data = open_mask.to_bytes(nbytes, "big")
         tx_nfcp(nfcp.build_response(UNIQUE_ID, CMD_CONTINUITY_RSP, data))
         print("CONT status=0x%02X open_mask=0x%04X drive=0x%04X open_cues=%s" % (

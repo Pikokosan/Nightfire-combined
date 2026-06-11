@@ -84,10 +84,11 @@ Dummy upload includes:
 
 E77 MicroPython app upload includes:
 
-- `main/e77_main.py` compiled as `e77_main.mpy`
+- `main/e77_main.py` compiled and installed as device `main.mpy`
 - `main/nfcp.py` compiled as `nfcp.mpy`
 - `main/e77_gfsk.py` compiled as `e77_gfsk.mpy`
-- a tiny device `main.py` stub that imports `e77_main`
+- `main/mc33996_driver.py` compiled as `mc33996_driver.mpy`
+- a tiny device `boot.py` stub that imports `main.mpy` on startup
 
 ## Customer Update Package
 

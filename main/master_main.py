@@ -3668,7 +3668,7 @@ class NFCPGui:
             btn = lv.button(parent)
             btn.set_pos(x, y)
             btn.set_size(btn_w, btn_h)
-            btn.add_event_cb(self.make_manual_fire_cb(i), lv.EVENT.CLICKED, None)
+            btn.add_state(lv.STATE.DISABLED)
 
             lbl = lv.label(btn)
             lbl.set_text("%02d" % (i + 1))
@@ -3723,14 +3723,12 @@ class NFCPGui:
             if hasattr(self, "manual_cue_buttons") and i < len(self.manual_cue_buttons):
                 if not cue_exists:
                     color = lv.color_hex(0x4A4A4A)
-                    self.manual_cue_buttons[i].add_state(lv.STATE.DISABLED)
                 elif cue_ok:
                     color = lv.color_hex(0x1F7A1F)
-                    self.manual_cue_buttons[i].remove_state(lv.STATE.DISABLED)
                 else:
                     color = lv.color_hex(0x7A1F1F)
-                    self.manual_cue_buttons[i].remove_state(lv.STATE.DISABLED)
 
+                self.manual_cue_buttons[i].add_state(lv.STATE.DISABLED)
                 self.manual_cue_buttons[i].set_style_bg_color(color, 0)
 
         if hasattr(self, "manual_summary_label"):
@@ -3815,18 +3813,16 @@ class NFCPGui:
         except Exception as e:
             print("Manual Trellis blink failed:", e)
 
-        if not hasattr(self, "manual_cue_buttons"):
-            return
-
-        for i in range(min(16, len(self.manual_cue_buttons))):
-            color = self.get_manual_cue_base_color(i, continuity, cue_count)
-            if blink_visible and i == blink_key and self.manual_last_fire_blink_on:
-                color = lv.color_hex(0xD8C21F)
-            try:
-                self.manual_cue_buttons[i].set_style_bg_color(color, 0)
-            except Exception as e:
-                print("Manual cue blink update failed:", e)
-                return
+        if force and hasattr(self, "manual_cue_buttons"):
+            for i in range(min(16, len(self.manual_cue_buttons))):
+                try:
+                    self.manual_cue_buttons[i].set_style_bg_color(
+                        self.get_manual_cue_base_color(i, continuity, cue_count),
+                        0
+                    )
+                except Exception as e:
+                    print("Manual cue indicator update failed:", e)
+                    return
 
     def clear_trellis_leds(self):
         if not self.trellis:
@@ -4576,11 +4572,7 @@ class NFCPGui:
             lbl.set_text("Cue %02d: OPEN" % (i + 1))
             lbl.center()
 
-            btn.add_event_cb(
-                self.make_fire_cb(i),
-                lv.EVENT.CLICKED,
-                None
-            )
+            btn.add_state(lv.STATE.DISABLED)
 
             self.cue_buttons.append(btn)
             self.cue_labels.append(lbl)
@@ -5160,21 +5152,16 @@ class NFCPGui:
             self.set_status("Arm disabled - scan modules first")
             return
 
-        self.armed = bool(armed)
-
-        try:
-            if self.armed:
-                nfcp.arm()
-            else:
-                nfcp.disarm()
-        except Exception as e:
-            print("Arm/disarm failed:", e)
-            self.set_status("Arm/disarm failed")
-
+        target_armed = bool(armed)
         ack_failed = 0
-        for uid in self.get_module_uids():
+        module_uids = self.get_module_uids()
+
+        if module_uids:
+            self.set_status("Arming modules..." if target_armed else "Disarming modules...")
+
+        for uid in module_uids:
             try:
-                if self.armed:
+                if target_armed:
                     ok = nfcp.arm_for_uid(uid)
                 else:
                     ok = nfcp.disarm_for_uid(uid)
@@ -5184,8 +5171,22 @@ class NFCPGui:
                 ack_failed += 1
                 print("Unique arm/disarm failed:", e)
 
-        if ack_failed:
+        if module_uids and ack_failed:
             self.set_status("Arm ACK failed for %d module(s)" % ack_failed)
+            return
+
+        if not module_uids:
+            try:
+                if target_armed:
+                    nfcp.arm()
+                else:
+                    nfcp.disarm()
+            except Exception as e:
+                print("Arm/disarm failed:", e)
+                self.set_status("Arm/disarm failed")
+                return
+
+        self.armed = target_armed
 
         if hasattr(self, "arm_label"):
             try:
