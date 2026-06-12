@@ -27,7 +27,7 @@ MODULE_CONTINUITY_AUTO_CHECK_MS = 4000
 DISCOVER_IDLE_TIMEOUT_MS = 3000
 DISCOVER_MAX_SCAN_MS = 30000
 SPEED_TEST_TIMEOUT_MS = 2000
-OTA_CHUNK_SIZE = 160
+E77_UPDATE_CHUNK_SIZE = 160
 SCRIPT_LOAD_CHUNK_ENTRIES = 32
 SCRIPT_START_DELAY_MS = 2000
 SCRIPT_START_BROADCAST_REPEATS = 3
@@ -868,7 +868,7 @@ def wait_for_ack_detail(uid_int, orig_cmd, timeout_ms=1000):
     return False, None
 
 
-def simple_checksum_file(path):
+def checksum_file(path):
     checksum = 0
     size = 0
     with open(path, "rb") as f:
@@ -884,26 +884,54 @@ def simple_checksum_file(path):
     return size, checksum
 
 
-def ota_send_file_for_uid(uid_int, source_path, target_path, progress_cb=None):
-    size, checksum = simple_checksum_file(source_path)
+def e77_update_send_file_for_uid(uid_int, source_path, target_path, transfer_id, progress_cb=None):
+    size, checksum = checksum_file(source_path)
 
     drain_uart()
-    radio_write_nfcp(nfcp_tx.build_ota_begin(uid_int, target_path, size, checksum))
-    if not wait_for_ack(uid_int, nfcp.CMD_OTA_BEGIN, 2000):
+    radio_write_nfcp(
+        nfcp_tx.build_e77_update_begin(
+            uid_int,
+            transfer_id,
+            target_path,
+            size,
+            checksum
+        )
+    )
+    ok, code = wait_for_ack_detail(uid_int, nfcp.CMD_E77_UPDATE_BEGIN, 3000)
+    if not ok:
+        print("E77 update begin failed:", ack_code_text(code))
         return False
 
     offset = 0
     try:
         with open(source_path, "rb") as f:
             while offset < size:
-                chunk = f.read(OTA_CHUNK_SIZE)
+                chunk = f.read(E77_UPDATE_CHUNK_SIZE)
                 if not chunk:
                     break
 
-                drain_uart()
-                radio_write_nfcp(nfcp_tx.build_ota_write(uid_int, offset, chunk))
-                if not wait_for_ack(uid_int, nfcp.CMD_OTA_WRITE, 2000):
-                    radio_write_nfcp(nfcp_tx.build_ota_abort(uid_int))
+                sent = False
+                for attempt in range(3):
+                    drain_uart()
+                    radio_write_nfcp(
+                        nfcp_tx.build_e77_update_write(
+                            uid_int,
+                            transfer_id,
+                            offset,
+                            chunk
+                        )
+                    )
+                    ok, code = wait_for_ack_detail(uid_int, nfcp.CMD_E77_UPDATE_WRITE, 3000)
+                    if ok:
+                        sent = True
+                        break
+                    if code is not None:
+                        break
+                    time.sleep_ms(100 + attempt * 100)
+
+                if not sent:
+                    radio_write_nfcp(nfcp_tx.build_e77_update_abort(uid_int, transfer_id))
+                    print("E77 update write failed:", ack_code_text(code))
                     return False
 
                 offset += len(chunk)
@@ -911,15 +939,24 @@ def ota_send_file_for_uid(uid_int, source_path, target_path, progress_cb=None):
                     progress_cb(offset, size)
 
         drain_uart()
-        radio_write_nfcp(nfcp_tx.build_ota_end(uid_int))
-        return wait_for_ack(uid_int, nfcp.CMD_OTA_END, 3000)
+        radio_write_nfcp(nfcp_tx.build_e77_update_end(uid_int, transfer_id))
+        ok, code = wait_for_ack_detail(uid_int, nfcp.CMD_E77_UPDATE_END, 4000)
+        if not ok:
+            print("E77 update end failed:", ack_code_text(code))
+        return ok
     except Exception as e:
-        print("OTA send failed:", e)
+        print("E77 update send failed:", e)
         try:
-            radio_write_nfcp(nfcp_tx.build_ota_abort(uid_int))
+            radio_write_nfcp(nfcp_tx.build_e77_update_abort(uid_int, transfer_id))
         except:
             pass
         return False
+
+
+def e77_update_reboot_for_uid(uid_int, timeout_ms=1000):
+    drain_uart()
+    radio_write_nfcp(nfcp_tx.build_e77_update_reboot(uid_int))
+    return wait_for_ack(uid_int, nfcp.CMD_E77_UPDATE_REBOOT, timeout_ms)
 
 
 def script_clear_status_for_uid(uid_int, script_id, timeout_ms=SPEED_TEST_TIMEOUT_MS):
@@ -1032,7 +1069,8 @@ nfcp.fire_unique = fire_unique
 nfcp.fire_unique_mask = fire_unique_mask
 nfcp.set_group = set_group
 nfcp.request_set_network_for_uid = request_set_network_for_uid
-nfcp.ota_send_file_for_uid = ota_send_file_for_uid
+nfcp.e77_update_send_file_for_uid = e77_update_send_file_for_uid
+nfcp.e77_update_reboot_for_uid = e77_update_reboot_for_uid
 nfcp.script_clear_status_for_uid = script_clear_status_for_uid
 nfcp.script_clear_for_uid = script_clear_for_uid
 nfcp.script_load_for_uid = script_load_for_uid
@@ -3026,12 +3064,12 @@ class NFCPGui:
 
         self.make_button(
             scr,
-            "MODULE OTA",
+            "OTA",
             430,
             310,
             250,
             55,
-            self.show_module_ota
+            self.show_e77_update
         )
 
         self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_main_menu)
@@ -3043,13 +3081,13 @@ class NFCPGui:
         except:
             return False
 
-    def find_module_ota_manifest(self):
+    def find_e77_update_manifest(self):
         self.mount_sd_for_radio_update()
         paths = (
-            "/sd/module_ota.json",
-            "/sd/firmware/module_ota.json",
-            "/module_ota.json",
-            "module_ota.json",
+            "/sd/e77_update.json",
+            "/sd/firmware/e77_update.json",
+            "/e77_update.json",
+            "e77_update.json",
         )
 
         for path in paths:
@@ -3060,12 +3098,12 @@ class NFCPGui:
                     manifest["manifest_path"] = path
                     return manifest
                 except Exception as e:
-                    print("Module OTA manifest read failed:", e)
+                    print("E77 update manifest read failed:", e)
                     return None
 
         return None
 
-    def resolve_module_ota_source(self, manifest_path, source):
+    def resolve_e77_update_source(self, manifest_path, source):
         if source.startswith("/"):
             return source
 
@@ -3079,138 +3117,150 @@ class NFCPGui:
             return "/" + source
         return base + "/" + source
 
-    def show_module_ota(self, event=None):
-        scr = self.new_screen("Module OTA", "module_ota")
+    def module_supports_e77_update(self, module):
+        app_name = str(module.get("app_name", "") or "")
+        if app_name == "e77-micropython":
+            return True
+
+        return False
+
+    def show_e77_update(self, event=None):
+        scr = self.new_screen("E77 OTA", "e77_update")
         self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_settings)
 
-        manifest = self.find_module_ota_manifest()
+        self.load_modules_from_db()
+        manifest = self.find_e77_update_manifest()
+        modules = [
+            module for module in self.modules
+            if self.module_supports_e77_update(module)
+        ]
 
         label = lv.label(scr)
         if not manifest:
             label.set_text(
-                "No module OTA manifest found.\n"
-                "Use /sd/module_ota.json."
+                "No E77 update manifest found.\n"
+                "Use /sd/e77_update.json."
             )
-            label.align(lv.ALIGN.CENTER, 0, -35)
+            label.align(lv.ALIGN.CENTER, 0, -45)
             return
 
         files = manifest.get("files", [])
         label.set_text(
-            "Manifest found:\n%s\nFiles: %d\nModules: %d" %
+            "Manifest: %s\nVersion: %s\nFiles: %d\nE77 modules: %d" %
             (
                 manifest.get("manifest_path", "--"),
+                manifest.get("version", "--"),
                 len(files),
-                len(self.modules)
+                len(modules)
             )
         )
         label.align(lv.ALIGN.CENTER, 0, -60)
 
         self.make_button(
             scr,
-            "START OTA",
+            "START UPDATE",
             250,
             285,
             300,
             75,
-            self.run_module_ota
+            self.run_e77_update
         )
 
-    def module_matches_ota_file(self, module, item):
-        target_type = item.get("device_type", None)
-        if target_type is None:
-            return True
-
-        try:
-            module_type_value = module.get("device_type", "0")
-            if isinstance(module_type_value, str):
-                module_type = int(module_type_value, 16)
-            else:
-                module_type = int(module_type_value)
-        except:
-            module_type = -1
-
-        try:
-            if isinstance(target_type, str):
-                target_type = int(target_type, 16)
-            else:
-                target_type = int(target_type)
-        except:
-            return False
-
-        return module_type == target_type
-
-    def run_module_ota(self, event=None):
-        manifest = self.find_module_ota_manifest()
+    def run_e77_update(self, event=None):
+        manifest = self.find_e77_update_manifest()
         if not manifest:
-            self.set_status("No module OTA manifest")
-            self.show_module_ota()
+            self.set_status("No E77 update manifest")
+            self.show_e77_update()
             return
 
         files = manifest.get("files", [])
         if not files:
-            self.set_status("Module OTA manifest empty")
-            self.show_module_ota()
+            self.set_status("E77 update manifest empty")
+            self.show_e77_update()
             return
 
         self.load_modules_from_db()
+        modules = [
+            module for module in self.modules
+            if self.module_supports_e77_update(module)
+        ]
+        if not modules:
+            self.set_status("No E77 modules found")
+            self.show_e77_update()
+            return
+
         total_ok = 0
         total_failed = 0
 
-        for module in self.modules:
+        for module in modules:
             uid_text = module.get("unique_id", "0x00000000")
             try:
                 uid = int(uid_text, 16) & 0xFFFFFFFF
             except:
+                total_failed += 1
                 continue
 
-            for item in files:
-                if not self.module_matches_ota_file(module, item):
-                    print(
-                        "Module OTA skip:",
-                        uid_text,
-                        item.get("source", ""),
-                        "module_type=",
-                        module.get("device_type", "--"),
-                        "target_type=",
-                        item.get("device_type", "--")
-                    )
-                    continue
+            module_ok = True
+            transfer_id = random.getrandbits(16) & 0xFFFF
+            if transfer_id == 0:
+                transfer_id = 1
 
+            for index, item in enumerate(files):
                 source = item.get("source", "")
                 target = item.get("target", "")
                 if not source or not target:
+                    module_ok = False
                     total_failed += 1
                     continue
 
-                source_path = self.resolve_module_ota_source(
+                source_path = self.resolve_e77_update_source(
                     manifest.get("manifest_path", ""),
                     source
                 )
                 if not self.file_exists(source_path):
-                    print("Module OTA source missing:", source_path)
+                    print("E77 update source missing:", source_path)
+                    module_ok = False
                     total_failed += 1
                     continue
 
+                file_transfer_id = (transfer_id + index) & 0xFFFF
+                if file_transfer_id == 0:
+                    file_transfer_id = 1
+
                 self.show_loading_screen(
-                    "Module OTA...\n%s -> %s" %
+                    "E77 update...\n%s -> %s" %
                     (self.format_uid(uid_text), target)
                 )
 
                 def progress(done, size):
                     if hasattr(self, "loading_label"):
                         self.loading_label.set_text(
-                            "Module OTA...\n%s %d/%d" %
+                            "E77 update...\n%s %d/%d" %
                             (self.format_uid(uid_text), done, size)
                         )
                         self.flush_ui()
 
-                if nfcp.ota_send_file_for_uid(uid, source_path, target, progress):
-                    total_ok += 1
-                else:
+                if not nfcp.e77_update_send_file_for_uid(
+                    uid,
+                    source_path,
+                    target,
+                    file_transfer_id,
+                    progress
+                ):
+                    module_ok = False
                     total_failed += 1
+                    break
 
-        self.show_module_ota()
-        self.set_status("Module OTA complete - %d ok, %d failed" % (total_ok, total_failed))
+            if module_ok:
+                self.show_loading_screen(
+                    "E77 update...\nRebooting %s" %
+                    self.format_uid(uid_text)
+                )
+                nfcp.e77_update_reboot_for_uid(uid)
+                total_ok += 1
+
+        self.show_e77_update()
+        self.set_status("E77 update complete - %d ok, %d failed" % (total_ok, total_failed))
 
     def mount_sd_for_radio_update(self):
         if sdcard_driver is None:

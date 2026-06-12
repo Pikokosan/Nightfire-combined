@@ -4,7 +4,6 @@ import urandom
 from nfcp import *
 import e77_radio
 from module_transport import ModuleTransport
-from module_ota import ModuleOtaSession
 
 
 UART_ID = 0
@@ -118,7 +117,6 @@ transport = ModuleTransport(
 
 parser = NFCPStreamParser()
 nfcp = NFCP(node_id=0x01)
-ota_session = ModuleOtaSession()
 
 ARMED = False
 GROUP_ID, UNIQUE_ID, CUE_COUNT, DEVICE_TYPE, RADIO_NETWORK_ID = load_cfg()
@@ -204,32 +202,6 @@ def build_script_status_text():
         script_next_index,
         hb_age
     )
-
-
-def handle_ota_begin(data):
-    if len(data) < 9:
-        return False
-
-    size = int.from_bytes(data[0:4], "big")
-    checksum = int.from_bytes(data[4:8], "big")
-    path_len = data[8]
-    if len(data) != 9 + path_len:
-        return False
-
-    try:
-        path = bytes(data[9:]).decode()
-    except:
-        return False
-
-    return ota_session.begin(path, size, checksum)
-
-
-def handle_ota_write(data):
-    if len(data) < 4:
-        return False
-
-    offset = int.from_bytes(data[0:4], "big")
-    return ota_session.write(offset, data[4:])
 
 
 def address_matches(pkt):
@@ -518,35 +490,6 @@ def handle(pkt):
 
     if cmd == CMD_SCRIPT_HEARTBEAT:
         handle_script_heartbeat(pkt)
-        return
-
-    if cmd == CMD_OTA_BEGIN:
-        if ARMED:
-            tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_OTA_BEGIN, NACK_REJECTED_ARMED))
-            return
-        if handle_ota_begin(pkt.get("data", b"")):
-            tx_bytes(nfcp.build_ack(UNIQUE_ID, CMD_OTA_BEGIN, ACK_OK))
-        else:
-            tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_OTA_BEGIN, NACK_INVALID_VALUE))
-        return
-
-    if cmd == CMD_OTA_WRITE:
-        if handle_ota_write(pkt.get("data", b"")):
-            tx_bytes(nfcp.build_ack(UNIQUE_ID, CMD_OTA_WRITE, ACK_OK))
-        else:
-            tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_OTA_WRITE, NACK_INVALID_VALUE))
-        return
-
-    if cmd == CMD_OTA_END:
-        if ota_session.end():
-            tx_bytes(nfcp.build_ack(UNIQUE_ID, CMD_OTA_END, ACK_OK))
-        else:
-            tx_bytes(nfcp.build_nack(UNIQUE_ID, CMD_OTA_END, NACK_INVALID_VALUE))
-        return
-
-    if cmd == CMD_OTA_ABORT:
-        ota_session.abort()
-        tx_bytes(nfcp.build_ack(UNIQUE_ID, CMD_OTA_ABORT, ACK_OK))
         return
 
     # Continuity allowed even when ARMED, but rate-limited

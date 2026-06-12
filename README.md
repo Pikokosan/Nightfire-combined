@@ -1,38 +1,36 @@
 # Nightfire Combined
 
 Nightfire Combined contains the MicroPython firmware for the NFCP master,
-slave, and dummy devices. The devices share the same NFCP packet protocol and
-can run over either the older RS-485 wiring or the newer E77 radio UART bridge.
-
-Current firmware is set up for the E77 radio transport.
+slave, dummy, and E77 module devices. The current working build is focused on
+the E77 radio transport.
 
 ## Project Layout
 
 - `main/nfcp.py` - shared NFCP framing, escaping, CRC, commands, and packet builders.
-- `main/e77_radio.py` - local UART protocol used to send NFCP frames through the E77 radio.
-- `main/module_transport.py` - shared dummy/slave UART transport and radio update helper.
-- `main/module_ota.py` - shared dummy/slave staged-file OTA update helper.
-- `main/e77_bootloader.py` - device-side E77 radio firmware updater.
 - `main/master_main.py` - Waveshare ESP32-S3-LCD-4.3 master controller GUI.
 - `main/slave_main.py` - real 16-cue module firmware using the MC33996 driver.
-- `main/dummy_main.py` - simulated module firmware for testing.
-- `main/e77_main.py` - E77 module MicroPython NFCP radio slave app.
+- `main/dummy_main.py` - simulated 16-cue module firmware for testing.
+- `main/e77_main.py` - E77 MicroPython NFCP radio module app.
+- `main/e77_radio.py` - local UART protocol for the E77 radio bridge.
 - `main/e77_gfsk.py` - STM32WL SUBGHZ GFSK radio driver used by `e77_main.py`.
+- `main/e77_bootloader.py` - device-side E77 radio firmware updater.
+- `main/module_transport.py` - shared dummy/slave UART and radio transport helper.
+- `main/mc33996_driver.py` - MC33996 output driver helper.
 - `scripts/upload_master_to_com7.ps1` - installs master firmware as `main.py`.
 - `scripts/upload_slave_to_com10.ps1` - installs slave firmware as `main.py`.
 - `scripts/upload_dummy_to_com11.ps1` - installs dummy firmware as `main.py`.
-- `scripts/upload_e77_micropython_app.ps1` - installs the E77 MicroPython radio slave app.
-- `scripts/build_module_ota_package.ps1` - builds the customer update package.
-- `scripts/install_master_update.ps1` - installs packaged master firmware over USB.
-- `scripts/update_e77_radio_firmware.py` - PC-side E77 radio firmware updater for a radio connected directly to the computer.
+- `scripts/upload_e77_micropython_app.ps1` - installs the E77 MicroPython app as `main.mpy`.
+- `scripts/build_e77_ota_package.ps1` - builds the E77 MicroPython OTA package for the master SD card.
+- `scripts/update_e77_radio_firmware.py` - PC-side E77 radio firmware updater.
 
 ## Default Ports
 
 - Master device: `COM7`
 - Slave device: `COM10`
 - Dummy device: `COM11`
+- E77 MicroPython module: `COM17`
 
-Each upload script accepts a different port:
+Each upload script accepts a port override:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\upload_master_to_com7.ps1 -Port COM7
@@ -41,18 +39,19 @@ powershell -ExecutionPolicy Bypass -File .\scripts\upload_dummy_to_com11.ps1 -Po
 powershell -ExecutionPolicy Bypass -File .\scripts\upload_e77_micropython_app.ps1 -Port COM17
 ```
 
-The VS Code build tasks run the same scripts:
+The VS Code build tasks run the same upload scripts:
 
 - `Master device: upload`
 - `Slave device: upload`
 - `Dummy device: upload`
-- `Nightfire update package: build`
+- `E77 MicroPython app: upload`
+- `E77 OTA package: build`
 
-## Device Firmware Updates
+## Device Firmware Uploads
 
 Use the matching upload task or script when changing MicroPython firmware.
-Each script copies the correct device entrypoint to the board as `main.py` plus
-the shared modules that device needs.
+Each script copies the correct device entrypoint to the board plus the shared
+modules that device needs.
 
 Master upload includes:
 
@@ -69,7 +68,6 @@ Slave upload includes:
 - `nfcp.py`
 - `e77_radio.py`
 - `module_transport.py`
-- `module_ota.py`
 - `e77_bootloader.py`
 - `mc33996_driver.py`
 
@@ -79,7 +77,6 @@ Dummy upload includes:
 - `nfcp.py`
 - `e77_radio.py`
 - `module_transport.py`
-- `module_ota.py`
 - `e77_bootloader.py`
 
 E77 MicroPython app upload includes:
@@ -90,36 +87,40 @@ E77 MicroPython app upload includes:
 - `main/mc33996_driver.py` compiled as `mc33996_driver.mpy`
 - a tiny device `boot.py` stub that imports `main.mpy` on startup
 
-## Customer Update Package
+## E77 MicroPython OTA Updates
 
-Build a full customer package with the VS Code task
-`Nightfire update package: build`, or run:
+The old staged-file module OTA updater has been removed. The new updater is
+specific to E77 MicroPython modules and sends compiled `.mpy` files over NFCP
+through the E77 radio link.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build_module_ota_package.ps1
-```
-
-The task writes:
-
-- `dist/nightfire_update_package/`
-- `dist/nightfire_update_<version>.zip`
-
-The package contains:
-
-- `master_update/` - master controller firmware files and `master_update.json`
-- root-level module OTA files - copied to the master SD card for module updates
-- `install_master_update.ps1` - PC-side master updater
-- `raw_micropython_upload.py` - upload helper used by the master updater
-
-To update the master from the package:
+Build an SD-card package with:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install_master_update.ps1 -Port COM7
+powershell -ExecutionPolicy Bypass -File .\scripts\build_e77_ota_package.ps1
 ```
 
-To update modules, copy the package root files to the master SD card, then use
-Settings > Module OTA on the master. Keep `module_ota.json`, and when present
-`e77_radio.bin`, `latest.json`, and `radio_update.flag`, at the SD card root.
+The task writes `dist/e77_ota_package/`. Copy the contents of that folder to the
+root of the master SD card. The package includes:
+
+- `e77_update.json`
+- `nfcp.mpy`
+- `e77_gfsk.mpy`
+- `mc33996_driver.mpy`
+- `main.mpy`
+- `boot.py`
+
+On the master, open `Settings > E77 OTA`. The master reads
+`/sd/e77_update.json`, sends each listed file to discovered modules reporting
+`e77-micropython`, verifies size/checksum on each module, commits the new files,
+and then asks each updated module to reboot.
+
+The module must be disarmed and not running a script during update.
+
+Modules running firmware older than the first E77 updater build must be updated
+once with `E77 MicroPython app: upload` before they can accept OTA updates.
+
+Radio firmware updates are still supported separately by the radio update flows
+below.
 
 ## Radio Firmware Updates From The Master
 
@@ -154,68 +155,6 @@ Example `latest.json`:
 
 The `crc32` field is optional. If present, the updater verifies the `.bin`
 before writing it.
-
-## Module Firmware Versioning And OTA Updates
-
-Slave and dummy modules report their module firmware name/version and attached
-E77 radio firmware version through NFCP `INFO_REQ` / `INFO_RSP`. The master reads
-this information during Discover and Refresh and shows it in the module detail
-screen.
-
-The master also has a Settings > Module OTA option. It reads
-`/sd/module_ota.json` or `/sd/firmware/module_ota.json` and sends each listed
-file to matching discovered modules over NFCP. The module writes to a temporary
-`.ota` file, verifies the simple 32-bit additive checksum, then renames it into
-place.
-
-Example `module_ota.json`:
-
-```json
-{
-  "files": [
-    {
-      "source": "slave_main.py",
-      "target": "/main.py",
-      "device_type": "0x20"
-    },
-    {
-      "source": "dummy_main.py",
-      "target": "/main.py",
-      "device_type": "0x10"
-    },
-    {
-      "source": "module_transport.py",
-      "target": "/module_transport.py"
-    },
-    {
-      "source": "module_ota.py",
-      "target": "/module_ota.py"
-    }
-  ]
-}
-```
-
-Customer OTA packages can be built with the VS Code task
-`Nightfire update package: build`. The task writes:
-
-- `dist/nightfire_update_package/`
-- `dist/nightfire_update_<version>.zip`
-
-Copy the package folder contents to the root of the master's SD card. If the
-E77 radio firmware build is available, the package also includes the radio
-firmware update alongside the module app update:
-
-- `e77_radio.bin`
-- `latest.json`
-- `radio_update.flag`
-
-Those files are sent to each module with the app update. After updating
-`main.py`, reset the module. On the next boot the module sees
-`radio_update.flag`, flashes the attached E77 radio using `latest.json`, clears
-the flag after success, and then returns to normal operation.
-
-The module talks to the radio app at the configured app baud rate, while the
-STM32 ROM bootloader update step still uses `115200`.
 
 ## Radio Firmware Updates From Dummy Or Slave Devices
 

@@ -36,10 +36,11 @@ CMD_NACK         = 0x51
 CMD_INFO_REQ     = 0x52
 CMD_INFO_RSP     = 0x53
 
-CMD_OTA_BEGIN    = 0x60
-CMD_OTA_WRITE    = 0x61
-CMD_OTA_END      = 0x62
-CMD_OTA_ABORT    = 0x63
+CMD_E77_UPDATE_BEGIN  = 0x60
+CMD_E77_UPDATE_WRITE  = 0x61
+CMD_E77_UPDATE_END    = 0x62
+CMD_E77_UPDATE_ABORT  = 0x63
+CMD_E77_UPDATE_REBOOT = 0x64
 
 CMD_SCRIPT_CLEAR = 0x70
 CMD_SCRIPT_LOAD  = 0x71
@@ -232,6 +233,44 @@ class NFCP:
         )
         return self._frame(SOF_UNIQUE, payload)
 
+    def build_e77_update_begin(self, target_unique: int, transfer_id: int, path: str, size: int, checksum: int) -> bytes:
+        path_bytes = path.encode()
+        if len(path_bytes) > 64:
+            raise NFCPError("E77 update path too long")
+        data = (
+            (transfer_id & 0xFFFF).to_bytes(2, "big") +
+            (size & 0xFFFFFFFF).to_bytes(4, "big") +
+            (checksum & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes([len(path_bytes) & 0xFF]) +
+            path_bytes
+        )
+        return self.build_unique_command(target_unique, CMD_E77_UPDATE_BEGIN, data)
+
+    def build_e77_update_write(self, target_unique: int, transfer_id: int, offset: int, chunk: bytes) -> bytes:
+        data = (
+            (transfer_id & 0xFFFF).to_bytes(2, "big") +
+            (offset & 0xFFFFFFFF).to_bytes(4, "big") +
+            chunk
+        )
+        return self.build_unique_command(target_unique, CMD_E77_UPDATE_WRITE, data)
+
+    def build_e77_update_end(self, target_unique: int, transfer_id: int) -> bytes:
+        return self.build_unique_command(
+            target_unique,
+            CMD_E77_UPDATE_END,
+            (transfer_id & 0xFFFF).to_bytes(2, "big")
+        )
+
+    def build_e77_update_abort(self, target_unique: int, transfer_id: int = 0) -> bytes:
+        return self.build_unique_command(
+            target_unique,
+            CMD_E77_UPDATE_ABORT,
+            (transfer_id & 0xFFFF).to_bytes(2, "big")
+        )
+
+    def build_e77_update_reboot(self, target_unique: int) -> bytes:
+        return self.build_unique_command(target_unique, CMD_E77_UPDATE_REBOOT)
+
     def build_script_clear(self, target_unique: int, script_id: int) -> bytes:
         payload = (
             bytes([self.node_id]) +
@@ -298,50 +337,6 @@ class NFCP:
             (elapsed_ms & 0xFFFFFFFF).to_bytes(4, "big")
         )
         return self.build_unique_command(target_unique, CMD_SCRIPT_HEARTBEAT, data)
-
-    def build_ota_begin(self, target_unique: int, path: str, size: int, checksum: int) -> bytes:
-        path_bytes = path.encode()
-        if len(path_bytes) > 64:
-            raise NFCPError("OTA path too long")
-        data = (
-            (size & 0xFFFFFFFF).to_bytes(4, "big") +
-            (checksum & 0xFFFFFFFF).to_bytes(4, "big") +
-            bytes([len(path_bytes) & 0xFF]) +
-            path_bytes
-        )
-        payload = (
-            bytes([self.node_id]) +
-            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
-            bytes([CMD_OTA_BEGIN]) +
-            data
-        )
-        return self._frame(SOF_UNIQUE, payload)
-
-    def build_ota_write(self, target_unique: int, offset: int, chunk: bytes) -> bytes:
-        payload = (
-            bytes([self.node_id]) +
-            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
-            bytes([CMD_OTA_WRITE]) +
-            (offset & 0xFFFFFFFF).to_bytes(4, "big") +
-            chunk
-        )
-        return self._frame(SOF_UNIQUE, payload)
-
-    def build_ota_end(self, target_unique: int) -> bytes:
-        payload = (
-            bytes([self.node_id]) +
-            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
-            bytes([CMD_OTA_END])
-        )
-        return self._frame(SOF_UNIQUE, payload)
-
-    def build_ota_abort(self, target_unique: int) -> bytes:
-        payload = (
-            bytes([self.node_id]) +
-            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
-            bytes([CMD_OTA_ABORT])
-        )
-        return self._frame(SOF_UNIQUE, payload)
 
     # Response builder
     def build_response(self, src_unique: int, cmd: int, data: bytes = b"") -> bytes:
@@ -564,10 +559,11 @@ class NFCPStreamParser:
                 CMD_SET_NETWORK,
                 CMD_CONTINUITY_REQ,
                 CMD_INFO_REQ,
-                CMD_OTA_BEGIN,
-                CMD_OTA_WRITE,
-                CMD_OTA_END,
-                CMD_OTA_ABORT,
+                CMD_E77_UPDATE_BEGIN,
+                CMD_E77_UPDATE_WRITE,
+                CMD_E77_UPDATE_END,
+                CMD_E77_UPDATE_ABORT,
+                CMD_E77_UPDATE_REBOOT,
                 CMD_SCRIPT_CLEAR,
                 CMD_SCRIPT_LOAD,
             ):
@@ -596,10 +592,11 @@ class NFCPStreamParser:
             CMD_SET_NETWORK,
             CMD_CONTINUITY_REQ,
             CMD_INFO_REQ,
-            CMD_OTA_BEGIN,
-            CMD_OTA_WRITE,
-            CMD_OTA_END,
-            CMD_OTA_ABORT,
+            CMD_E77_UPDATE_BEGIN,
+            CMD_E77_UPDATE_WRITE,
+            CMD_E77_UPDATE_END,
+            CMD_E77_UPDATE_ABORT,
+            CMD_E77_UPDATE_REBOOT,
             CMD_SCRIPT_CLEAR,
             CMD_SCRIPT_LOAD,
         ) and self.frame_type != SOF_UNIQUE:

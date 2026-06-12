@@ -74,14 +74,14 @@
             }
         },
         {
-            "label": "Nightfire update package: build",
+            "label": "E77 OTA package: build",
             "type": "shell",
             "command": "powershell",
             "args": [
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                "${workspaceFolder}\\scripts\\build_module_ota_package.ps1"
+                "${workspaceFolder}\\scripts\\build_e77_ota_package.ps1"
             ],
             "group": "build",
             "problemMatcher": [],

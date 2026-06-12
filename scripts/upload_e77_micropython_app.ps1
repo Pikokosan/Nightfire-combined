@@ -25,16 +25,16 @@ try {
     Remove-Item -Force (Join-Path $Deploy "*") -ErrorAction SilentlyContinue
 
     Write-Host "Compiling E77 MicroPython files to .mpy..."
-    & mpy-cross (Join-Path $App "nfcp.py") -o (Join-Path $Deploy "nfcp.mpy")
+    & mpy-cross -O3 (Join-Path $App "nfcp.py") -o (Join-Path $Deploy "nfcp.mpy")
     if ($LASTEXITCODE -ne 0) { throw "mpy-cross failed for nfcp.py." }
 
-    & mpy-cross (Join-Path $App "e77_gfsk.py") -o (Join-Path $Deploy "e77_gfsk.mpy")
+    & mpy-cross -O3 (Join-Path $App "e77_gfsk.py") -o (Join-Path $Deploy "e77_gfsk.mpy")
     if ($LASTEXITCODE -ne 0) { throw "mpy-cross failed for e77_gfsk.py." }
 
-    & mpy-cross (Join-Path $App "mc33996_driver.py") -o (Join-Path $Deploy "mc33996_driver.mpy")
+    & mpy-cross -O3 (Join-Path $App "mc33996_driver.py") -o (Join-Path $Deploy "mc33996_driver.mpy")
     if ($LASTEXITCODE -ne 0) { throw "mpy-cross failed for mc33996_driver.py." }
 
-    & mpy-cross (Join-Path $App "e77_main.py") -o (Join-Path $Deploy "main.mpy")
+    & mpy-cross -O3 (Join-Path $App "e77_main.py") -o (Join-Path $Deploy "main.mpy")
     if ($LASTEXITCODE -ne 0) { throw "mpy-cross failed for e77_main.py." }
 
     Set-Content -NoNewline -Encoding ASCII (Join-Path $Deploy "boot.py") "import main`n"

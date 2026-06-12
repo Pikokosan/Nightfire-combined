@@ -1,5 +1,6 @@
 import time
 import os
+import machine
 from machine import Pin, SoftSPI
 
 from e77_gfsk import E77Gfsk
@@ -14,7 +15,9 @@ DEFAULT_UNIQUE_ID = 0xE7700001
 DEFAULT_CUE_COUNT = 16
 DEVICE_TYPE = 0x20
 APP_FIRMWARE_NAME = "e77-micropython"
-APP_FIRMWARE_VERSION = "0.1.3"
+APP_FIRMWARE_VERSION = "0.1.4"
+E77_UPDATE_MAX_FILE_SIZE = 256 * 1024
+E77_UPDATE_CHUNK_TIMEOUT_MS = 10000
 
 DISCOVER_BACKOFF_MIN_MS = 10
 DISCOVER_BACKOFF_MAX_MS = 250
@@ -113,6 +116,16 @@ script_start_ms = 0
 script_next_index = 0
 script_last_heartbeat_ms = 0
 script_last_event = "boot"
+update_active = False
+update_transfer_id = 0
+update_target_path = ""
+update_temp_path = ""
+update_expected_size = 0
+update_expected_checksum = 0
+update_received_size = 0
+update_checksum = 0
+update_file = None
+update_last_ms = 0
 parser = NFCPStreamParser()
 nfcp = NFCP(node_id=0x01)
 radio = E77Gfsk()
@@ -138,8 +151,7 @@ def address_matches(pkt):
 
 def tx_nfcp(frame):
     payload = (RADIO_NETWORK_ID & 0xFFFF).to_bytes(2, "big") + frame
-    ok = radio.send(payload)
-    print("TX", len(frame), "ok" if ok else "fail")
+    radio.send(payload)
 
 
 def reply_ack_if_unique(pkt, orig_cmd, code=ACK_OK):
@@ -196,6 +208,220 @@ def build_script_status_text():
         hb_age,
         script_last_event,
     )
+
+
+def update_close_file():
+    global update_file
+
+    try:
+        if update_file:
+            update_file.close()
+    except Exception:
+        pass
+    update_file = None
+
+
+def update_remove_temp():
+    try:
+        if update_temp_path:
+            os.remove(update_temp_path)
+    except Exception:
+        pass
+
+
+def update_reset_state(remove_temp=False):
+    global update_active, update_transfer_id, update_target_path, update_temp_path
+    global update_expected_size, update_expected_checksum, update_received_size
+    global update_checksum, update_last_ms
+
+    update_close_file()
+    if remove_temp:
+        update_remove_temp()
+
+    update_active = False
+    update_transfer_id = 0
+    update_target_path = ""
+    update_temp_path = ""
+    update_expected_size = 0
+    update_expected_checksum = 0
+    update_received_size = 0
+    update_checksum = 0
+    update_last_ms = 0
+
+
+def safe_update_path(path):
+    if not path:
+        return None
+    if ".." in path:
+        return None
+    if path.endswith("/"):
+        return None
+    if path[0] != "/":
+        return path
+    path = path[1:]
+    if not path:
+        return None
+    if len(path) > 64:
+        return None
+    return path
+
+
+def handle_e77_update_begin(pkt):
+    global update_active, update_transfer_id, update_target_path, update_temp_path
+    global update_expected_size, update_expected_checksum, update_received_size
+    global update_checksum, update_file, update_last_ms
+
+    if ARMED or script_running:
+        reply_nack_if_unique(pkt, CMD_E77_UPDATE_BEGIN, NACK_REJECTED_ARMED)
+        return
+
+    data = pkt.get("data", b"")
+    if len(data) < 11:
+        reply_nack_if_unique(pkt, CMD_E77_UPDATE_BEGIN, NACK_BAD_LENGTH)
+        return
+
+    transfer_id = int.from_bytes(data[0:2], "big") & 0xFFFF
+    size = int.from_bytes(data[2:6], "big") & 0xFFFFFFFF
+    checksum = int.from_bytes(data[6:10], "big") & 0xFFFFFFFF
+    path_len = data[10]
+    if len(data) != 11 + path_len:
+        reply_nack_if_unique(pkt, CMD_E77_UPDATE_BEGIN, NACK_BAD_LENGTH)
+        return
+
+    try:
+        target_path = bytes(data[11:]).decode()
+    except Exception:
+        reply_nack_if_unique(pkt, CMD_E77_UPDATE_BEGIN, NACK_INVALID_VALUE)
+        return
+
+    target_path = safe_update_path(target_path)
+    if target_path is None or size < 1 or size > E77_UPDATE_MAX_FILE_SIZE:
+        reply_nack_if_unique(pkt, CMD_E77_UPDATE_BEGIN, NACK_INVALID_VALUE)
+        return
+
+    update_reset_state(remove_temp=True)
+
+    try:
+        temp_path = target_path + ".part"
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
+        try:
+            os.remove(target_path)
+        except Exception:
+            pass
+        update_file = open(temp_path, "wb")
+    except Exception:
+        update_reset_state(remove_temp=True)
+        reply_nack_if_unique(pkt, CMD_E77_UPDATE_BEGIN, NACK_INTERNAL_ERROR)
+        return
+
+    update_active = True
+    update_transfer_id = transfer_id
+    update_target_path = target_path
+    update_temp_path = temp_path
+    update_expected_size = size
+    update_expected_checksum = checksum
+    update_received_size = 0
+    update_checksum = 0
+    update_last_ms = time.ticks_ms()
+    reply_ack_if_unique(pkt, CMD_E77_UPDATE_BEGIN)
+
+
+def handle_e77_update_write(pkt):
+    global update_received_size, update_checksum, update_last_ms
+
+    data = pkt.get("data", b"")
+    if len(data) < 6:
+        reply_nack_if_unique(pkt, CMD_E77_UPDATE_WRITE, NACK_BAD_LENGTH)
+        return
+
+    transfer_id = int.from_bytes(data[0:2], "big") & 0xFFFF
+    offset = int.from_bytes(data[2:6], "big") & 0xFFFFFFFF
+    chunk = data[6:]
+
+    if not update_active or transfer_id != update_transfer_id:
+        reply_nack_if_unique(pkt, CMD_E77_UPDATE_WRITE, NACK_INVALID_VALUE)
+        return
+
+    if offset != update_received_size:
+        reply_nack_if_unique(pkt, CMD_E77_UPDATE_WRITE, NACK_INVALID_VALUE)
+        return
+
+    if update_received_size + len(chunk) > update_expected_size:
+        reply_nack_if_unique(pkt, CMD_E77_UPDATE_WRITE, NACK_INVALID_VALUE)
+        return
+
+    try:
+        update_file.write(chunk)
+    except Exception:
+        update_reset_state(remove_temp=True)
+        reply_nack_if_unique(pkt, CMD_E77_UPDATE_WRITE, NACK_INTERNAL_ERROR)
+        return
+
+    for b in chunk:
+        if not isinstance(b, int):
+            b = ord(b)
+        update_checksum = (update_checksum + b) & 0xFFFFFFFF
+
+    update_received_size += len(chunk)
+    update_last_ms = time.ticks_ms()
+    reply_ack_if_unique(pkt, CMD_E77_UPDATE_WRITE)
+
+
+def handle_e77_update_end(pkt):
+    data = pkt.get("data", b"")
+    if len(data) != 2:
+        reply_nack_if_unique(pkt, CMD_E77_UPDATE_END, NACK_BAD_LENGTH)
+        return
+
+    transfer_id = int.from_bytes(data, "big") & 0xFFFF
+    if not update_active or transfer_id != update_transfer_id:
+        reply_nack_if_unique(pkt, CMD_E77_UPDATE_END, NACK_INVALID_VALUE)
+        return
+
+    if update_received_size != update_expected_size or update_checksum != update_expected_checksum:
+        update_reset_state(remove_temp=True)
+        reply_nack_if_unique(pkt, CMD_E77_UPDATE_END, NACK_INVALID_VALUE)
+        return
+
+    try:
+        update_close_file()
+        try:
+            os.remove(update_target_path)
+        except Exception:
+            pass
+        os.rename(update_temp_path, update_target_path)
+    except Exception:
+        update_reset_state(remove_temp=True)
+        reply_nack_if_unique(pkt, CMD_E77_UPDATE_END, NACK_INTERNAL_ERROR)
+        return
+
+    update_reset_state(remove_temp=False)
+    reply_ack_if_unique(pkt, CMD_E77_UPDATE_END)
+
+
+def handle_e77_update_abort(pkt):
+    update_reset_state(remove_temp=True)
+    reply_ack_if_unique(pkt, CMD_E77_UPDATE_ABORT)
+
+
+def handle_e77_update_reboot(pkt):
+    if ARMED or script_running:
+        reply_nack_if_unique(pkt, CMD_E77_UPDATE_REBOOT, NACK_REJECTED_ARMED)
+        return
+
+    reply_ack_if_unique(pkt, CMD_E77_UPDATE_REBOOT)
+    time.sleep_ms(250)
+    machine.reset()
+
+
+def poll_update_timeout():
+    if not update_active:
+        return
+    if time.ticks_diff(time.ticks_ms(), update_last_ms) > E77_UPDATE_CHUNK_TIMEOUT_MS:
+        update_reset_state(remove_temp=True)
 
 
 def open_cue_list(open_mask):
@@ -256,14 +482,7 @@ def handle_continuity(pkt):
                 open_mask = (~raw_openload) & valid_mask
         data = open_mask.to_bytes(nbytes, "big")
         tx_nfcp(nfcp.build_response(UNIQUE_ID, CMD_CONTINUITY_RSP, data))
-        print("CONT status=0x%02X open_mask=0x%04X drive=0x%04X open_cues=%s" % (
-            status,
-            open_mask,
-            test_mask or 0,
-            str(open_cue_list(open_mask)),
-        ))
-    except Exception as e:
-        print("CONT error:", e)
+    except Exception:
         reply_nack_if_unique(pkt, CMD_CONTINUITY_REQ, NACK_INTERNAL_ERROR)
 
 
@@ -279,27 +498,23 @@ def fire_mask(pkt, data):
         reply_nack_if_unique(pkt, CMD_FIRE, NACK_BAD_LENGTH)
         return
     if not ARMED:
-        print("FIRE rejected - DISARMED")
         reply_nack_if_unique(pkt, CMD_FIRE, NACK_REJECTED_ARMED)
         return
     try:
-        print("FIRE mask=0x%04X pulse=%dms" % (mask, FIRE_PULSE_MS))
         mc.digital_write_mask(mask)
         time.sleep_ms(FIRE_PULSE_MS)
         mc.digital_write_mask(0)
         reply_ack_if_unique(pkt, CMD_FIRE)
-    except Exception as e:
+    except Exception:
         try:
             mc.digital_write_mask(0)
         except Exception:
             pass
-        print("FIRE error:", e)
         reply_nack_if_unique(pkt, CMD_FIRE, NACK_INTERNAL_ERROR)
 
 
 def fire_mask16(mask16, require_armed=True):
     if require_armed and not ARMED:
-        print("FIRE rejected - DISARMED mask=0x%04X" % mask16)
         return NACK_REJECTED_ARMED
 
     mask16 &= 0xFFFF
@@ -307,17 +522,15 @@ def fire_mask16(mask16, require_armed=True):
         return ACK_OK
 
     try:
-        print("FIRE mask=0x%04X pulse=%dms" % (mask16, FIRE_PULSE_MS))
         mc.digital_write_mask(mask16)
         time.sleep_ms(FIRE_PULSE_MS)
         mc.digital_write_mask(0)
         return ACK_OK
-    except Exception as e:
+    except Exception:
         try:
             mc.digital_write_mask(0)
         except Exception:
             pass
-        print("FIRE error:", e)
         return NACK_INTERNAL_ERROR
 
 
@@ -332,10 +545,6 @@ def clear_script(script_id=None):
     script_next_index = 0
     script_last_heartbeat_ms = 0
     script_last_event = "clear"
-    if LOG_SCRIPT_EVENTS:
-        print("SCRIPT CLEAR id=%s" % ("--" if script_id is None else "%04X" % script_id))
-
-
 def handle_script_clear(pkt):
     data = pkt.get("data", b"")
     if len(data) != 2:
@@ -379,13 +588,6 @@ def handle_script_load(pkt):
 
     script_entries.sort(key=lambda item: item[0])
     script_last_event = "load"
-    if LOG_SCRIPT_EVENTS:
-        print("SCRIPT LOAD id=%04X chunk=%d add=%d total=%d" % (
-            script_id,
-            chunk_index,
-            entry_count,
-            len(script_entries),
-        ))
     reply_ack_if_unique(pkt, CMD_SCRIPT_LOAD)
 
 
@@ -394,8 +596,6 @@ def handle_script_start(pkt):
 
     if not ARMED:
         script_last_event = "start disarmed"
-        if LOG_SCRIPT_EVENTS:
-            print("SCRIPT START rejected - disarmed")
         reply_nack_if_unique(pkt, CMD_SCRIPT_START, NACK_REJECTED_ARMED)
         return
 
@@ -412,12 +612,6 @@ def handle_script_start(pkt):
 
     if script_id_loaded != script_id or not script_entries:
         script_last_event = "start invalid"
-        if LOG_SCRIPT_EVENTS:
-            print("SCRIPT START rejected id=%04X loaded=%s entries=%d" % (
-                script_id,
-                "--" if script_id_loaded is None else "%04X" % script_id_loaded,
-                len(script_entries),
-            ))
         reply_nack_if_unique(pkt, CMD_SCRIPT_START, NACK_INVALID_VALUE)
         return
 
@@ -431,14 +625,6 @@ def handle_script_start(pkt):
     script_running = True
     script_last_heartbeat_ms = time.ticks_ms()
     script_last_event = "start"
-    if LOG_SCRIPT_EVENTS:
-        print("SCRIPT START id=%04X entries=%d delay=%d offset=%d next=%d" % (
-            script_id,
-            len(script_entries),
-            start_delay_ms,
-            offset_ms,
-            script_next_index,
-        ))
     reply_ack_if_unique(pkt, CMD_SCRIPT_START)
 
 
@@ -452,8 +638,6 @@ def handle_script_stop(pkt):
         mc.digital_write_mask(0)
     except Exception:
         pass
-    if LOG_SCRIPT_EVENTS:
-        print("SCRIPT STOP")
     reply_ack_if_unique(pkt, CMD_SCRIPT_STOP)
 
 
@@ -492,7 +676,6 @@ def run_script_scheduler():
         except Exception:
             pass
         script_last_event = "hb timeout"
-        print("SCRIPT stopped - heartbeat timeout")
         return
 
     elapsed = time.ticks_diff(time.ticks_ms(), script_start_ms)
@@ -501,16 +684,12 @@ def run_script_scheduler():
         if event_ms > elapsed:
             break
         script_last_event = "fire"
-        if LOG_SCRIPT_EVENTS:
-            print("SCRIPT FIRE mask=0x%04X event=%d elapsed=%d" % (cue_mask, event_ms, elapsed))
         fire_mask16(cue_mask, require_armed=True)
         script_next_index += 1
 
     if script_next_index >= len(script_entries):
         script_running = False
         script_last_event = "complete"
-        if LOG_SCRIPT_EVENTS:
-            print("SCRIPT COMPLETE")
 
 
 def handle(pkt):
@@ -518,8 +697,6 @@ def handle(pkt):
 
     cmd = pkt["cmd"]
     data = pkt.get("data", b"")
-    print("RX NFCP cmd=0x%02X type=0x%02X" % (cmd, pkt.get("frame_type", 0)))
-
     if cmd == CMD_DISCOVER:
         handle_discover(pkt)
         return
@@ -536,7 +713,6 @@ def handle(pkt):
 
     if cmd == CMD_ARM:
         ARMED = True
-        print("ARMED")
         reply_ack_if_unique(pkt, CMD_ARM)
         return
 
@@ -545,9 +721,8 @@ def handle(pkt):
         script_running = False
         try:
             mc.digital_write_mask(0)
-        except Exception as e:
-            print("DISARM output-off error:", e)
-        print("DISARMED")
+        except Exception:
+            pass
         reply_ack_if_unique(pkt, CMD_DISARM)
         return
 
@@ -580,6 +755,26 @@ def handle(pkt):
         handle_script_heartbeat(pkt)
         return
 
+    if cmd == CMD_E77_UPDATE_BEGIN:
+        handle_e77_update_begin(pkt)
+        return
+
+    if cmd == CMD_E77_UPDATE_WRITE:
+        handle_e77_update_write(pkt)
+        return
+
+    if cmd == CMD_E77_UPDATE_END:
+        handle_e77_update_end(pkt)
+        return
+
+    if cmd == CMD_E77_UPDATE_ABORT:
+        handle_e77_update_abort(pkt)
+        return
+
+    if cmd == CMD_E77_UPDATE_REBOOT:
+        handle_e77_update_reboot(pkt)
+        return
+
     if cmd == CMD_SET_GROUP:
         if ARMED:
             reply_nack_if_unique(pkt, CMD_SET_GROUP, NACK_REJECTED_ARMED)
@@ -589,7 +784,6 @@ def handle(pkt):
             GROUP_ID = int.from_bytes(data, "big") & 0xFFFF
             save_cfg()
             reply_ack_if_unique(pkt, CMD_SET_GROUP)
-            print("GROUP=0x%04X" % GROUP_ID)
         return
 
     if cmd == CMD_SET_NETWORK:
@@ -602,7 +796,6 @@ def handle(pkt):
             reply_ack_if_unique(pkt, CMD_SET_NETWORK)
             RADIO_NETWORK_ID = new_network
             save_cfg()
-            print("NETWORK=0x%04X" % RADIO_NETWORK_ID)
         return
 
     if cmd == CMD_SET_UNIQUE:
@@ -615,11 +808,6 @@ def handle(pkt):
             UNIQUE_ID = int.from_bytes(data, "big") & 0xFFFFFFFF
             tx_nfcp(nfcp.build_ack(old_unique, CMD_SET_UNIQUE, ACK_OK))
             save_cfg()
-            print("UNIQUE=0x%08X" % UNIQUE_ID)
-        return
-
-    if cmd in (CMD_OTA_BEGIN, CMD_OTA_WRITE, CMD_OTA_END, CMD_OTA_ABORT):
-        reply_ack_if_unique(pkt, cmd)
         return
 
 
@@ -628,7 +816,6 @@ def handle_radio_payload(payload):
         return
     network_id = int.from_bytes(payload[0:2], "big")
     if network_id != RADIO_NETWORK_ID:
-        print("RX other network 0x%04X" % network_id)
         return
     for b in payload[2:]:
         pkt = parser.feed(b)
@@ -638,21 +825,16 @@ def handle_radio_payload(payload):
 
 def main():
     global mc
-    print("Nightfire E77 MicroPython MC33996 slave")
-    print("UID=0x%08X GROUP=0x%04X NET=0x%04X" % (UNIQUE_ID, GROUP_ID, RADIO_NETWORK_ID))
     radio.init()
-    print("GFSK RX ready on 915 MHz")
-    print("MC33996 SCK=%s MOSI=%s MISO=%s CS=%s RESET=%s" % (MC_SCK, MC_MOSI, MC_MISO, MC_CS, MC_RESET))
     mc = MC33996()
     mc.begin()
-    print("MC33996 ready, outputs off")
     try:
         while True:
             payload = radio.poll()
             if payload:
-                print("RX radio", len(payload), payload[:16])
                 handle_radio_payload(payload)
             run_script_scheduler()
+            poll_update_timeout()
             time.sleep_ms(5)
     finally:
         if mc:
