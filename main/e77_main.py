@@ -25,7 +25,6 @@ PING_REPLY_BYTE = 0xAA
 FIRE_PULSE_MS = 5
 SCRIPT_MAX_ENTRIES = 192
 SCRIPT_HEARTBEAT_TIMEOUT_MS = 3000
-LOG_SCRIPT_EVENTS = True
 CONT_MIN_INTERVAL_MS = 100
 # Datasheet: MC33996 reports open-load only while the output is OFF.
 # This flag is for experiments only; driven outputs clear their fault bits.
@@ -266,6 +265,13 @@ def safe_update_path(path):
     return path
 
 
+def remove_if_exists(path):
+    try:
+        os.remove(path)
+    except Exception:
+        pass
+
+
 def handle_e77_update_begin(pkt):
     global update_active, update_transfer_id, update_target_path, update_temp_path
     global update_expected_size, update_expected_checksum, update_received_size
@@ -303,14 +309,9 @@ def handle_e77_update_begin(pkt):
 
     try:
         temp_path = target_path + ".part"
-        try:
-            os.remove(temp_path)
-        except Exception:
-            pass
-        try:
-            os.remove(target_path)
-        except Exception:
-            pass
+        remove_if_exists(temp_path)
+        # The E77 has too little flash to keep both generations of a file.
+        remove_if_exists(target_path)
         update_file = open(temp_path, "wb")
     except Exception:
         update_reset_state(remove_temp=True)
@@ -388,10 +389,7 @@ def handle_e77_update_end(pkt):
 
     try:
         update_close_file()
-        try:
-            os.remove(update_target_path)
-        except Exception:
-            pass
+        remove_if_exists(update_target_path)
         os.rename(update_temp_path, update_target_path)
     except Exception:
         update_reset_state(remove_temp=True)
@@ -422,14 +420,6 @@ def poll_update_timeout():
         return
     if time.ticks_diff(time.ticks_ms(), update_last_ms) > E77_UPDATE_CHUNK_TIMEOUT_MS:
         update_reset_state(remove_temp=True)
-
-
-def open_cue_list(open_mask):
-    out = []
-    for cue in range(1, CUE_COUNT + 1):
-        if open_mask & (1 << (cue - 1)):
-            out.append(cue)
-    return out
 
 
 def handle_discover(pkt):
@@ -467,14 +457,13 @@ def handle_continuity(pkt):
         valid_mask = (1 << CUE_COUNT) - 1
         valid_mask &= (1 << (nbytes * 8)) - 1
         test_mask = valid_mask if CONT_DRIVE_DURING_TEST else None
-        status = 0
 
         if CONTINUITY_TEST_OPEN_MASK is not None:
             open_mask = CONTINUITY_TEST_OPEN_MASK & valid_mask
         else:
             if OPENLOAD_DUMMY_READ:
                 mc.read_open_load(test_mask)
-            status, raw_openload = mc.read_open_load(test_mask)
+            _status, raw_openload = mc.read_open_load(test_mask)
             raw_openload &= valid_mask
             if OPENLOAD_1_IS_OPEN:
                 open_mask = raw_openload
@@ -564,7 +553,6 @@ def handle_script_load(pkt):
         return
 
     script_id = int.from_bytes(data[0:2], "big") & 0xFFFF
-    chunk_index = data[2]
     entry_count = data[3]
     payload = data[4:]
     if len(payload) != entry_count * 6:
