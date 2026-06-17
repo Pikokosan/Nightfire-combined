@@ -3125,7 +3125,8 @@ class NFCPGui:
         return False
 
     def show_e77_update(self, event=None):
-        scr = self.new_screen("E77 OTA", "e77_update")
+        scr = self.new_screen("" \
+        "OTA", "e77_update")
         self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_settings)
 
         self.load_modules_from_db()
@@ -3718,7 +3719,6 @@ class NFCPGui:
             btn = lv.button(parent)
             btn.set_pos(x, y)
             btn.set_size(btn_w, btn_h)
-            btn.add_state(lv.STATE.DISABLED)
 
             lbl = lv.label(btn)
             lbl.set_text("%02d" % (i + 1))
@@ -3778,7 +3778,6 @@ class NFCPGui:
                 else:
                     color = lv.color_hex(0x7A1F1F)
 
-                self.manual_cue_buttons[i].add_state(lv.STATE.DISABLED)
                 self.manual_cue_buttons[i].set_style_bg_color(color, 0)
 
         if hasattr(self, "manual_summary_label"):
@@ -4622,8 +4621,6 @@ class NFCPGui:
             lbl.set_text("Cue %02d: OPEN" % (i + 1))
             lbl.center()
 
-            btn.add_state(lv.STATE.DISABLED)
-
             self.cue_buttons.append(btn)
             self.cue_labels.append(lbl)
 
@@ -4634,18 +4631,10 @@ class NFCPGui:
         return cb
 
     def request_selected_continuity(self, event=None):
-        if not self.selected_module:
-            self.set_status("No module selected")
-            return
-
         self.last_module_continuity_auto_ms = time.ticks_ms()
 
-        uid_text = self.selected_module.get("unique_id", "0x00000000")
-
-        try:
-            uid = int(uid_text, 16) & 0xFFFFFFFF
-        except:
-            self.set_status("Bad UID")
+        uid = self.get_selected_module_uid_int()
+        if uid is None:
             return
 
         cue_count = self.get_selected_module_cue_count()
@@ -4654,9 +4643,7 @@ class NFCPGui:
             self.set_status("Running speed test...")
             ping_ms = nfcp.request_ping_for_uid(uid)
             self.save_selected_module_speed_test(ping_ms)
-
-            if hasattr(self, "speed_label"):
-                self.speed_label.set_text(self.format_selected_speed_test())
+            self.refresh_selected_module_detail_labels(speed=True)
 
             self.set_status("Checking continuity...")
             ok = nfcp.request_continuity_for_uid(uid, cue_count)
@@ -4664,24 +4651,14 @@ class NFCPGui:
             self.save_selected_module_continuity(ok)
             self.update_open_script_cues()
             self.update_extra_connected_cues()
-
-            if hasattr(self, "radio_link_label"):
-                self.radio_link_label.set_text(self.format_selected_radio_link())
+            self.refresh_selected_module_detail_labels(radio=True)
         except Exception as e:
             print("Continuity failed:", e)
             self.set_status("Continuity failed")
 
     def request_selected_speed_test(self):
-        if not self.selected_module:
-            self.set_status("No module selected")
-            return
-
-        uid_text = self.selected_module.get("unique_id", "0x00000000")
-
-        try:
-            uid = int(uid_text, 16) & 0xFFFFFFFF
-        except:
-            self.set_status("Bad UID")
+        uid = self.get_selected_module_uid_int()
+        if uid is None:
             return
 
         self.set_status("Running speed test...")
@@ -4695,27 +4672,15 @@ class NFCPGui:
             else:
                 self.set_status("Speed test: %dms" % ping_ms)
 
-            if hasattr(self, "speed_label"):
-                self.speed_label.set_text(self.format_selected_speed_test())
-
-            if hasattr(self, "radio_link_label"):
-                self.radio_link_label.set_text(self.format_selected_radio_link())
+            self.refresh_selected_module_detail_labels(speed=True, radio=True)
 
         except Exception as e:
             print("Speed test failed:", e)
             self.set_status("Speed test failed")
 
     def request_selected_info(self):
-        if not self.selected_module:
-            self.set_status("No module selected")
-            return
-
-        uid_text = self.selected_module.get("unique_id", "0x00000000")
-
-        try:
-            uid = int(uid_text, 16) & 0xFFFFFFFF
-        except:
-            self.set_status("Bad UID")
+        uid = self.get_selected_module_uid_int()
+        if uid is None:
             return
 
         self.set_status("Reading versions...")
@@ -4728,49 +4693,74 @@ class NFCPGui:
             else:
                 self.set_status("Version read timeout")
 
-            if hasattr(self, "version_label"):
-                self.version_label.set_text(self.format_selected_versions())
-
-            if hasattr(self, "radio_link_label"):
-                self.radio_link_label.set_text(self.format_selected_radio_link())
+            self.refresh_selected_module_detail_labels(version=True, radio=True)
 
         except Exception as e:
             print("Info read failed:", e)
             self.set_status("Version read failed")
 
-    def save_selected_module_speed_test(self, ping_ms):
+    def get_selected_module_uid_int(self):
         if not self.selected_module:
+            self.set_status("No module selected")
+            return None
+
+        uid_text = self.selected_module.get("unique_id", "0x00000000")
+
+        try:
+            return int(uid_text, 16) & 0xFFFFFFFF
+        except:
+            self.set_status("Bad UID")
+            return None
+
+    def refresh_selected_module_detail_labels(
+        self,
+        speed=False,
+        radio=False,
+        version=False
+    ):
+        if speed and hasattr(self, "speed_label"):
+            self.speed_label.set_text(self.format_selected_speed_test())
+
+        if radio and hasattr(self, "radio_link_label"):
+            self.radio_link_label.set_text(self.format_selected_radio_link())
+
+        if version and hasattr(self, "version_label"):
+            self.version_label.set_text(self.format_selected_versions())
+
+    def apply_last_radio_link_to_module(self, dev, uid_text):
+        link = nfcp.get_last_radio_link(uid_text)
+        if not link:
             return
+
+        if link.get("radio_rssi", None) is not None:
+            dev["radio_rssi"] = link["radio_rssi"]
+        if link.get("radio_snr", None) is not None:
+            dev["radio_snr"] = link["radio_snr"]
+        dev["radio_last_epoch"] = link.get("radio_last_epoch", time.time())
+
+    def update_selected_module_record(self, label, updater):
+        if not self.selected_module:
+            return None
 
         uid_text = self.selected_module.get("unique_id", None)
 
         if not uid_text:
-            return
+            return None
 
         try:
             db = nfcp.load_device_db()
             idx = nfcp.index_db_by_unique(db)
         except Exception as e:
-            print("Speed test DB load failed:", e)
-            return
+            print("%s DB load failed:" % label, e)
+            return None
 
         dev = idx.get(uid_text)
 
         if not dev:
             dev = self.selected_module
 
-        dev["speed_test_target_uid"] = uid_text
-        dev["speed_test_ms"] = ping_ms
-        dev["speed_test_ok"] = ping_ms is not None
-        dev["speed_test_last_epoch"] = time.time()
-
-        link = nfcp.get_last_radio_link(uid_text)
-        if link:
-            if link.get("radio_rssi", None) is not None:
-                dev["radio_rssi"] = link["radio_rssi"]
-            if link.get("radio_snr", None) is not None:
-                dev["radio_snr"] = link["radio_snr"]
-            dev["radio_last_epoch"] = link.get("radio_last_epoch", time.time())
+        updater(dev, uid_text)
+        self.apply_last_radio_link_to_module(dev, uid_text)
 
         idx[uid_text] = dev
         self.selected_module = dev
@@ -4785,83 +4775,32 @@ class NFCPGui:
         try:
             nfcp.save_device_db(db)
             self.load_modules_from_db()
+            return dev
         except Exception as e:
-            print("Speed test DB save failed:", e)
+            print("%s DB save failed:" % label, e)
+            return None
+
+    def save_selected_module_speed_test(self, ping_ms):
+        def updater(dev, uid_text):
+            dev["speed_test_target_uid"] = uid_text
+            dev["speed_test_ms"] = ping_ms
+            dev["speed_test_ok"] = ping_ms is not None
+            dev["speed_test_last_epoch"] = time.time()
+
+        self.update_selected_module_record("Speed test", updater)
 
     def save_selected_module_info(self, info):
-        if not self.selected_module:
-            return
+        def updater(dev, uid_text):
+            dev["app_name"] = info.get("app_name", "")
+            dev["app_version"] = info.get("app_version", "")
+            dev["radio_firmware_version"] = info.get("radio_version", "")
+            dev["script_status"] = info.get("script_status", "")
+            dev["info_last_epoch"] = time.time()
 
-        uid_text = self.selected_module.get("unique_id", None)
-
-        if not uid_text:
-            return
-
-        try:
-            db = nfcp.load_device_db()
-            idx = nfcp.index_db_by_unique(db)
-        except Exception as e:
-            print("Info DB load failed:", e)
-            return
-
-        dev = idx.get(uid_text)
-
-        if not dev:
-            dev = self.selected_module
-
-        dev["app_name"] = info.get("app_name", "")
-        dev["app_version"] = info.get("app_version", "")
-        dev["radio_firmware_version"] = info.get("radio_version", "")
-        dev["script_status"] = info.get("script_status", "")
-        dev["info_last_epoch"] = time.time()
-
-        link = nfcp.get_last_radio_link(uid_text)
-        if link:
-            if link.get("radio_rssi", None) is not None:
-                dev["radio_rssi"] = link["radio_rssi"]
-            if link.get("radio_snr", None) is not None:
-                dev["radio_snr"] = link["radio_snr"]
-            dev["radio_last_epoch"] = link.get("radio_last_epoch", time.time())
-
-        idx[uid_text] = dev
-        self.selected_module = dev
-
-        db["devices"] = sorted(
-            idx.values(),
-            key=lambda d: self.group_to_int_value(
-                d.get("group_id", None)
-            )
-        )
-
-        try:
-            nfcp.save_device_db(db)
-            self.load_modules_from_db()
-        except Exception as e:
-            print("Info DB save failed:", e)
+        self.update_selected_module_record("Info", updater)
 
     def save_selected_module_continuity(self, ok):
-        if not self.selected_module:
-            return
-
-        uid_text = self.selected_module.get("unique_id", None)
-
-        if not uid_text:
-            return
-
-        try:
-            db = nfcp.load_device_db()
-            idx = nfcp.index_db_by_unique(db)
-        except Exception as e:
-            print("Continuity DB load failed:", e)
-            return
-
-        dev = idx.get(uid_text)
-
-        if not dev:
-            dev = self.selected_module
-
         cue_count = self.get_selected_module_cue_count()
-
         cues = []
 
         for i in range(cue_count):
@@ -4870,33 +4809,12 @@ class NFCPGui:
                 "ok": bool(ok[i]) if i < len(ok) else False
             })
 
-        dev["cue_count"] = cue_count
-        dev["continuity"] = {"cues": cues}
-        dev["continuity_last_epoch"] = time.time()
+        def updater(dev, uid_text):
+            dev["cue_count"] = cue_count
+            dev["continuity"] = {"cues": cues}
+            dev["continuity_last_epoch"] = time.time()
 
-        link = nfcp.get_last_radio_link(uid_text)
-        if link:
-            if link.get("radio_rssi", None) is not None:
-                dev["radio_rssi"] = link["radio_rssi"]
-            if link.get("radio_snr", None) is not None:
-                dev["radio_snr"] = link["radio_snr"]
-            dev["radio_last_epoch"] = link.get("radio_last_epoch", time.time())
-
-        idx[uid_text] = dev
-        self.selected_module = dev
-
-        db["devices"] = sorted(
-            idx.values(),
-            key=lambda d: self.group_to_int_value(
-                d.get("group_id", None)
-            )
-        )
-
-        try:
-            nfcp.save_device_db(db)
-            self.load_modules_from_db()
-        except Exception as e:
-            print("Continuity DB save failed:", e)
+        self.update_selected_module_record("Continuity", updater)
 
     def set_continuity(self, continuity):
         cue_count = self.get_selected_module_cue_count()

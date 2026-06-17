@@ -44,10 +44,10 @@ $manifest = [ordered]@{
     package_name = "Nightfire E77 MicroPython OTA"
     version = $Version
     files = @(
+        [ordered]@{ source = "main.mpy"; target = "/main.mpy" },
         [ordered]@{ source = "nfcp.mpy"; target = "/nfcp.mpy" },
         [ordered]@{ source = "e77_gfsk.mpy"; target = "/e77_gfsk.mpy" },
         [ordered]@{ source = "mc33996_driver.mpy"; target = "/mc33996_driver.mpy" },
-        [ordered]@{ source = "main.mpy"; target = "/main.mpy" },
         [ordered]@{ source = "boot.py"; target = "/boot.py" }
     )
 }

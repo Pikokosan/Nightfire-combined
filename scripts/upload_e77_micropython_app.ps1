@@ -54,10 +54,10 @@ try {
         --delete "mc33996_driver.mpy" `
         --delete "nfcp.py" `
         --delete "nfcp.mpy" `
+        "$Deploy\main.mpy:main.mpy" `
         "$Deploy\nfcp.mpy:nfcp.mpy" `
         "$Deploy\e77_gfsk.mpy:e77_gfsk.mpy" `
         "$Deploy\mc33996_driver.mpy:mc33996_driver.mpy" `
-        "$Deploy\main.mpy:main.mpy" `
         "$Deploy\boot.py:boot.py"
 
     if ($LASTEXITCODE -ne 0) {

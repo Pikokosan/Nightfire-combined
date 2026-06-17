@@ -14,7 +14,6 @@ DEFAULT_GROUP_ID = 0x0001
 DEFAULT_UNIQUE_ID = 0xE7700001
 DEFAULT_CUE_COUNT = 16
 DEVICE_TYPE = 0x20
-APP_FIRMWARE_NAME = "e77-micropython"
 APP_FIRMWARE_VERSION = "0.1.4"
 E77_UPDATE_MAX_FILE_SIZE = 256 * 1024
 E77_UPDATE_CHUNK_TIMEOUT_MS = 10000
@@ -42,7 +41,6 @@ MC_MOSI = "A10"
 MC_MISO = "A5"
 MC_CS = "A9"
 MC_RESET = "A12"
-
 
 class MC33996:
     def __init__(self):
@@ -107,6 +105,12 @@ def save_cfg():
 
 GROUP_ID, UNIQUE_ID, CUE_COUNT, RADIO_NETWORK_ID = load_cfg()
 ARMED = False
+PAIRING_MODE = False
+pair_button_down_ms = 0
+down_button_down = False
+pair_led_last_ms = 0
+pair_led_phase = 0
+last_rx_network_id = RADIO_NETWORK_ID
 _last_cont_ms = 0
 script_id_loaded = None
 script_entries = []
@@ -114,7 +118,6 @@ script_running = False
 script_start_ms = 0
 script_next_index = 0
 script_last_heartbeat_ms = 0
-script_last_event = "boot"
 update_active = False
 update_transfer_id = 0
 update_target_path = ""
@@ -129,12 +132,78 @@ parser = NFCPStreamParser()
 nfcp = NFCP(node_id=0x01)
 radio = E77Gfsk()
 mc = None
+green_led = Pin("B4", Pin.OUT, value=0)
+red_led = Pin("B5", Pin.OUT, value=0)
+pair_button = Pin("B8", Pin.IN, Pin.PULL_UP)
+down_button = Pin("B0", Pin.IN, Pin.PULL_UP)
 
 
 def ticks_rand(limit):
     if limit <= 0:
         return 0
     return (time.ticks_us() ^ time.ticks_ms()) % limit
+
+
+def change_group(delta):
+    global GROUP_ID
+
+    if ARMED or PAIRING_MODE:
+        return
+
+    GROUP_ID = (GROUP_ID + delta) & 0xFFFF
+    save_cfg()
+
+
+def update_status_leds(force=False):
+    global pair_led_last_ms, pair_led_phase, pair_button_down_ms
+    global down_button_down
+    global PAIRING_MODE, ARMED, script_running
+
+    now = time.ticks_ms()
+
+    pressed = pair_button.value() == 0
+
+    if pressed:
+        if pair_button_down_ms < 0:
+            pass
+        elif not pair_button_down_ms:
+            pair_button_down_ms = now
+        elif time.ticks_diff(now, pair_button_down_ms) >= 10000:
+            if not PAIRING_MODE:
+                PAIRING_MODE = True
+                ARMED = False
+                script_running = False
+                try:
+                    if mc:
+                        mc.digital_write_mask(0)
+                except Exception:
+                    pass
+            pair_button_down_ms = -1
+            force = True
+    else:
+        if pair_button_down_ms > 0:
+            change_group(1)
+        pair_button_down_ms = 0
+
+    pressed = down_button.value() == 0
+    if pressed:
+        down_button_down = True
+    else:
+        if down_button_down:
+            change_group(-1)
+        down_button_down = False
+
+    if PAIRING_MODE:
+        if force or time.ticks_diff(now, pair_led_last_ms) >= 250:
+            pair_led_last_ms = now
+            pair_led_phase = 0 if pair_led_phase else 1
+            red_led.value(pair_led_phase)
+            green_led.value(0 if pair_led_phase else 1)
+        return
+
+    pair_led_phase = 0
+    red_led.value(1 if ARMED else 0)
+    green_led.value(0 if ARMED else 1)
 
 
 def address_matches(pkt):
@@ -148,8 +217,10 @@ def address_matches(pkt):
     return False
 
 
-def tx_nfcp(frame):
-    payload = (RADIO_NETWORK_ID & 0xFFFF).to_bytes(2, "big") + frame
+def tx_nfcp(frame, network_id=None):
+    if network_id is None:
+        network_id = last_rx_network_id if PAIRING_MODE else RADIO_NETWORK_ID
+    payload = (network_id & 0xFFFF).to_bytes(2, "big") + frame
     radio.send(payload)
 
 
@@ -163,50 +234,8 @@ def reply_nack_if_unique(pkt, orig_cmd, code):
         tx_nfcp(nfcp.build_nack(UNIQUE_ID, orig_cmd, code))
 
 
-def encode_text_field(text):
-    try:
-        data = text.encode()
-    except Exception:
-        data = b""
-    if len(data) > 63:
-        data = data[:63]
-    return bytes([len(data)]) + data
-
-
-def micropython_version_text():
-    try:
-        return os.uname().release
-    except Exception:
-        return ""
-
-
 def build_info_payload():
-    return (
-        encode_text_field(APP_FIRMWARE_NAME)
-        + encode_text_field(APP_FIRMWARE_VERSION)
-        + encode_text_field(micropython_version_text())
-        + encode_text_field(build_script_status_text())
-    )
-
-
-def build_script_status_text():
-    if script_id_loaded is None:
-        script_id_text = "--"
-    else:
-        script_id_text = "%04X" % script_id_loaded
-
-    hb_age = -1
-    if script_last_heartbeat_ms:
-        hb_age = time.ticks_diff(time.ticks_ms(), script_last_heartbeat_ms)
-
-    return "id=%s entries=%d run=%d next=%d hb=%d %s" % (
-        script_id_text,
-        len(script_entries),
-        1 if script_running else 0,
-        script_next_index,
-        hb_age,
-        script_last_event,
-    )
+    return b"\x0fe77-micropython\x050.1.4\x00\x00"
 
 
 def update_close_file():
@@ -525,7 +554,7 @@ def fire_mask16(mask16, require_armed=True):
 
 def clear_script(script_id=None):
     global script_id_loaded, script_entries, script_running, script_start_ms, script_next_index
-    global script_last_heartbeat_ms, script_last_event
+    global script_last_heartbeat_ms
 
     script_id_loaded = script_id
     script_entries = []
@@ -533,7 +562,8 @@ def clear_script(script_id=None):
     script_start_ms = 0
     script_next_index = 0
     script_last_heartbeat_ms = 0
-    script_last_event = "clear"
+
+
 def handle_script_clear(pkt):
     data = pkt.get("data", b"")
     if len(data) != 2:
@@ -545,7 +575,7 @@ def handle_script_clear(pkt):
 
 
 def handle_script_load(pkt):
-    global script_id_loaded, script_entries, script_last_event
+    global script_id_loaded, script_entries
 
     data = pkt.get("data", b"")
     if len(data) < 4:
@@ -575,15 +605,13 @@ def handle_script_load(pkt):
             script_entries.append((event_ms, cue_mask))
 
     script_entries.sort(key=lambda item: item[0])
-    script_last_event = "load"
     reply_ack_if_unique(pkt, CMD_SCRIPT_LOAD)
 
 
 def handle_script_start(pkt):
-    global script_running, script_start_ms, script_next_index, script_last_heartbeat_ms, script_last_event
+    global script_running, script_start_ms, script_next_index, script_last_heartbeat_ms
 
     if not ARMED:
-        script_last_event = "start disarmed"
         reply_nack_if_unique(pkt, CMD_SCRIPT_START, NACK_REJECTED_ARMED)
         return
 
@@ -599,7 +627,6 @@ def handle_script_start(pkt):
         offset_ms = int.from_bytes(data[4:8], "big")
 
     if script_id_loaded != script_id or not script_entries:
-        script_last_event = "start invalid"
         reply_nack_if_unique(pkt, CMD_SCRIPT_START, NACK_INVALID_VALUE)
         return
 
@@ -612,16 +639,14 @@ def handle_script_start(pkt):
     script_start_ms = time.ticks_add(time.ticks_ms(), start_delay_ms - offset_ms)
     script_running = True
     script_last_heartbeat_ms = time.ticks_ms()
-    script_last_event = "start"
     reply_ack_if_unique(pkt, CMD_SCRIPT_START)
 
 
 def handle_script_stop(pkt):
-    global script_running, script_last_heartbeat_ms, script_last_event
+    global script_running, script_last_heartbeat_ms
 
     script_running = False
     script_last_heartbeat_ms = 0
-    script_last_event = "stop"
     try:
         mc.digital_write_mask(0)
     except Exception:
@@ -630,7 +655,7 @@ def handle_script_stop(pkt):
 
 
 def handle_script_heartbeat(pkt):
-    global script_last_heartbeat_ms, script_last_event
+    global script_last_heartbeat_ms
 
     data = pkt.get("data", b"")
     if len(data) < 2:
@@ -639,11 +664,10 @@ def handle_script_heartbeat(pkt):
     script_id = int.from_bytes(data[0:2], "big") & 0xFFFF
     if script_running and script_id_loaded == script_id:
         script_last_heartbeat_ms = time.ticks_ms()
-        script_last_event = "heartbeat"
 
 
 def run_script_scheduler():
-    global script_running, script_next_index, script_last_event
+    global script_running, script_next_index
 
     if not script_running:
         return
@@ -654,7 +678,6 @@ def run_script_scheduler():
             mc.digital_write_mask(0)
         except Exception:
             pass
-        script_last_event = "stopped disarmed"
         return
 
     if time.ticks_diff(time.ticks_ms(), script_last_heartbeat_ms) > SCRIPT_HEARTBEAT_TIMEOUT_MS:
@@ -663,7 +686,6 @@ def run_script_scheduler():
             mc.digital_write_mask(0)
         except Exception:
             pass
-        script_last_event = "hb timeout"
         return
 
     elapsed = time.ticks_diff(time.ticks_ms(), script_start_ms)
@@ -671,17 +693,15 @@ def run_script_scheduler():
         event_ms, cue_mask = script_entries[script_next_index]
         if event_ms > elapsed:
             break
-        script_last_event = "fire"
         fire_mask16(cue_mask, require_armed=True)
         script_next_index += 1
 
     if script_next_index >= len(script_entries):
         script_running = False
-        script_last_event = "complete"
 
 
 def handle(pkt):
-    global ARMED, GROUP_ID, UNIQUE_ID, RADIO_NETWORK_ID, script_running
+    global ARMED, GROUP_ID, UNIQUE_ID, RADIO_NETWORK_ID, script_running, PAIRING_MODE
 
     cmd = pkt["cmd"]
     data = pkt.get("data", b"")
@@ -701,6 +721,7 @@ def handle(pkt):
 
     if cmd == CMD_ARM:
         ARMED = True
+        update_status_leds(force=True)
         reply_ack_if_unique(pkt, CMD_ARM)
         return
 
@@ -711,6 +732,7 @@ def handle(pkt):
             mc.digital_write_mask(0)
         except Exception:
             pass
+        update_status_leds(force=True)
         reply_ack_if_unique(pkt, CMD_DISARM)
         return
 
@@ -784,6 +806,8 @@ def handle(pkt):
             reply_ack_if_unique(pkt, CMD_SET_NETWORK)
             RADIO_NETWORK_ID = new_network
             save_cfg()
+            PAIRING_MODE = False
+            update_status_leds(force=True)
         return
 
     if cmd == CMD_SET_UNIQUE:
@@ -800,11 +824,16 @@ def handle(pkt):
 
 
 def handle_radio_payload(payload):
+    global last_rx_network_id
+
     if len(payload) < 3:
         return
     network_id = int.from_bytes(payload[0:2], "big")
-    if network_id != RADIO_NETWORK_ID:
+    if network_id != RADIO_NETWORK_ID and not (
+        PAIRING_MODE and network_id == DEFAULT_NETWORK_ID
+    ):
         return
+    last_rx_network_id = network_id
     for b in payload[2:]:
         pkt = parser.feed(b)
         if pkt and address_matches(pkt):
@@ -814,10 +843,12 @@ def handle_radio_payload(payload):
 def main():
     global mc
     radio.init()
+    update_status_leds(force=True)
     mc = MC33996()
     mc.begin()
     try:
         while True:
+            update_status_leds()
             payload = radio.poll()
             if payload:
                 handle_radio_payload(payload)
