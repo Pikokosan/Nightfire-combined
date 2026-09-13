@@ -1,6 +1,7 @@
 param(
     [string]$Port = "COM17",
-    [int]$Baud = 115200
+    [int]$Baud = 115200,
+    [switch]$HardwareSafetyOff
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,6 +25,20 @@ try {
     New-Item -ItemType Directory -Force $Deploy | Out-Null
     Remove-Item -Force (Join-Path $Deploy "*") -ErrorAction SilentlyContinue
 
+    $CompileApp = $App
+    if ($HardwareSafetyOff) {
+        $CompileApp = Join-Path $Deploy "source"
+        New-Item -ItemType Directory -Force $CompileApp | Out-Null
+        Copy-Item -Force (Join-Path $App "nfcp.py") (Join-Path $CompileApp "nfcp.py")
+        Copy-Item -Force (Join-Path $App "e77_gfsk.py") (Join-Path $CompileApp "e77_gfsk.py")
+        Copy-Item -Force (Join-Path $App "mc33996_driver.py") (Join-Path $CompileApp "mc33996_driver.py")
+
+        $e77Source = Get-Content -Raw -Path (Join-Path $App "e77_main.py")
+        $e77Source = $e77Source -replace 'HARDWARE_SAFETY_ENABLED\s*=\s*True', 'HARDWARE_SAFETY_ENABLED = False'
+        Set-Content -NoNewline -Encoding ASCII -Path (Join-Path $CompileApp "e77_main.py") -Value $e77Source
+        Write-Host "Hardware safety is OFF for this compiled upload."
+    }
+
     Write-Host "Compiling E77 MicroPython files to .mpy..."
     $compileFiles = @(
         @{ Source = "nfcp.py"; Target = "nfcp.mpy" },
@@ -33,7 +48,7 @@ try {
     )
 
     foreach ($file in $compileFiles) {
-        & mpy-cross -O3 (Join-Path $App $file.Source) -o (Join-Path $Deploy $file.Target)
+        & mpy-cross -O3 (Join-Path $CompileApp $file.Source) -o (Join-Path $Deploy $file.Target)
         if ($LASTEXITCODE -ne 0) {
             throw "mpy-cross failed for $($file.Source)."
         }

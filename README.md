@@ -16,6 +16,7 @@ the E77 radio transport.
 - `main/e77_bootloader.py` - device-side E77 radio firmware updater.
 - `main/module_transport.py` - shared dummy/slave UART and radio transport helper.
 - `main/mc33996_driver.py` - MC33996 output driver helper.
+- `main/nrf_dummy_main.py` - nRF52840 proprietary-radio dummy prototype.
 - `scripts/upload_master_to_com7.ps1` - installs master firmware as `main.py`.
 - `scripts/upload_slave_to_com10.ps1` - installs slave firmware as `main.py`.
 - `scripts/upload_dummy_to_com11.ps1` - installs dummy firmware as `main.py`.
@@ -39,6 +40,21 @@ powershell -ExecutionPolicy Bypass -File .\scripts\upload_dummy_to_com11.ps1 -Po
 powershell -ExecutionPolicy Bypass -File .\scripts\upload_e77_micropython_app.ps1 -Port COM17
 ```
 
+E77 MicroPython builds include hardware safety support by default:
+
+- `A11` controls VPWR enable.
+- `A0` reads the battery divider.
+- `A1` reads the short/drop divider.
+- `B3` enables the pre-arm test path.
+- `B6/B7` are reserved for future LCD I2C as `I2C(1)`.
+
+For bench/debug builds that should not use those pins or ADC checks, add
+`-HardwareSafetyOff`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\upload_e77_micropython_app.ps1 -Port COM17 -HardwareSafetyOff
+```
+
 The VS Code build tasks run the same upload scripts:
 
 - `Master device: upload`
@@ -46,6 +62,99 @@ The VS Code build tasks run the same upload scripts:
 - `Dummy device: upload`
 - `E77 MicroPython app: upload`
 - `E77 OTA package: build`
+- `nRF52840 dummy: upload`
+
+## nRF52840 Prototype
+
+The nRF52840 Pro Micro path is a MicroPython prototype for a future proprietary
+2.4 GHz transport. It intentionally does not use BLE.
+
+- Native radio module scaffold: `nrf52840/native/nrf_radio/`
+- Master-side local radio bridge: `main/nrf_bridge_main.py`
+- Dummy module app: `main/nrf_dummy_main.py`
+- Master bridge upload helper: `scripts/upload_nrf_bridge.ps1`
+- Master bridge UF2 bootloader helper:
+  `scripts/enter_nrf_bridge_bootloader_via_master.py`
+- Upload helper: `scripts/upload_nrf_dummy.ps1`
+
+The native module exposes `nrf_radio.init()`, `send()`, `recv()`,
+`last_rssi()`, and `channel()`. It is intended to be compiled into an nRF52840
+MicroPython firmware build using MicroPython user C modules. The Python app
+wraps NFCP frames in:
+
+```text
+network_id(2 bytes) | nfcp_frame
+```
+
+The master-side nice!nano does not run as a module. It runs
+`nrf_bridge_main.py`, which speaks the same local UART protocol as
+`e77_radio.py`:
+
+- `PING` / `PONG`
+- `GET_INFO`
+- `SET_NETWORK`
+- `SEND_NFCP`
+- `NFCP_RX`
+
+This keeps the master GUI transport path compatible with the existing E77
+radio bridge while the over-air side uses the nRF52840 proprietary radio.
+
+### nRF52840 Master Bridge Pinout
+
+Use the nice!nano running `nrf_bridge_main.py` as the master radio bridge.
+The default bridge UART settings are:
+
+- Baud: `256000`
+- nice!nano UART: `UART0`
+- nice!nano TX: `P6`
+- nice!nano RX: `P8`
+- Radio channel: `40`
+- Network ID: `0x04D2`
+
+Wire it to the Waveshare ESP32-S3 master UART as a crossed UART:
+
+```text
+Waveshare master 3V3  -> nice!nano VCC/3V3
+Waveshare master GND  -> nice!nano GND
+Waveshare master TX15 -> nice!nano P8 / RX
+Waveshare master RX16 -> nice!nano P6 / TX
+```
+
+Do not connect 5 V logic to the nice!nano UART pins.
+
+To update the nice!nano bridge app itself, connect the bridge USB port to the
+computer and run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\upload_nrf_bridge.ps1 -Port COM15
+```
+
+Bridge firmware version `0.1.1` and newer also supports the local
+`CMD_BOOTLOADER` command. With the bridge wired to the master UART, this helper
+asks the true master to put the attached bridge into UF2 bootloader mode:
+
+```powershell
+python .\scripts\enter_nrf_bridge_bootloader_via_master.py --master COM21
+```
+
+After the UF2 drive appears, copy the built nRF52840 MicroPython firmware to it:
+
+```powershell
+Copy-Item .\firmware\nrf52840\nightfire_nicenano_micropython.uf2 F:\firmware.uf2
+```
+
+Bridge firmware also supports channel scanning. The master Settings screen can
+ask the bridge to scan nRF channels `74-100`, show the best 10 channels, and
+apply a selected channel to every discovered module. Modules ACK the
+`CMD_SET_RADIO_CHANNEL` command and save the selected channel before the master
+switches the local bridge.
+
+The currently connected test board reports as:
+
+```text
+Board-ID: nRF52840-pca10056-v1
+Model: Nordic nRF52840 DK
+```
 
 ## Device Firmware Uploads
 
@@ -87,16 +196,30 @@ E77 MicroPython app upload includes:
 - `main/mc33996_driver.py` compiled as `mc33996_driver.mpy`
 - a tiny device `boot.py` stub that imports `main.mpy` on startup
 
-## E77 MicroPython OTA Updates
+## Module OTA Updates
 
-The old staged-file module OTA updater has been removed. The new updater is
-specific to E77 MicroPython modules and sends compiled `.mpy` files over NFCP
-through the E77 radio link.
+The master can send OTA updates to modules over NFCP through the radio link.
+Packages are target-specific so the master does not flash slave firmware onto a
+dummy module or the nRF dummy test firmware onto a production module.
 
 Build an SD-card package with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build_e77_ota_package.ps1
+```
+
+To build an OTA package without the E77 hardware safety layer:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_e77_ota_package.ps1 -HardwareSafetyOff
+```
+
+For slave, dummy, and nRF dummy module updates, build a target-specific package:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_module_ota_package.ps1 -Target slave
+powershell -ExecutionPolicy Bypass -File .\scripts\build_module_ota_package.ps1 -Target dummy
+powershell -ExecutionPolicy Bypass -File .\scripts\build_module_ota_package.ps1 -Target nrf-dummy
 ```
 
 The task writes `dist/e77_ota_package/`. Copy the contents of that folder to the
@@ -109,10 +232,10 @@ root of the master SD card. The package includes:
 - `main.mpy`
 - `boot.py`
 
-On the master, open `Settings > E77 OTA`. The master reads
-`/sd/e77_update.json`, sends each listed file to discovered modules reporting
-`e77-micropython`, verifies size/checksum on each module, commits the new files,
-and then asks each updated module to reboot.
+On the master, open `Settings > OTA`. The master reads `/sd/e77_update.json`,
+sends each listed file only to discovered modules matching the manifest target,
+verifies size/checksum on each module, commits the new files, and then asks each
+updated module to reboot.
 
 The module must be disarmed and not running a script during update.
 

@@ -1,6 +1,7 @@
 param(
     [string]$Version = "",
-    [string]$OutputDir = ".\dist\e77_ota_package"
+    [string]$OutputDir = ".\dist\e77_ota_package",
+    [switch]$HardwareSafetyOff
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,6 +23,20 @@ if (-not $Version) {
 New-Item -ItemType Directory -Force $Output | Out-Null
 Remove-Item -LiteralPath (Join-Path $Output "*") -Force -ErrorAction SilentlyContinue
 
+$CompileApp = $App
+if ($HardwareSafetyOff) {
+    $CompileApp = Join-Path $Output "source"
+    New-Item -ItemType Directory -Force $CompileApp | Out-Null
+    Copy-Item -Force (Join-Path $App "nfcp.py") (Join-Path $CompileApp "nfcp.py")
+    Copy-Item -Force (Join-Path $App "e77_gfsk.py") (Join-Path $CompileApp "e77_gfsk.py")
+    Copy-Item -Force (Join-Path $App "mc33996_driver.py") (Join-Path $CompileApp "mc33996_driver.py")
+
+    $e77Source = Get-Content -Raw -Path (Join-Path $App "e77_main.py")
+    $e77Source = $e77Source -replace 'HARDWARE_SAFETY_ENABLED\s*=\s*True', 'HARDWARE_SAFETY_ENABLED = False'
+    Set-Content -NoNewline -Encoding ASCII -Path (Join-Path $CompileApp "e77_main.py") -Value $e77Source
+    Write-Host "Hardware safety is OFF for this OTA package."
+}
+
 Write-Host "Compiling E77 MicroPython OTA package version $Version..."
 
 $compileFiles = @(
@@ -32,10 +47,14 @@ $compileFiles = @(
 )
 
 foreach ($file in $compileFiles) {
-    & mpy-cross -O3 (Join-Path $App $file.Source) -o (Join-Path $Output $file.Target)
+    & mpy-cross -O3 (Join-Path $CompileApp $file.Source) -o (Join-Path $Output $file.Target)
     if ($LASTEXITCODE -ne 0) {
         throw "mpy-cross failed for $($file.Source)."
     }
+}
+
+if ($HardwareSafetyOff) {
+    Remove-Item -LiteralPath $CompileApp -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Set-Content -NoNewline -Encoding ASCII (Join-Path $Output "boot.py") "import main`n"
@@ -43,6 +62,7 @@ Set-Content -NoNewline -Encoding ASCII (Join-Path $Output "boot.py") "import mai
 $manifest = [ordered]@{
     package_name = "Nightfire E77 MicroPython OTA"
     version = $Version
+    hardware_safety_enabled = -not [bool]$HardwareSafetyOff
     files = @(
         [ordered]@{ source = "main.mpy"; target = "/main.mpy" },
         [ordered]@{ source = "nfcp.mpy"; target = "/nfcp.mpy" },

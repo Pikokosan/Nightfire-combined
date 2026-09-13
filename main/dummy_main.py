@@ -1,6 +1,8 @@
 import time
 import urandom
 
+import machine
+import module_ota
 from nfcp import *
 import e77_radio
 from module_transport import ModuleTransport
@@ -472,6 +474,28 @@ def handle(pkt):
         print("FIRE received (ignored - dummy device)")
         return
 
+    if cmd == CMD_E77_UPDATE_BEGIN:
+        module_ota.begin(pkt, UNIQUE_ID, ARMED or script_running, reply_ack_if_unique, reply_nack_if_unique)
+        return
+
+    if cmd == CMD_E77_UPDATE_WRITE:
+        module_ota.write(pkt, UNIQUE_ID, reply_ack_if_unique, reply_nack_if_unique)
+        return
+
+    if cmd == CMD_E77_UPDATE_END:
+        module_ota.end(pkt, UNIQUE_ID, reply_ack_if_unique, reply_nack_if_unique)
+        return
+
+    if cmd == CMD_E77_UPDATE_ABORT:
+        module_ota.abort(pkt, UNIQUE_ID, reply_ack_if_unique, reply_nack_if_unique)
+        return
+
+    if cmd == CMD_E77_UPDATE_REBOOT:
+        if module_ota.reboot(pkt, UNIQUE_ID, ARMED or script_running, reply_ack_if_unique, reply_nack_if_unique):
+            time.sleep_ms(250)
+            machine.reset()
+        return
+
     if cmd == CMD_SCRIPT_CLEAR:
         handle_script_clear(pkt)
         return
@@ -582,6 +606,7 @@ def handle_nfcp_bytes(data):
 
 
 while True:
+    module_ota.poll_timeout()
     had_data = False
 
     if transport.any():

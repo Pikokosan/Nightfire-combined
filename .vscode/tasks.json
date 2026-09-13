@@ -90,6 +90,24 @@
                 "panel": "shared",
                 "clear": true
             }
+        },
+        {
+            "label": "nRF52840 dummy: upload",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\scripts\\upload_nrf_dummy.ps1"
+            ],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
         }
     ]
 }

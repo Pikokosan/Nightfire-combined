@@ -3,9 +3,11 @@
 # Copy this to the RP2040 as main.py along with nfcp.py and mc33996_driver.py.
 
 from machine import Pin, SPI
+import machine
 import time
 import urandom
 
+import module_ota
 from nfcp import *
 import e77_radio
 from module_transport import ModuleTransport
@@ -214,6 +216,8 @@ mc.begin()
 ARMED = False
 GROUP_ID, UNIQUE_ID, _stored_cues, DEVICE_TYPE, RADIO_NETWORK_ID = load_cfg()
 CUE_COUNT = 16  # this hardware is fixed at 16 cues
+fire_out_mask = 0
+fire_deadlines = [0] * 16
 script_id_loaded = None
 script_entries = []
 script_running = False
@@ -341,7 +345,15 @@ def handle_discover(pkt):
         break
 
 
+def clear_fire_outputs():
+    global fire_out_mask
+    fire_out_mask = 0
+    mc.digitalWriteMask(0x0000)
+
+
 def fire_mask(mask16, report_errors=True):
+    global fire_out_mask
+
     if (not ARMED) and (not ALLOW_FIRE_WHEN_DISARMED):
         print("FIRE rejected - DISARMED mask=0x%04X" % mask16)
         return NACK_REJECTED_ARMED
@@ -354,14 +366,34 @@ def fire_mask(mask16, report_errors=True):
     if LOG_FIRE_EVENTS:
         print("FIRE mask=0x%04X pulse=%dms" % (mask16, FIRE_PULSE_MS))
     try:
-        mc.digitalWriteMask(mask16)
-        time.sleep_ms(FIRE_PULSE_MS)
-        mc.digitalWriteMask(0x0000)
+        end_ms = time.ticks_add(time.ticks_ms(), FIRE_PULSE_MS)
+        for i in range(16):
+            if mask16 & (1 << i):
+                fire_deadlines[i] = end_ms
+        fire_out_mask |= mask16
+        mc.digitalWriteMask(fire_out_mask)
         return ACK_OK
     except Exception as e:
-        mc.digitalWriteMask(0x0000)
+        clear_fire_outputs()
         print("FIRE error:", e)
         return NACK_INTERNAL_ERROR
+
+
+def poll_fire_outputs():
+    global fire_out_mask
+
+    if not fire_out_mask:
+        return
+
+    now = time.ticks_ms()
+    old_mask = fire_out_mask
+    for i in range(16):
+        bit = 1 << i
+        if fire_out_mask & bit and time.ticks_diff(now, fire_deadlines[i]) >= 0:
+            fire_out_mask &= ~bit
+
+    if fire_out_mask != old_mask:
+        mc.digitalWriteMask(fire_out_mask)
 
 
 def handle_fire(pkt):
@@ -500,7 +532,7 @@ def handle_script_stop(pkt):
     script_running = False
     script_last_heartbeat_ms = 0
     script_last_event = "stop"
-    mc.digitalWriteMask(0x0000)
+    clear_fire_outputs()
     if LOG_SCRIPT_EVENTS:
         print("SCRIPT STOP")
     reply_ack_if_unique(pkt, CMD_SCRIPT_STOP)
@@ -526,12 +558,12 @@ def run_script_scheduler():
         return
     if not ARMED:
         script_running = False
-        mc.digitalWriteMask(0x0000)
+        clear_fire_outputs()
         script_last_event = "stopped disarmed"
         return
     if time.ticks_diff(time.ticks_ms(), script_last_heartbeat_ms) > SCRIPT_HEARTBEAT_TIMEOUT_MS:
         script_running = False
-        mc.digitalWriteMask(0x0000)
+        clear_fire_outputs()
         script_last_event = "hb timeout"
         print("SCRIPT stopped - heartbeat timeout")
         return
@@ -581,7 +613,7 @@ def handle(pkt):
     if cmd == CMD_DISARM:
         ARMED = False
         script_running = False
-        mc.digitalWriteMask(0x0000)
+        clear_fire_outputs()
         print("DISARMED - outputs off")
         reply_ack_if_unique(pkt, CMD_DISARM)
         return
@@ -593,6 +625,28 @@ def handle(pkt):
 
     if cmd == CMD_FIRE:
         handle_fire(pkt)
+        return
+
+    if cmd == CMD_E77_UPDATE_BEGIN:
+        module_ota.begin(pkt, UNIQUE_ID, ARMED or script_running, reply_ack_if_unique, reply_nack_if_unique)
+        return
+
+    if cmd == CMD_E77_UPDATE_WRITE:
+        module_ota.write(pkt, UNIQUE_ID, reply_ack_if_unique, reply_nack_if_unique)
+        return
+
+    if cmd == CMD_E77_UPDATE_END:
+        module_ota.end(pkt, UNIQUE_ID, reply_ack_if_unique, reply_nack_if_unique)
+        return
+
+    if cmd == CMD_E77_UPDATE_ABORT:
+        module_ota.abort(pkt, UNIQUE_ID, reply_ack_if_unique, reply_nack_if_unique)
+        return
+
+    if cmd == CMD_E77_UPDATE_REBOOT:
+        if module_ota.reboot(pkt, UNIQUE_ID, ARMED or script_running, reply_ack_if_unique, reply_nack_if_unique):
+            time.sleep_ms(250)
+            machine.reset()
         return
 
     if cmd == CMD_SCRIPT_CLEAR:
@@ -708,6 +762,7 @@ def handle_nfcp_bytes(data):
 
 try:
     while True:
+        module_ota.poll_timeout()
         had_data = False
 
         while transport.any():
@@ -719,12 +774,14 @@ try:
 
         if not had_data:
             run_script_scheduler()
+            poll_fire_outputs()
             time.sleep_ms(1)
         else:
             run_script_scheduler()
+            poll_fire_outputs()
 finally:
     # In case of soft reset/exception, try to leave outputs safe.
     try:
-        mc.digitalWriteMask(0x0000)
+        clear_fire_outputs()
     except Exception:
         pass

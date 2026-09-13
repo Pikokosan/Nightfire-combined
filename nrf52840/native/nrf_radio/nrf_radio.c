@@ -1,0 +1,314 @@
+#include <string.h>
+
+#include "py/obj.h"
+#include "py/runtime.h"
+#include "py/mperrno.h"
+#include "py/mphal.h"
+
+#if defined(NRF52840_XXAA) || defined(NRF52840_XXAB) || defined(NRF52840)
+#include "nrf.h"
+#else
+#include "nrf.h"
+#endif
+
+#define NRF_RADIO_MAX_PAYLOAD 252
+#define NRF_RADIO_DEFAULT_CHANNEL 40
+#define NRF_RADIO_DEFAULT_ADDRESS 0x67676767u
+
+static uint8_t tx_packet[NRF_RADIO_MAX_PAYLOAD + 1];
+static uint8_t rx_packet[NRF_RADIO_MAX_PAYLOAD + 1];
+static int last_rssi_dbm = 0;
+static uint32_t current_channel = NRF_RADIO_DEFAULT_CHANNEL;
+static int32_t current_tx_power = 8;
+static uint32_t current_address = NRF_RADIO_DEFAULT_ADDRESS;
+
+static void radio_disable(void) {
+    NRF_RADIO->TASKS_DISABLE = 1;
+    uint32_t guard = 1000000;
+    while (!NRF_RADIO->EVENTS_DISABLED && guard--) {
+    }
+    NRF_RADIO->EVENTS_DISABLED = 0;
+}
+
+static void radio_config(uint32_t channel, int32_t tx_power, uint32_t address) {
+    radio_disable();
+
+    if (channel > 100) {
+        channel = NRF_RADIO_DEFAULT_CHANNEL;
+    }
+
+    current_channel = channel;
+    current_tx_power = tx_power;
+    current_address = address;
+
+    NRF_RADIO->POWER = 1;
+    NRF_RADIO->MODE = RADIO_MODE_MODE_Nrf_1Mbit << RADIO_MODE_MODE_Pos;
+    NRF_RADIO->FREQUENCY = channel;
+
+    switch (tx_power) {
+        case 8:
+            NRF_RADIO->TXPOWER = RADIO_TXPOWER_TXPOWER_Pos8dBm << RADIO_TXPOWER_TXPOWER_Pos;
+            break;
+        case 4:
+            NRF_RADIO->TXPOWER = RADIO_TXPOWER_TXPOWER_Pos4dBm << RADIO_TXPOWER_TXPOWER_Pos;
+            break;
+        case 0:
+            NRF_RADIO->TXPOWER = RADIO_TXPOWER_TXPOWER_0dBm << RADIO_TXPOWER_TXPOWER_Pos;
+            break;
+        case -4:
+            NRF_RADIO->TXPOWER = RADIO_TXPOWER_TXPOWER_Neg4dBm << RADIO_TXPOWER_TXPOWER_Pos;
+            break;
+        default:
+            NRF_RADIO->TXPOWER = RADIO_TXPOWER_TXPOWER_Pos8dBm << RADIO_TXPOWER_TXPOWER_Pos;
+            break;
+    }
+
+    NRF_RADIO->PREFIX0 = (address >> 24) & 0xFF;
+    NRF_RADIO->BASE0 = address << 8;
+    NRF_RADIO->TXADDRESS = 0;
+    NRF_RADIO->RXADDRESSES = 1;
+
+    NRF_RADIO->PCNF0 =
+        (8 << RADIO_PCNF0_LFLEN_Pos) |
+        (0 << RADIO_PCNF0_S0LEN_Pos) |
+        (0 << RADIO_PCNF0_S1LEN_Pos);
+
+    NRF_RADIO->PCNF1 =
+        (NRF_RADIO_MAX_PAYLOAD << RADIO_PCNF1_MAXLEN_Pos) |
+        (0 << RADIO_PCNF1_STATLEN_Pos) |
+        (3 << RADIO_PCNF1_BALEN_Pos) |
+        (RADIO_PCNF1_ENDIAN_Little << RADIO_PCNF1_ENDIAN_Pos) |
+        (RADIO_PCNF1_WHITEEN_Enabled << RADIO_PCNF1_WHITEEN_Pos);
+
+    NRF_RADIO->DATAWHITEIV = channel & 0x3F;
+    NRF_RADIO->CRCCNF =
+        (RADIO_CRCCNF_LEN_Two << RADIO_CRCCNF_LEN_Pos) |
+        (RADIO_CRCCNF_SKIPADDR_Skip << RADIO_CRCCNF_SKIPADDR_Pos);
+    NRF_RADIO->CRCINIT = 0xFFFF;
+    NRF_RADIO->CRCPOLY = 0x11021;
+
+    NRF_RADIO->MODECNF0 = RADIO_MODECNF0_RU_Fast << RADIO_MODECNF0_RU_Pos;
+    NRF_RADIO->SHORTS = RADIO_SHORTS_READY_START_Msk | RADIO_SHORTS_END_DISABLE_Msk;
+}
+
+static mp_obj_t nrf_radio_init(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    enum {
+        ARG_channel,
+        ARG_tx_power,
+        ARG_address,
+    };
+    static const mp_arg_t allowed_args[] = {
+        { MP_QSTR_channel, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = NRF_RADIO_DEFAULT_CHANNEL} },
+        { MP_QSTR_tx_power, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 8} },
+        { MP_QSTR_address, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = NRF_RADIO_DEFAULT_ADDRESS} },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
+    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
+
+    radio_config(
+        (uint32_t)args[ARG_channel].u_int,
+        (int32_t)args[ARG_tx_power].u_int,
+        (uint32_t)args[ARG_address].u_int
+    );
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_KW(nrf_radio_init_obj, 0, nrf_radio_init);
+
+static mp_obj_t nrf_radio_send(mp_obj_t payload_obj) {
+    mp_buffer_info_t payload;
+    mp_get_buffer_raise(payload_obj, &payload, MP_BUFFER_READ);
+    if (payload.len > NRF_RADIO_MAX_PAYLOAD) {
+        mp_raise_ValueError(MP_ERROR_TEXT("payload too long"));
+    }
+
+    radio_disable();
+    tx_packet[0] = payload.len;
+    memcpy(&tx_packet[1], payload.buf, payload.len);
+    NRF_RADIO->PACKETPTR = (uint32_t)tx_packet;
+    NRF_RADIO->EVENTS_READY = 0;
+    NRF_RADIO->EVENTS_END = 0;
+    NRF_RADIO->EVENTS_DISABLED = 0;
+    NRF_RADIO->TASKS_TXEN = 1;
+
+    uint32_t guard = 1000000;
+    while (!NRF_RADIO->EVENTS_DISABLED && guard--) {
+    }
+    if (!guard) {
+        radio_disable();
+        mp_raise_OSError(MP_ETIMEDOUT);
+    }
+    NRF_RADIO->EVENTS_DISABLED = 0;
+    return mp_const_true;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(nrf_radio_send_obj, nrf_radio_send);
+
+static mp_obj_t nrf_radio_recv(size_t n_args, const mp_obj_t *args) {
+    uint32_t timeout_ms = 0;
+    if (n_args > 0) {
+        timeout_ms = mp_obj_get_int(args[0]);
+    }
+
+    radio_disable();
+    memset(rx_packet, 0, sizeof(rx_packet));
+    NRF_RADIO->PACKETPTR = (uint32_t)rx_packet;
+    NRF_RADIO->EVENTS_READY = 0;
+    NRF_RADIO->EVENTS_END = 0;
+    NRF_RADIO->EVENTS_RSSIEND = 0;
+    NRF_RADIO->EVENTS_DISABLED = 0;
+    NRF_RADIO->TASKS_RXEN = 1;
+
+    uint32_t start = mp_hal_ticks_ms();
+    while (!NRF_RADIO->EVENTS_READY) {
+        if (timeout_ms && mp_hal_ticks_ms() - start >= timeout_ms) {
+            radio_disable();
+            return mp_const_none;
+        }
+    }
+    NRF_RADIO->TASKS_RSSISTART = 1;
+
+    while (!NRF_RADIO->EVENTS_DISABLED) {
+        if (timeout_ms && mp_hal_ticks_ms() - start >= timeout_ms) {
+            radio_disable();
+            return mp_const_none;
+        }
+    }
+    NRF_RADIO->EVENTS_DISABLED = 0;
+    if (NRF_RADIO->EVENTS_RSSIEND) {
+        last_rssi_dbm = -(int)NRF_RADIO->RSSISAMPLE;
+    }
+
+    uint8_t length = rx_packet[0];
+    if (length > NRF_RADIO_MAX_PAYLOAD) {
+        return mp_const_none;
+    }
+    return mp_obj_new_bytes(&rx_packet[1], length);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(nrf_radio_recv_obj, 0, 1, nrf_radio_recv);
+
+static mp_obj_t nrf_radio_last_rssi(void) {
+    return mp_obj_new_int(last_rssi_dbm);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(nrf_radio_last_rssi_obj, nrf_radio_last_rssi);
+
+static mp_obj_t nrf_radio_channel(mp_obj_t channel_obj) {
+    uint32_t channel = mp_obj_get_int(channel_obj);
+    if (channel > 100) {
+        mp_raise_ValueError(MP_ERROR_TEXT("channel must be 0..100"));
+    }
+    current_channel = channel;
+    NRF_RADIO->FREQUENCY = channel;
+    NRF_RADIO->DATAWHITEIV = channel & 0x3F;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(nrf_radio_channel_obj, nrf_radio_channel);
+
+static mp_obj_t nrf_radio_noise_sample(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    enum {
+        ARG_channel,
+        ARG_duration_ms,
+        ARG_interval_ms,
+    };
+    static const mp_arg_t allowed_args[] = {
+        { MP_QSTR_channel, MP_ARG_REQUIRED | MP_ARG_INT, {.u_int = NRF_RADIO_DEFAULT_CHANNEL} },
+        { MP_QSTR_duration_ms, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 100} },
+        { MP_QSTR_interval_ms, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 2} },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
+    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
+
+    uint32_t sample_channel = (uint32_t)args[ARG_channel].u_int;
+    uint32_t duration_ms = (uint32_t)args[ARG_duration_ms].u_int;
+    uint32_t interval_ms = (uint32_t)args[ARG_interval_ms].u_int;
+
+    if (sample_channel > 100) {
+        mp_raise_ValueError(MP_ERROR_TEXT("channel must be 0..100"));
+    }
+    if (duration_ms < 1) {
+        duration_ms = 1;
+    }
+    if (interval_ms < 1) {
+        interval_ms = 1;
+    }
+
+    uint32_t previous_channel = current_channel;
+    int32_t previous_tx_power = current_tx_power;
+    uint32_t previous_address = current_address;
+
+    radio_config(sample_channel, current_tx_power, current_address);
+    memset(rx_packet, 0, sizeof(rx_packet));
+    NRF_RADIO->PACKETPTR = (uint32_t)rx_packet;
+    NRF_RADIO->EVENTS_READY = 0;
+    NRF_RADIO->EVENTS_RSSIEND = 0;
+    NRF_RADIO->EVENTS_DISABLED = 0;
+    NRF_RADIO->TASKS_RXEN = 1;
+
+    uint32_t guard = 1000000;
+    while (!NRF_RADIO->EVENTS_READY && guard--) {
+    }
+    if (!guard) {
+        radio_disable();
+        radio_config(previous_channel, previous_tx_power, previous_address);
+        mp_raise_OSError(MP_ETIMEDOUT);
+    }
+
+    int min_dbm = 0;
+    int max_dbm = 0;
+    int sum_dbm = 0;
+    int count = 0;
+
+    uint32_t start = mp_hal_ticks_ms();
+    while ((mp_hal_ticks_ms() - start) < duration_ms || count == 0) {
+        NRF_RADIO->EVENTS_RSSIEND = 0;
+        NRF_RADIO->TASKS_RSSISTART = 1;
+
+        guard = 1000000;
+        while (!NRF_RADIO->EVENTS_RSSIEND && guard--) {
+        }
+        if (!guard) {
+            break;
+        }
+
+        int dbm = -(int)NRF_RADIO->RSSISAMPLE;
+        last_rssi_dbm = dbm;
+        if (count == 0 || dbm < min_dbm) {
+            min_dbm = dbm;
+        }
+        if (count == 0 || dbm > max_dbm) {
+            max_dbm = dbm;
+        }
+        sum_dbm += dbm;
+        count++;
+
+        mp_hal_delay_ms(interval_ms);
+    }
+
+    radio_disable();
+    radio_config(previous_channel, previous_tx_power, previous_address);
+
+    mp_obj_t result = mp_obj_new_dict(5);
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_channel), mp_obj_new_int(sample_channel));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_count), mp_obj_new_int(count));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_avg), mp_obj_new_int(count ? (sum_dbm / count) : 0));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_min), mp_obj_new_int(count ? min_dbm : 0));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_max), mp_obj_new_int(count ? max_dbm : 0));
+    return result;
+}
+static MP_DEFINE_CONST_FUN_OBJ_KW(nrf_radio_noise_sample_obj, 1, nrf_radio_noise_sample);
+
+static const mp_rom_map_elem_t nrf_radio_module_globals_table[] = {
+    { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_nrf_radio) },
+    { MP_ROM_QSTR(MP_QSTR_init), MP_ROM_PTR(&nrf_radio_init_obj) },
+    { MP_ROM_QSTR(MP_QSTR_send), MP_ROM_PTR(&nrf_radio_send_obj) },
+    { MP_ROM_QSTR(MP_QSTR_recv), MP_ROM_PTR(&nrf_radio_recv_obj) },
+    { MP_ROM_QSTR(MP_QSTR_last_rssi), MP_ROM_PTR(&nrf_radio_last_rssi_obj) },
+    { MP_ROM_QSTR(MP_QSTR_channel), MP_ROM_PTR(&nrf_radio_channel_obj) },
+    { MP_ROM_QSTR(MP_QSTR_noise_sample), MP_ROM_PTR(&nrf_radio_noise_sample_obj) },
+};
+static MP_DEFINE_CONST_DICT(nrf_radio_module_globals, nrf_radio_module_globals_table);
+
+const mp_obj_module_t nrf_radio_user_cmodule = {
+    .base = { &mp_type_module },
+    .globals = (mp_obj_dict_t *)&nrf_radio_module_globals,
+};
+
+MP_REGISTER_MODULE(MP_QSTR_nrf_radio, nrf_radio_user_cmodule);

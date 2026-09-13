@@ -50,6 +50,7 @@ DEVICE_DB_PATH = "nfcp_devices.json"
 SETTINGS_PATH = "nfcp_settings.json"
 
 RADIO_NETWORK_ID = e77_radio.DEFAULT_NETWORK_ID
+RADIO_CHANNEL = 40
 RADIO_APP_BAUD = 256000
 RADIO_BOOTLOADER_BAUD = 115200
 
@@ -202,6 +203,54 @@ def set_local_radio_network(network_id, timeout_ms=1000):
     )
 
 
+def set_local_radio_channel(channel, timeout_ms=1000):
+    frame = local_radio_command(
+        e77_radio.CMD_SET_CHANNEL,
+        bytes([channel & 0xFF]),
+        timeout_ms
+    )
+
+    return bool(
+        frame and
+        frame.cmd == e77_radio.CMD_SET_CHANNEL and
+        not (frame.flags & e77_radio.FLAG_ERROR)
+    )
+
+
+def parse_channel_scan_payload(payload):
+    results = []
+    if not payload:
+        return results
+
+    count = payload[0]
+    index = 1
+    for _ in range(count):
+        if index + 7 > len(payload):
+            break
+        channel = payload[index]
+        avg = e77_radio.int_from_be(payload[index + 1:index + 3], signed=True)
+        min_rssi = e77_radio.int_from_be(payload[index + 3:index + 5], signed=True)
+        max_rssi = e77_radio.int_from_be(payload[index + 5:index + 7], signed=True)
+        results.append({
+            "channel": channel,
+            "avg": avg,
+            "min": min_rssi,
+            "max": max_rssi
+        })
+        index += 7
+
+    return results
+
+
+def scan_local_radio_channels(timeout_ms=8000):
+    frame = local_radio_command(e77_radio.CMD_SCAN_CHANNELS, b"", timeout_ms)
+    if not frame:
+        return []
+    if frame.cmd != e77_radio.CMD_SCAN_CHANNELS or (frame.flags & e77_radio.FLAG_ERROR):
+        return []
+    return parse_channel_scan_payload(frame.payload)
+
+
 def get_local_radio_info(timeout_ms=1000):
     frame = local_radio_command(e77_radio.CMD_GET_INFO, b"", timeout_ms)
     if not frame:
@@ -211,11 +260,14 @@ def get_local_radio_info(timeout_ms=1000):
     return e77_radio.parse_get_info(frame.payload)
 
 
-def check_radio_ready(network_id):
+def check_radio_ready(network_id, channel=None):
     if not radio_ping(1000):
         return False
 
     if not set_local_radio_network(network_id, 1000):
+        return False
+
+    if channel is not None and not set_local_radio_channel(channel, 1000):
         return False
 
     return radio_ping(1000)
@@ -332,6 +384,14 @@ def load_app_settings(path=SETTINGS_PATH):
     except:
         radio_network_id = RADIO_NETWORK_ID
 
+    try:
+        radio_channel = int(settings.get("radio_channel", RADIO_CHANNEL))
+    except:
+        radio_channel = RADIO_CHANNEL
+
+    if radio_channel < 0 or radio_channel > 100:
+        radio_channel = RADIO_CHANNEL
+
     if radio_network_id == 1 and RADIO_NETWORK_ID != 1:
         radio_network_id = RADIO_NETWORK_ID
         settings["radio_network_id"] = radio_network_id
@@ -343,7 +403,8 @@ def load_app_settings(path=SETTINGS_PATH):
     return {
         "auto_module_continuity": bool(settings.get("auto_module_continuity", True)),
         "color_cues_without_script": bool(settings.get("color_cues_without_script", True)),
-        "radio_network_id": radio_network_id
+        "radio_network_id": radio_network_id,
+        "radio_channel": radio_channel
     }
 
 
@@ -539,6 +600,7 @@ def discover(idle_ms=DISCOVER_IDLE_TIMEOUT_MS, max_scan_ms=DISCOVER_MAX_SCAN_MS)
 
     db = load_device_db()
     idx = index_db_by_unique(db)
+    discovered_uids = []
     start_ms = time.ticks_ms()
     last_packet_ms = start_ms
     max_deadline = time.ticks_add(start_ms, max_scan_ms)
@@ -557,13 +619,24 @@ def discover(idle_ms=DISCOVER_IDLE_TIMEOUT_MS, max_scan_ms=DISCOVER_MAX_SCAN_MS)
                 if pkt.get("radio_snr", None) is not None:
                     info["radio_snr"] = pkt["radio_snr"]
                 info["radio_last_epoch"] = time.time()
-                idx[info["unique_id"]] = info
+                info["module_online"] = True
+                info["module_last_seen_epoch"] = time.time()
+                existing = idx.get(info["unique_id"], {})
+                existing.update(info)
+                idx[info["unique_id"]] = existing
+                if info["unique_id"] not in discovered_uids:
+                    discovered_uids.append(info["unique_id"])
                 last_packet_ms = time.ticks_ms()
 
         if time.ticks_diff(time.ticks_ms(), last_packet_ms) >= idle_ms:
             break
 
         time.sleep_ms(1)
+
+    for uid_text, dev in idx.items():
+        if uid_text not in discovered_uids:
+            dev["module_online"] = False
+            dev["module_lost_epoch"] = time.time()
 
     db["devices"] = sorted(idx.values(), key=lambda d: d.get("unique_id", ""))
     save_device_db(db)
@@ -587,11 +660,7 @@ def request_continuity_for_uid(uid_int, cue_count_hint=16, timeout_ms=300):
 
         time.sleep_ms(2)
 
-    try:
-        cue_count = int(cue_count_hint or DEFAULT_CUE_COUNT)
-    except:
-        cue_count = DEFAULT_CUE_COUNT
-    return [False] * cue_count
+    return None
 
 
 def request_ping_for_uid(uid_int, timeout_ms=SPEED_TEST_TIMEOUT_MS):
@@ -666,6 +735,8 @@ def info_scan(timeout_ms=1000):
             dev["app_version"] = info.get("app_version", "")
             dev["radio_firmware_version"] = info.get("radio_version", "")
             dev["info_last_epoch"] = time.time()
+            dev["module_online"] = True
+            dev["module_last_seen_epoch"] = time.time()
 
             link = get_last_radio_link(uid_text)
             if link:
@@ -705,6 +776,17 @@ def continuity_scan(timeout_ms=300):
             cue_count = DEFAULT_CUE_COUNT
 
         ok = request_continuity_for_uid(uid, cue_count, timeout_ms)
+        if ok is None:
+            dev["module_online"] = False
+            dev["module_lost_epoch"] = time.time()
+            results.append({
+                "unique_id": uid_text,
+                "cue_count": cue_count,
+                "continuity": None
+            })
+            changed = True
+            continue
+
         cues = []
         for i in range(cue_count):
             cues.append({
@@ -714,6 +796,8 @@ def continuity_scan(timeout_ms=300):
 
         dev["continuity"] = {"cues": cues}
         dev["continuity_last_epoch"] = time.time()
+        dev["module_online"] = True
+        dev["module_last_seen_epoch"] = time.time()
 
         link = get_last_radio_link(uid_text)
         if link:
@@ -753,6 +837,11 @@ def speed_test_scan(timeout_ms=SPEED_TEST_TIMEOUT_MS):
         dev["speed_test_ms"] = ping_ms
         dev["speed_test_ok"] = ping_ms is not None
         dev["speed_test_last_epoch"] = time.time()
+        dev["module_online"] = ping_ms is not None
+        if ping_ms is None:
+            dev["module_lost_epoch"] = time.time()
+        else:
+            dev["module_last_seen_epoch"] = time.time()
 
         link = get_last_radio_link(uid_text)
         if link:
@@ -834,6 +923,32 @@ def request_set_network_for_uid(uid_int, new_network, timeout_ms=800):
 
             if pkt["cmd"] == nfcp.CMD_NACK and len(data) >= 2:
                 if data[0] == nfcp.CMD_SET_NETWORK:
+                    return False
+
+        time.sleep_ms(2)
+
+    return False
+
+
+def request_set_radio_channel_for_uid(uid_int, new_channel, timeout_ms=1200):
+    drain_uart()
+    radio_write_nfcp(nfcp_tx.build_set_radio_channel(uid_int, new_channel))
+
+    deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
+    while time.ticks_diff(deadline, time.ticks_ms()) > 0:
+        packets = poll_responses()
+        for pkt in packets:
+            if (pkt["src_unique"] & 0xFFFFFFFF) != (uid_int & 0xFFFFFFFF):
+                continue
+
+            data = pkt.get("data", b"")
+
+            if pkt["cmd"] == nfcp.CMD_ACK and len(data) >= 2:
+                if data[0] == nfcp.CMD_SET_RADIO_CHANNEL:
+                    return data[1] == nfcp.ACK_OK
+
+            if pkt["cmd"] == nfcp.CMD_NACK and len(data) >= 2:
+                if data[0] == nfcp.CMD_SET_RADIO_CHANNEL:
                     return False
 
         time.sleep_ms(2)
@@ -1069,6 +1184,7 @@ nfcp.fire_unique = fire_unique
 nfcp.fire_unique_mask = fire_unique_mask
 nfcp.set_group = set_group
 nfcp.request_set_network_for_uid = request_set_network_for_uid
+nfcp.request_set_radio_channel_for_uid = request_set_radio_channel_for_uid
 nfcp.e77_update_send_file_for_uid = e77_update_send_file_for_uid
 nfcp.e77_update_reboot_for_uid = e77_update_reboot_for_uid
 nfcp.script_clear_status_for_uid = script_clear_status_for_uid
@@ -1139,6 +1255,10 @@ class NFCPGui:
         self.radio_network_id = int(
             self.settings.get("radio_network_id", RADIO_NETWORK_ID)
         ) & 0xFFFF
+        self.radio_channel = int(
+            self.settings.get("radio_channel", RADIO_CHANNEL)
+        )
+        self.channel_scan_results = []
         self.radio_error = None
         self.trellis = None
         self.trellis_error = None
@@ -1152,7 +1272,7 @@ class NFCPGui:
             self.show_trellis_error()
             return
 
-        if not check_radio_ready(self.radio_network_id):
+        if not check_radio_ready(self.radio_network_id, self.radio_channel):
             self.radio_error = "E77 radio not responding"
             print(self.radio_error)
             self.show_radio_error()
@@ -1436,6 +1556,9 @@ class NFCPGui:
             return "Speed: --"
 
         return "Speed: %s" % self.format_speed_test(self.selected_module)
+
+    def module_is_lost(self, module):
+        return module.get("module_online", True) is False
 
     def format_rssi(self, module):
         try:
@@ -3039,7 +3162,7 @@ class NFCPGui:
         )
 
         network_label = lv.label(scr)
-        network_label.set_text("Network: %d" % self.radio_network_id)
+        network_label.set_text("Network: %d  Channel: %d" % (self.radio_network_id, self.radio_channel))
         network_label.set_pos(430, 205)
 
         self.make_button(
@@ -3064,11 +3187,21 @@ class NFCPGui:
 
         self.make_button(
             scr,
-            "OTA",
+            "SCAN CHANNELS",
             430,
-            310,
+            300,
             250,
-            55,
+            50,
+            self.scan_radio_channels
+        )
+
+        self.make_button(
+            scr,
+            "OTA",
+            690,
+            300,
+            90,
+            50,
             self.show_e77_update
         )
 
@@ -3117,8 +3250,24 @@ class NFCPGui:
             return "/" + source
         return base + "/" + source
 
-    def module_supports_e77_update(self, module):
+    def module_supports_e77_update(self, module, manifest=None):
         app_name = str(module.get("app_name", "") or "")
+        target = ""
+
+        if manifest:
+            target = str(manifest.get("target", "") or "")
+
+        if target:
+            if target == "slave":
+                return app_name == "slave"
+            if target == "dummy":
+                return app_name == "dummy"
+            if target == "nrf-dummy":
+                return app_name == "nrf-dummy"
+            if target == "e77":
+                return app_name == "e77-micropython"
+            return False
+
         if app_name == "e77-micropython":
             return True
 
@@ -3133,7 +3282,7 @@ class NFCPGui:
         manifest = self.find_e77_update_manifest()
         modules = [
             module for module in self.modules
-            if self.module_supports_e77_update(module)
+            if self.module_supports_e77_update(module, manifest)
         ]
 
         label = lv.label(scr)
@@ -3147,9 +3296,10 @@ class NFCPGui:
 
         files = manifest.get("files", [])
         label.set_text(
-            "Manifest: %s\nVersion: %s\nFiles: %d\nE77 modules: %d" %
+                "Manifest: %s\nTarget: %s\nVersion: %s\nFiles: %d\nModules: %d" %
             (
                 manifest.get("manifest_path", "--"),
+                manifest.get("target", "e77"),
                 manifest.get("version", "--"),
                 len(files),
                 len(modules)
@@ -3183,7 +3333,7 @@ class NFCPGui:
         self.load_modules_from_db()
         modules = [
             module for module in self.modules
-            if self.module_supports_e77_update(module)
+            if self.module_supports_e77_update(module, manifest)
         ]
         if not modules:
             self.set_status("No E77 modules found")
@@ -3569,6 +3719,143 @@ class NFCPGui:
             "Pair complete - %d/%d paired, %d failed" %
             (paired, discovered_count, failed)
         )
+
+    def scan_radio_channels(self, event=None):
+        self.show_loading_screen("Scanning channels...\nChecking noise...")
+
+        try:
+            results = scan_local_radio_channels()
+        except Exception as e:
+            print("Channel scan failed:", e)
+            results = []
+
+        self.channel_scan_results = results
+        self.show_channel_scan_results()
+
+        if results:
+            self.set_status("Channel scan complete")
+        else:
+            self.set_status("Channel scan failed")
+
+    def show_channel_scan_results(self, event=None):
+        scr = self.new_screen("Best Radio Channels", "channel_scan")
+        self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_settings)
+
+        results = self.channel_scan_results or []
+        if not results:
+            label = lv.label(scr)
+            label.set_text("No channel scan results.")
+            label.align(lv.ALIGN.CENTER, 0, 0)
+            return
+
+        title = lv.label(scr)
+        title.set_text("Select a channel to switch all discovered modules")
+        title.set_pos(35, 55)
+
+        x0 = 35
+        y0 = 95
+        w = 220
+        h = 55
+        gap_x = 25
+        gap_y = 14
+
+        for i, item in enumerate(results[:10]):
+            row = i // 3
+            col = i % 3
+            channel = int(item.get("channel", 0))
+            text = "CH %d  avg %d\nmax %d" % (
+                channel,
+                int(item.get("avg", 0)),
+                int(item.get("max", 0))
+            )
+            self.make_button(
+                scr,
+                text,
+                x0 + col * (w + gap_x),
+                y0 + row * (h + gap_y),
+                w,
+                h,
+                self.make_channel_select_cb(channel)
+            )
+
+    def make_channel_select_cb(self, channel):
+        def cb(event):
+            self.apply_radio_channel(channel)
+
+        return cb
+
+    def apply_radio_channel(self, channel):
+        try:
+            channel = int(channel)
+        except:
+            self.set_status("Invalid channel")
+            return
+
+        if channel < 0 or channel > 100:
+            self.set_status("Invalid channel")
+            return
+
+        self.load_modules_from_db()
+        modules = list(self.modules)
+        ok_count = 0
+        failed_count = 0
+        changed_uids = []
+
+        self.show_loading_screen("Switching channel...\nModules first...")
+
+        for module in modules:
+            uid_text = module.get("unique_id", "0x00000000")
+            try:
+                uid = int(uid_text, 16) & 0xFFFFFFFF
+            except:
+                failed_count += 1
+                continue
+
+            if nfcp.request_set_radio_channel_for_uid(uid, channel):
+                changed_uids.append(uid_text)
+                ok_count += 1
+            else:
+                failed_count += 1
+
+        if failed_count:
+            self.show_channel_scan_results()
+            self.set_status(
+                "Channel not changed - %d ok, %d failed" %
+                (ok_count, failed_count)
+            )
+            return
+
+        if not set_local_radio_channel(channel):
+            self.show_channel_scan_results()
+            self.set_status("Bridge channel set failed")
+            return
+
+        self.radio_channel = channel
+        self.settings["radio_channel"] = self.radio_channel
+
+        try:
+            save_app_settings(self.settings)
+        except Exception as e:
+            print("Settings save failed:", e)
+            self.set_status("Settings save failed")
+            return
+
+        try:
+            db = nfcp.load_device_db()
+            idx = nfcp.index_db_by_unique(db)
+            for uid_text in changed_uids:
+                if uid_text in idx:
+                    idx[uid_text]["radio_channel"] = channel
+            db["devices"] = sorted(
+                idx.values(),
+                key=lambda d: self.group_to_int_value(d.get("group_id", None))
+            )
+            nfcp.save_device_db(db)
+        except Exception as e:
+            print("Channel DB update failed:", e)
+
+        self.show_settings()
+        self.set_status("Channel changed to %d for %d modules" % (channel, ok_count))
 
     def toggle_auto_module_continuity(self, event=None):
         checked = not self.auto_module_continuity
@@ -4115,6 +4402,9 @@ class NFCPGui:
                     self.extra_connected_cue_count += 1
 
     def get_module_button_color(self, module):
+        if self.module_is_lost(module):
+            return lv.color_hex(0x4A4A4A)
+
         normal_blue = lv.color_hex(0x2F4F8F)
         orange = lv.color_hex(0xC46A00)
         red = lv.color_hex(0x7A1F1F)
@@ -4320,10 +4610,12 @@ class NFCPGui:
 
             channel_text = self.group_to_int_display(module.get("group_id", "--"))
             cue_count = module.get("cue_count", 16)
+            status_text = " LOST" if self.module_is_lost(module) else ""
 
-            text = "Ch %s  Cues:%s\nUID:%s" % (
+            text = "Ch %s  Cues:%s%s\nUID:%s" % (
                 channel_text,
                 cue_count,
+                status_text,
                 self.format_uid(uid_text)
             )
 
@@ -4647,6 +4939,12 @@ class NFCPGui:
 
             self.set_status("Checking continuity...")
             ok = nfcp.request_continuity_for_uid(uid, cue_count)
+            if ok is None:
+                self.save_selected_module_online(False)
+                self.refresh_selected_module_detail_labels(radio=True)
+                self.set_status("Continuity timeout")
+                return
+
             self.set_continuity(ok)
             self.save_selected_module_continuity(ok)
             self.update_open_script_cues()
@@ -4786,8 +5084,23 @@ class NFCPGui:
             dev["speed_test_ms"] = ping_ms
             dev["speed_test_ok"] = ping_ms is not None
             dev["speed_test_last_epoch"] = time.time()
+            dev["module_online"] = ping_ms is not None
+            if ping_ms is None:
+                dev["module_lost_epoch"] = time.time()
+            else:
+                dev["module_last_seen_epoch"] = time.time()
 
         self.update_selected_module_record("Speed test", updater)
+
+    def save_selected_module_online(self, online):
+        def updater(dev, uid_text):
+            dev["module_online"] = bool(online)
+            if online:
+                dev["module_last_seen_epoch"] = time.time()
+            else:
+                dev["module_lost_epoch"] = time.time()
+
+        self.update_selected_module_record("Module online", updater)
 
     def save_selected_module_info(self, info):
         def updater(dev, uid_text):
@@ -4796,6 +5109,8 @@ class NFCPGui:
             dev["radio_firmware_version"] = info.get("radio_version", "")
             dev["script_status"] = info.get("script_status", "")
             dev["info_last_epoch"] = time.time()
+            dev["module_online"] = True
+            dev["module_last_seen_epoch"] = time.time()
 
         self.update_selected_module_record("Info", updater)
 
@@ -4813,6 +5128,8 @@ class NFCPGui:
             dev["cue_count"] = cue_count
             dev["continuity"] = {"cues": cues}
             dev["continuity_last_epoch"] = time.time()
+            dev["module_online"] = True
+            dev["module_last_seen_epoch"] = time.time()
 
         self.update_selected_module_record("Continuity", updater)
 
@@ -5223,7 +5540,11 @@ class NFCPGui:
                     uid = info["unique_id"]
                     was_new = uid not in idx
 
-                    idx[uid] = info
+                    existing = idx.get(uid, {})
+                    existing.update(info)
+                    existing["module_online"] = True
+                    existing["module_last_seen_epoch"] = time.time()
+                    idx[uid] = existing
                     db_changed = True
 
                     if was_new:

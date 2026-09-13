@@ -14,6 +14,8 @@ CMD_GET_INFO = 0x03
 CMD_SEND_NFCP = 0x10
 CMD_NFCP_RX = 0x11
 CMD_SET_NETWORK = 0x12
+CMD_SET_CHANNEL = 0x13
+CMD_SCAN_CHANNELS = 0x14
 CMD_BOOTLOADER = 0x30
 CMD_ERROR = 0x40
 
@@ -75,6 +77,10 @@ def build_send_nfcp(seq, nfcp_frame):
 
 def build_set_network(seq, network_id):
     return build_frame(seq, CMD_SET_NETWORK, int_to_be(network_id & 0xFFFF, 2))
+
+
+def build_set_channel(seq, channel):
+    return build_frame(seq, CMD_SET_CHANNEL, bytes([channel & 0xFF]))
 
 
 def build_get_info(seq):

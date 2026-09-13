@@ -27,6 +27,7 @@ CMD_FIRE         = 0x20
 CMD_SET_UNIQUE   = 0x30
 CMD_SET_GROUP    = 0x31
 CMD_SET_NETWORK  = 0x32
+CMD_SET_RADIO_CHANNEL = 0x33
 CMD_DISCOVER     = 0x40
 CMD_DISCOVER_RSP = 0x41
 
@@ -203,6 +204,15 @@ class NFCP:
             (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
             bytes([CMD_SET_NETWORK]) +
             (new_network & 0xFFFF).to_bytes(2, "big")
+        )
+        return self._frame(SOF_UNIQUE, payload)
+
+    def build_set_radio_channel(self, target_unique: int, new_channel: int) -> bytes:
+        payload = (
+            bytes([self.node_id]) +
+            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes([CMD_SET_RADIO_CHANNEL]) +
+            bytes([new_channel & 0xFF])
         )
         return self._frame(SOF_UNIQUE, payload)
 
@@ -557,6 +567,7 @@ class NFCPStreamParser:
                 CMD_SET_GROUP,
                 CMD_SET_UNIQUE,
                 CMD_SET_NETWORK,
+                CMD_SET_RADIO_CHANNEL,
                 CMD_CONTINUITY_REQ,
                 CMD_INFO_REQ,
                 CMD_E77_UPDATE_BEGIN,
@@ -590,6 +601,7 @@ class NFCPStreamParser:
             CMD_SET_GROUP,
             CMD_SET_UNIQUE,
             CMD_SET_NETWORK,
+            CMD_SET_RADIO_CHANNEL,
             CMD_CONTINUITY_REQ,
             CMD_INFO_REQ,
             CMD_E77_UPDATE_BEGIN,

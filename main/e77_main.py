@@ -36,6 +36,26 @@ OPENLOAD_DUMMY_READ = False
 # Set to None to use live MC33996 open-load reads.
 CONTINUITY_TEST_OPEN_MASK = None
 
+# Build-time hardware safety switch. The upload/package scripts can compile a
+# temporary copy with this set to False by passing -HardwareSafetyOff.
+HARDWARE_SAFETY_ENABLED = True
+VPWR_ENABLE_PIN = "A11"
+VPWR_ENABLE_ACTIVE = 1
+VPWR_SETTLE_MS = 20
+BATTERY_ADC_PIN = "A0"
+SHORT_ADC_PIN = "A1"
+PREARM_TEST_PIN = "B3"
+PREARM_TEST_ACTIVE = 1
+PREARM_TEST_SETTLE_MS = 20
+CONT_VPWR_SETTLE_MS = 100
+BATTERY_ADC_MIN_RAW = 8000
+SHORT_ADC_MIN_RATIO_PCT = 25
+DISPLAY_I2C_ENABLED = False
+DISPLAY_I2C_BUS = 1
+DISPLAY_I2C_SCL = "B6"
+DISPLAY_I2C_SDA = "B7"
+DISPLAY_I2C_FREQ = 100000
+
 MC_SCK = "A8"
 MC_MOSI = "A10"
 MC_MISO = "A5"
@@ -105,6 +125,8 @@ def save_cfg():
 
 GROUP_ID, UNIQUE_ID, CUE_COUNT, RADIO_NETWORK_ID = load_cfg()
 ARMED = False
+fire_out_mask = 0
+fire_deadlines = [0] * 16
 PAIRING_MODE = False
 pair_button_down_ms = 0
 down_button_down = False
@@ -132,10 +154,155 @@ parser = NFCPStreamParser()
 nfcp = NFCP(node_id=0x01)
 radio = E77Gfsk()
 mc = None
+vpwr_enable = None
+prearm_test = None
+battery_adc = None
+short_adc = None
+hardware_safety_ready = False
+display_i2c = None
 green_led = Pin("B4", Pin.OUT, value=0)
 red_led = Pin("B5", Pin.OUT, value=0)
 pair_button = Pin("B8", Pin.IN, Pin.PULL_UP)
 down_button = Pin("B0", Pin.IN, Pin.PULL_UP)
+
+
+def display_i2c_init():
+    global display_i2c
+
+    if not DISPLAY_I2C_ENABLED:
+        return None
+
+    try:
+        display_i2c = machine.I2C(
+            DISPLAY_I2C_BUS,
+            scl=Pin(DISPLAY_I2C_SCL),
+            sda=Pin(DISPLAY_I2C_SDA),
+            freq=DISPLAY_I2C_FREQ,
+        )
+        print(
+            "Display I2C ready bus=%d scl=%s sda=%s" %
+            (DISPLAY_I2C_BUS, DISPLAY_I2C_SCL, DISPLAY_I2C_SDA)
+        )
+        return display_i2c
+    except Exception as e:
+        display_i2c = None
+        print("Display I2C init failed:", e)
+        return None
+
+
+def pin_active_value(active=True):
+    return VPWR_ENABLE_ACTIVE if active else 1 - VPWR_ENABLE_ACTIVE
+
+
+def prearm_active_value(active=True):
+    return PREARM_TEST_ACTIVE if active else 1 - PREARM_TEST_ACTIVE
+
+
+def hardware_safety_init():
+    global vpwr_enable, prearm_test, battery_adc, short_adc
+    global hardware_safety_ready
+
+    if not HARDWARE_SAFETY_ENABLED:
+        hardware_safety_ready = True
+        print("Hardware safety disabled by build flag")
+        return
+
+    try:
+        vpwr_enable = Pin(VPWR_ENABLE_PIN, Pin.OUT, value=pin_active_value(False))
+        prearm_test = Pin(PREARM_TEST_PIN, Pin.OUT, value=prearm_active_value(False))
+        battery_adc = machine.ADC(Pin(BATTERY_ADC_PIN))
+        short_adc = machine.ADC(Pin(SHORT_ADC_PIN))
+        hardware_safety_ready = True
+        print(
+            "Hardware safety enabled VPWR=%s BAT=%s SHORT=%s PREARM=%s" %
+            (VPWR_ENABLE_PIN, BATTERY_ADC_PIN, SHORT_ADC_PIN, PREARM_TEST_PIN)
+        )
+    except Exception as e:
+        hardware_safety_ready = False
+        print("Hardware safety init failed:", e)
+
+
+def vpwr_set(enabled):
+    if not HARDWARE_SAFETY_ENABLED:
+        return
+    if vpwr_enable is not None:
+        vpwr_enable.value(pin_active_value(bool(enabled)))
+
+
+def prearm_test_set(enabled):
+    if not HARDWARE_SAFETY_ENABLED:
+        return
+    if prearm_test is not None:
+        prearm_test.value(prearm_active_value(bool(enabled)))
+
+
+def read_battery_adc():
+    if not HARDWARE_SAFETY_ENABLED or battery_adc is None:
+        return 0
+    return battery_adc.read_u16()
+
+
+def read_short_adc():
+    if not HARDWARE_SAFETY_ENABLED or short_adc is None:
+        return 0
+    return short_adc.read_u16()
+
+
+def run_prearm_check():
+    if not HARDWARE_SAFETY_ENABLED:
+        return ACK_OK
+    if not hardware_safety_ready:
+        print("PREARM failed: hardware safety not ready")
+        return NACK_INTERNAL_ERROR
+
+    battery_raw = read_battery_adc()
+    if battery_raw < BATTERY_ADC_MIN_RAW:
+        print("PREARM failed: battery_raw=%d min=%d" % (battery_raw, BATTERY_ADC_MIN_RAW))
+        return NACK_INVALID_VALUE
+
+    prearm_test_set(True)
+    try:
+        time.sleep_ms(PREARM_TEST_SETTLE_MS)
+        short_raw = read_short_adc()
+    finally:
+        prearm_test_set(False)
+
+    print("PREARM battery_raw=%d short_raw=%d" % (battery_raw, short_raw))
+    if short_raw * 100 < battery_raw * SHORT_ADC_MIN_RATIO_PCT:
+        print("PREARM failed: short/drop detected")
+        return NACK_INVALID_VALUE
+
+    return ACK_OK
+
+
+def arm_module():
+    global ARMED
+
+    result = run_prearm_check()
+    if result != ACK_OK:
+        ARMED = False
+        vpwr_set(False)
+        return result
+
+    vpwr_set(True)
+    if HARDWARE_SAFETY_ENABLED:
+        time.sleep_ms(VPWR_SETTLE_MS)
+    ARMED = True
+    return ACK_OK
+
+
+def disarm_module():
+    global ARMED, script_running
+
+    ARMED = False
+    script_running = False
+    try:
+        if mc:
+            clear_fire_outputs()
+    except Exception:
+        pass
+    prearm_test_set(False)
+    vpwr_set(False)
 
 
 def ticks_rand(limit):
@@ -175,7 +342,7 @@ def update_status_leds(force=False):
                 script_running = False
                 try:
                     if mc:
-                        mc.digital_write_mask(0)
+                        clear_fire_outputs()
                 except Exception:
                     pass
             pair_button_down_ms = -1
@@ -483,6 +650,13 @@ def handle_continuity(pkt):
     if nbytes > 8:
         nbytes = 8
     try:
+        vpwr_was_enabled = bool(ARMED)
+        vpwr_auto_enabled = False
+        if HARDWARE_SAFETY_ENABLED and hardware_safety_ready and not vpwr_was_enabled:
+            vpwr_set(True)
+            vpwr_auto_enabled = True
+            time.sleep_ms(CONT_VPWR_SETTLE_MS)
+
         valid_mask = (1 << CUE_COUNT) - 1
         valid_mask &= (1 << (nbytes * 8)) - 1
         test_mask = valid_mask if CONT_DRIVE_DURING_TEST else None
@@ -500,56 +674,61 @@ def handle_continuity(pkt):
                 open_mask = (~raw_openload) & valid_mask
         data = open_mask.to_bytes(nbytes, "big")
         tx_nfcp(nfcp.build_response(UNIQUE_ID, CMD_CONTINUITY_RSP, data))
+        if vpwr_auto_enabled:
+            vpwr_set(False)
     except Exception:
+        if HARDWARE_SAFETY_ENABLED and not ARMED:
+            vpwr_set(False)
         reply_nack_if_unique(pkt, CMD_CONTINUITY_REQ, NACK_INTERNAL_ERROR)
 
 
-def mask_from_payload(data):
-    if not data or len(data) > 8:
-        return None
-    return int.from_bytes(data, "big") & 0xFFFF
+def clear_fire_outputs():
+    global fire_out_mask
+    fire_out_mask = 0
+    mc.digital_write_mask(0)
 
 
 def fire_mask(pkt, data):
-    mask = mask_from_payload(data)
-    if mask is None:
+    data = pkt.get("data", b"")
+    if not data or len(data) > 8:
         reply_nack_if_unique(pkt, CMD_FIRE, NACK_BAD_LENGTH)
         return
-    if not ARMED:
-        reply_nack_if_unique(pkt, CMD_FIRE, NACK_REJECTED_ARMED)
-        return
-    try:
-        mc.digital_write_mask(mask)
-        time.sleep_ms(FIRE_PULSE_MS)
-        mc.digital_write_mask(0)
+    result = fire_mask16(int.from_bytes(data, "big") & 0xFFFF)
+    if result == ACK_OK:
         reply_ack_if_unique(pkt, CMD_FIRE)
-    except Exception:
-        try:
-            mc.digital_write_mask(0)
-        except Exception:
-            pass
-        reply_nack_if_unique(pkt, CMD_FIRE, NACK_INTERNAL_ERROR)
+    else:
+        reply_nack_if_unique(pkt, CMD_FIRE, result)
 
 
-def fire_mask16(mask16, require_armed=True):
-    if require_armed and not ARMED:
+def fire_mask16(mask16):
+    global fire_out_mask
+
+    if not ARMED:
         return NACK_REJECTED_ARMED
 
     mask16 &= 0xFFFF
-    if mask16 == 0:
-        return ACK_OK
+    end_ms = time.ticks_ms() + FIRE_PULSE_MS
+    for i in range(16):
+        if mask16 & (1 << i):
+            fire_deadlines[i] = end_ms
+    fire_out_mask |= mask16
+    mc.digital_write_mask(fire_out_mask)
+    return ACK_OK
 
-    try:
-        mc.digital_write_mask(mask16)
-        time.sleep_ms(FIRE_PULSE_MS)
-        mc.digital_write_mask(0)
-        return ACK_OK
-    except Exception:
-        try:
-            mc.digital_write_mask(0)
-        except Exception:
-            pass
-        return NACK_INTERNAL_ERROR
+
+def poll_fire_outputs():
+    global fire_out_mask
+
+    if not fire_out_mask:
+        return
+
+    now = time.ticks_ms()
+    for i in range(16):
+        bit = 1 << i
+        if fire_out_mask & bit and time.ticks_diff(now, fire_deadlines[i]) >= 0:
+            fire_out_mask &= ~bit
+
+    mc.digital_write_mask(fire_out_mask)
 
 
 def clear_script(script_id=None):
@@ -648,7 +827,7 @@ def handle_script_stop(pkt):
     script_running = False
     script_last_heartbeat_ms = 0
     try:
-        mc.digital_write_mask(0)
+        clear_fire_outputs()
     except Exception:
         pass
     reply_ack_if_unique(pkt, CMD_SCRIPT_STOP)
@@ -675,7 +854,7 @@ def run_script_scheduler():
     if not ARMED:
         script_running = False
         try:
-            mc.digital_write_mask(0)
+            clear_fire_outputs()
         except Exception:
             pass
         return
@@ -683,7 +862,7 @@ def run_script_scheduler():
     if time.ticks_diff(time.ticks_ms(), script_last_heartbeat_ms) > SCRIPT_HEARTBEAT_TIMEOUT_MS:
         script_running = False
         try:
-            mc.digital_write_mask(0)
+            clear_fire_outputs()
         except Exception:
             pass
         return
@@ -693,7 +872,7 @@ def run_script_scheduler():
         event_ms, cue_mask = script_entries[script_next_index]
         if event_ms > elapsed:
             break
-        fire_mask16(cue_mask, require_armed=True)
+        fire_mask16(cue_mask)
         script_next_index += 1
 
     if script_next_index >= len(script_entries):
@@ -720,18 +899,16 @@ def handle(pkt):
         return
 
     if cmd == CMD_ARM:
-        ARMED = True
+        result = arm_module()
         update_status_leds(force=True)
-        reply_ack_if_unique(pkt, CMD_ARM)
+        if result == ACK_OK:
+            reply_ack_if_unique(pkt, CMD_ARM)
+        else:
+            reply_nack_if_unique(pkt, CMD_ARM, result)
         return
 
     if cmd == CMD_DISARM:
-        ARMED = False
-        script_running = False
-        try:
-            mc.digital_write_mask(0)
-        except Exception:
-            pass
+        disarm_module()
         update_status_leds(force=True)
         reply_ack_if_unique(pkt, CMD_DISARM)
         return
@@ -843,6 +1020,8 @@ def handle_radio_payload(payload):
 def main():
     global mc
     radio.init()
+    hardware_safety_init()
+    display_i2c_init()
     update_status_leds(force=True)
     mc = MC33996()
     mc.begin()
@@ -853,11 +1032,14 @@ def main():
             if payload:
                 handle_radio_payload(payload)
             run_script_scheduler()
+            poll_fire_outputs()
             poll_update_timeout()
             time.sleep_ms(5)
     finally:
         if mc:
-            mc.digital_write_mask(0)
+            clear_fire_outputs()
+        prearm_test_set(False)
+        vpwr_set(False)
 
 
 main()
