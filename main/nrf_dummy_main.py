@@ -24,6 +24,8 @@ RADIO_CHANNEL = getattr(node_config, "RADIO_CHANNEL", 40)
 RADIO_ADDRESS = 0x67676767
 RADIO_TX_POWER = 8
 RADIO_RX_TIMEOUT_MS = 10
+RX_DEDUPE_WINDOW_MS = 1500
+RX_DEDUPE_CACHE_LIMIT = 16
 
 DISCOVER_BACKOFF_MIN_MS = 250
 DISCOVER_BACKOFF_MAX_MS = 500
@@ -31,7 +33,7 @@ DISCOVER_RESPONSE_REPEATS = 3
 DISCOVER_RESPONSE_GAP_MS = 35
 SIM_OPEN_CUE_COUNT = 2
 SIM_REFRESH_MS = 2500
-SCRIPT_MAX_ENTRIES = 120
+SCRIPT_MAX_ENTRIES = 192
 SCRIPT_HEARTBEAT_TIMEOUT_MS = 1500
 SCRIPT_TIME_SYNC_VALID_MS = 10000
 
@@ -120,15 +122,15 @@ def remember_rx_packet(seq, pkt):
 
     for item in rx_seen:
         age = time.ticks_diff(now, item[0])
-        if age < 1500:
+        if age < RX_DEDUPE_WINDOW_MS:
             kept.append(item)
             if item[1] == seq and item[2] == signature:
                 duplicate = True
 
     if not duplicate:
         kept.append((now, seq, signature))
-        if len(kept) > 16:
-            kept = kept[-16:]
+        if len(kept) > RX_DEDUPE_CACHE_LIMIT:
+            kept = kept[-RX_DEDUPE_CACHE_LIMIT:]
 
     rx_seen = kept
     return duplicate
@@ -404,6 +406,15 @@ def handle_script_heartbeat(pkt):
         script_last_event = "heartbeat"
 
 
+def fire_script_event(event_ms):
+    fired = 0
+    for entry_ms, cue_mask in script_entries:
+        if entry_ms == event_ms:
+            fire_mask(cue_mask)
+            fired += 1
+    return fired
+
+
 def handle_script_step(pkt):
     global script_last_event
 
@@ -421,13 +432,7 @@ def handle_script_step(pkt):
         script_last_event = "step invalid"
         return
 
-    fired = 0
-    for entry_ms, cue_mask in script_entries:
-        if entry_ms == event_ms:
-            fire_mask(cue_mask)
-            fired += 1
-
-    if not fired:
+    if not fire_script_event(event_ms):
         script_last_event = "step missing"
         return
 

@@ -31,7 +31,7 @@ SPEED_TEST_TIMEOUT_MS = 2000
 ACK_RETRY_ATTEMPTS = 2
 ACK_RETRY_DELAY_MS = 100
 E77_UPDATE_CHUNK_SIZE = 160
-SCRIPT_LOAD_CHUNK_ENTRIES = 32
+SCRIPT_LOAD_CHUNK_ENTRIES = 4
 SCRIPT_START_DELAY_MS = 2000
 SCRIPT_START_BROADCAST_REPEATS = 3
 SCRIPT_TIME_SYNC_REPEATS = 3
@@ -1165,12 +1165,17 @@ def script_clear_for_uid(uid_int, script_id, timeout_ms=SPEED_TEST_TIMEOUT_MS):
 
 
 def script_load_for_uid(uid_int, script_id, entries, timeout_ms=SPEED_TEST_TIMEOUT_MS):
+    ok, _code = script_load_status_for_uid(uid_int, script_id, entries, timeout_ms)
+    return ok
+
+
+def script_load_status_for_uid(uid_int, script_id, entries, timeout_ms=SPEED_TEST_TIMEOUT_MS):
     chunk_index = 0
     offset = 0
 
     while offset < len(entries):
         chunk = entries[offset:offset + SCRIPT_LOAD_CHUNK_ENTRIES]
-        ok, _code = send_with_ack_detail(
+        ok, code = send_with_ack_detail(
             uid_int,
             nfcp.CMD_SCRIPT_LOAD,
             lambda: nfcp_tx.build_script_load(uid_int, script_id, chunk_index, chunk),
@@ -1179,12 +1184,12 @@ def script_load_for_uid(uid_int, script_id, entries, timeout_ms=SPEED_TEST_TIMEO
         )
 
         if not ok:
-            return False
+            return False, code
 
         offset += len(chunk)
         chunk_index += 1
 
-    return True
+    return True, nfcp.ACK_OK
 
 
 def script_master_ticks_ms():
@@ -1284,6 +1289,7 @@ nfcp.e77_update_reboot_for_uid = e77_update_reboot_for_uid
 nfcp.script_clear_status_for_uid = script_clear_status_for_uid
 nfcp.script_clear_for_uid = script_clear_for_uid
 nfcp.script_load_for_uid = script_load_for_uid
+nfcp.script_load_status_for_uid = script_load_status_for_uid
 nfcp.script_start_broadcast = script_start_broadcast
 nfcp.script_start_for_uid = script_start_for_uid
 nfcp.script_start_status_for_uid = script_start_status_for_uid
@@ -2454,15 +2460,23 @@ class NFCPGui:
                 self.set_status("Script upload clear failed: " + reason)
                 continue
 
-            if not nfcp.script_load_for_uid(uid, script_id, entries):
+            load_ok, load_code = nfcp.script_load_status_for_uid(uid, script_id, entries)
+            if not load_ok:
+                reason = ack_code_text(load_code)
                 self.script_fire_upload_results.append({
                     "uid": uid,
                     "entries": len(entries),
                     "ok": False,
-                    "reason": "load failed"
+                    "reason": "load " + reason
                 })
-                self.set_script_fire_status_label("Upload failed %s" % uid_text)
-                self.set_status("Script upload failed")
+                self.set_script_fire_status_label(
+                    "Upload failed %s: %s" %
+                    (
+                        uid_text,
+                        reason
+                    )
+                )
+                self.set_status("Script upload failed: " + reason)
                 continue
 
             self.script_fire_upload_results.append({
@@ -2528,6 +2542,22 @@ class NFCPGui:
                 )
         except Exception as e:
             print("Script heartbeat failed:", e)
+
+    def stop_module_auto_script(self, error_prefix="Script stop broadcast failed"):
+        if not self.script_fire_module_auto_active:
+            return
+
+        script_id = self.script_fire_uploaded_id or 0
+        try:
+            if self.script_fire_uploaded_uids:
+                for uid in self.script_fire_uploaded_uids:
+                    nfcp.script_stop_for_uid(uid, script_id)
+            else:
+                nfcp.script_stop_broadcast(script_id)
+        except Exception as e:
+            print(error_prefix + ":", e)
+
+        self.script_fire_module_auto_active = False
 
     def fire_prepared_script_step(self, step):
         packets_sent = 0
@@ -2748,16 +2778,7 @@ class NFCPGui:
                 self.script_fire_started_ms
             )
 
-        if self.script_fire_module_auto_active:
-            try:
-                if self.script_fire_uploaded_uids:
-                    for uid in self.script_fire_uploaded_uids:
-                        nfcp.script_stop_for_uid(uid, self.script_fire_uploaded_id or 0)
-                else:
-                    nfcp.script_stop_broadcast(self.script_fire_uploaded_id or 0)
-            except Exception as e:
-                print("Script pause stop broadcast failed:", e)
-            self.script_fire_module_auto_active = False
+        self.stop_module_auto_script("Script pause stop broadcast failed")
 
         self.script_fire_running = False
         self.update_script_fire_clock(force=True)
@@ -2767,15 +2788,7 @@ class NFCPGui:
         self.set_status("Script fire paused")
 
     def script_fire_stop(self, event=None):
-        if self.script_fire_module_auto_active:
-            try:
-                if self.script_fire_uploaded_uids:
-                    for uid in self.script_fire_uploaded_uids:
-                        nfcp.script_stop_for_uid(uid, self.script_fire_uploaded_id or 0)
-                else:
-                    nfcp.script_stop_broadcast(self.script_fire_uploaded_id or 0)
-            except Exception as e:
-                print("Script stop broadcast failed:", e)
+        self.stop_module_auto_script()
 
         self.script_fire_running = False
         self.script_fire_module_auto_active = False
@@ -2803,16 +2816,7 @@ class NFCPGui:
         if self.script_fire_running:
             self.script_fire_elapsed_ms = self.get_script_fire_elapsed_ms()
             self.script_fire_running = False
-            if self.script_fire_module_auto_active:
-                try:
-                    if self.script_fire_uploaded_uids:
-                        for uid in self.script_fire_uploaded_uids:
-                            nfcp.script_stop_for_uid(uid, self.script_fire_uploaded_id or 0)
-                    else:
-                        nfcp.script_stop_broadcast(self.script_fire_uploaded_id or 0)
-                except Exception as e:
-                    print("Script stop broadcast failed:", e)
-                self.script_fire_module_auto_active = False
+            self.stop_module_auto_script()
 
         self.script_fire_mode = "step"
         self.reset_script_fire_trigger_state()

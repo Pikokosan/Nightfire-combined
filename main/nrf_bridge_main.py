@@ -38,6 +38,8 @@ UART_RX_PIN = getattr(bridge_config, "UART_RX_PIN", DEFAULT_UART_RX_PIN)
 RADIO_POLL_TIMEOUT_MS = 50
 UART_READ_MAX = 64
 POST_SEND_RX_WINDOW_MS = 1500
+RX_DEDUPE_WINDOW_MS = 1500
+RX_DEDUPE_CACHE_LIMIT = 16
 SCAN_BUSY_DBM = -85
 SCAN_SAMPLE_MS = 45
 SCAN_SAMPLE_INTERVAL_MS = 3
@@ -147,15 +149,15 @@ def remember_rx_packet(seq, frame):
 
     for item in rx_seen:
         age = time.ticks_diff(now, item[0])
-        if age < 1500:
+        if age < RX_DEDUPE_WINDOW_MS:
             kept.append(item)
             if item[1] == seq and item[2] == signature:
                 duplicate = True
 
     if not duplicate:
         kept.append((now, seq, signature))
-        if len(kept) > 16:
-            kept = kept[-16:]
+        if len(kept) > RX_DEDUPE_CACHE_LIMIT:
+            kept = kept[-RX_DEDUPE_CACHE_LIMIT:]
 
     rx_seen = kept
     return duplicate
