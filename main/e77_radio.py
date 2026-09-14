@@ -145,6 +145,10 @@ def parse_stats_payload(payload):
         stats["cca_ok"] = int_from_be(payload[38:42])
         stats["cca_busy"] = int_from_be(payload[42:46])
 
+    if len(payload) >= 54:
+        stats["rx_duplicate"] = int_from_be(payload[46:50])
+        stats["rx_wrong_network"] = int_from_be(payload[50:54])
+
     return stats
 
 

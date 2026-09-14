@@ -139,6 +139,11 @@ def write(pkt, unique_id, ack_cb, nack_cb):
         nack_cb(pkt, CMD_E77_UPDATE_WRITE, NACK_INVALID_VALUE)
         return
 
+    if offset < received_size and offset + len(chunk) <= received_size:
+        last_ms = time.ticks_ms()
+        ack_cb(pkt, CMD_E77_UPDATE_WRITE)
+        return
+
     if offset != received_size or received_size + len(chunk) > expected_size:
         nack_cb(pkt, CMD_E77_UPDATE_WRITE, NACK_INVALID_VALUE)
         return

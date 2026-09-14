@@ -49,6 +49,7 @@ CMD_SCRIPT_START = 0x72
 CMD_SCRIPT_STOP  = 0x73
 CMD_SCRIPT_HEARTBEAT = 0x74
 CMD_TIME_SYNC = 0x75
+CMD_SCRIPT_STEP = 0x76
 
 # speed test / ping
 CMD_PING         = 0x7F   # Unique-only ping for latency/throughput tests
@@ -356,6 +357,13 @@ class NFCP:
         )
         return self.build_unique_command(target_unique, CMD_SCRIPT_HEARTBEAT, data)
 
+    def build_script_step(self, target_unique: int, script_id: int, event_ms: int) -> bytes:
+        data = (
+            (script_id & 0xFFFF).to_bytes(2, "big") +
+            (event_ms & 0xFFFFFFFF).to_bytes(4, "big")
+        )
+        return self.build_unique_command(target_unique, CMD_SCRIPT_STEP, data)
+
     # Response builder
     def build_response(self, src_unique: int, cmd: int, data: bytes = b"") -> bytes:
         payload = (src_unique & 0xFFFFFFFF).to_bytes(4, "big") + bytes([cmd & 0xFF]) + data
@@ -585,6 +593,7 @@ class NFCPStreamParser:
                 CMD_E77_UPDATE_REBOOT,
                 CMD_SCRIPT_CLEAR,
                 CMD_SCRIPT_LOAD,
+                CMD_SCRIPT_STEP,
             ):
                 return None
 
@@ -619,6 +628,7 @@ class NFCPStreamParser:
             CMD_E77_UPDATE_REBOOT,
             CMD_SCRIPT_CLEAR,
             CMD_SCRIPT_LOAD,
+            CMD_SCRIPT_STEP,
         ) and self.frame_type != SOF_UNIQUE:
             return None
 

@@ -31,6 +31,9 @@ DISCOVER_RESPONSE_REPEATS = 3
 DISCOVER_RESPONSE_GAP_MS = 35
 SIM_OPEN_CUE_COUNT = 2
 SIM_REFRESH_MS = 2500
+SCRIPT_MAX_ENTRIES = 120
+SCRIPT_HEARTBEAT_TIMEOUT_MS = 1500
+SCRIPT_TIME_SYNC_VALID_MS = 10000
 
 def get_default_unique_id():
     try:
@@ -55,11 +58,23 @@ CUE_COUNT = DEFAULT_CUE_COUNT
 DEVICE_TYPE = DEFAULT_DEVICE_TYPE
 NETWORK_ID = getattr(node_config, "NETWORK_ID", DEFAULT_NETWORK_ID)
 ARMED = False
+script_id_loaded = None
+script_entries = []
+script_running = False
+script_start_ms = 0
+script_next_index = 0
+script_last_heartbeat_ms = 0
+script_last_event = "idle"
+script_time_synced = False
+script_master_offset_ms = 0
+script_time_sync_local_ms = 0
 
 parser = NFCPStreamParser()
 nfcp = NFCP(node_id=0x01)
 _sim_open = set()
 _sim_last_refresh = 0
+tx_seq = 1
+rx_seen = []
 
 
 def ticks_rand(limit):
@@ -68,12 +83,55 @@ def ticks_rand(limit):
     return (time.ticks_us() ^ time.ticks_ms()) % limit
 
 
+def next_tx_seq():
+    global tx_seq
+
+    seq = tx_seq & 0xFF
+    tx_seq = (tx_seq + 1) & 0xFF
+    if tx_seq == 0:
+        tx_seq = 1
+    return seq
+
+
 def tx_nfcp(frame, repeats=3, gap_ms=20):
-    payload = (NETWORK_ID & 0xFFFF).to_bytes(2, "big") + frame
+    payload = (NETWORK_ID & 0xFFFF).to_bytes(2, "big") + bytes([next_tx_seq()]) + frame
     for i in range(repeats):
         nrf_radio.send(payload)
         if i + 1 < repeats:
             time.sleep_ms(gap_ms)
+
+
+def remember_rx_packet(seq, pkt):
+    global rx_seen
+
+    if seq is None:
+        return False
+
+    now = time.ticks_ms()
+    signature = (
+        pkt.get("frame_type"),
+        pkt.get("src"),
+        pkt.get("target"),
+        pkt.get("cmd"),
+        bytes(pkt.get("data", b"")[:16]),
+    )
+    kept = []
+    duplicate = False
+
+    for item in rx_seen:
+        age = time.ticks_diff(now, item[0])
+        if age < 1500:
+            kept.append(item)
+            if item[1] == seq and item[2] == signature:
+                duplicate = True
+
+    if not duplicate:
+        kept.append((now, seq, signature))
+        if len(kept) > 16:
+            kept = kept[-16:]
+
+    rx_seen = kept
+    return duplicate
 
 
 def address_matches(pkt):
@@ -179,6 +237,36 @@ def handle_continuity(pkt):
     tx_nfcp(nfcp.build_response(UNIQUE_ID, CMD_CONTINUITY_RSP, data))
 
 
+def fire_mask(mask):
+    print("DUMMY FIRE mask=0x%04X" % (mask & 0xFFFF))
+
+
+def handle_time_sync(pkt):
+    global script_time_synced, script_master_offset_ms, script_time_sync_local_ms, script_last_event
+
+    data = pkt.get("data", b"")
+    if len(data) < 4:
+        return
+
+    master_ms = int.from_bytes(data[0:4], "big") & 0x3FFFFFFF
+    local_ms = time.ticks_ms() & 0x3FFFFFFF
+    script_master_offset_ms = time.ticks_diff(master_ms, local_ms)
+    script_time_sync_local_ms = time.ticks_ms()
+    script_time_synced = True
+    script_last_event = "time sync"
+
+
+def script_time_sync_valid():
+    return (
+        script_time_synced and
+        time.ticks_diff(time.ticks_ms(), script_time_sync_local_ms) <= SCRIPT_TIME_SYNC_VALID_MS
+    )
+
+
+def master_ms_to_local_ms(master_ms):
+    return time.ticks_add(master_ms & 0x3FFFFFFF, -script_master_offset_ms)
+
+
 def handle_fire(pkt):
     data = pkt.get("data", b"")
     if not data or len(data) > 8:
@@ -189,8 +277,191 @@ def handle_fire(pkt):
         return
 
     mask = int.from_bytes(data, "big") & 0xFFFF
-    print("DUMMY FIRE mask=0x%04X" % mask)
+    fire_mask(mask)
     reply_ack_if_unique(pkt, CMD_FIRE)
+
+
+def clear_script(script_id=None):
+    global script_id_loaded, script_entries, script_running, script_start_ms, script_next_index
+    global script_last_heartbeat_ms, script_last_event
+
+    script_id_loaded = script_id
+    script_entries = []
+    script_running = False
+    script_start_ms = 0
+    script_next_index = 0
+    script_last_heartbeat_ms = 0
+    script_last_event = "clear"
+    print("SCRIPT CLEAR id=%s" % ("--" if script_id is None else "%04X" % script_id))
+
+
+def handle_script_clear(pkt):
+    data = pkt.get("data", b"")
+    if len(data) != 2:
+        reply_nack_if_unique(pkt, CMD_SCRIPT_CLEAR, NACK_BAD_LENGTH)
+        return
+
+    clear_script(int.from_bytes(data, "big") & 0xFFFF)
+    reply_ack_if_unique(pkt, CMD_SCRIPT_CLEAR)
+
+
+def handle_script_load(pkt):
+    global script_id_loaded, script_entries, script_last_event
+
+    data = pkt.get("data", b"")
+    if len(data) < 4:
+        reply_nack_if_unique(pkt, CMD_SCRIPT_LOAD, NACK_BAD_LENGTH)
+        return
+
+    script_id = int.from_bytes(data[0:2], "big") & 0xFFFF
+    entry_count = data[3]
+    payload = data[4:]
+    if len(payload) != entry_count * 6:
+        reply_nack_if_unique(pkt, CMD_SCRIPT_LOAD, NACK_BAD_LENGTH)
+        return
+
+    if script_id_loaded != script_id:
+        clear_script(script_id)
+
+    if len(script_entries) + entry_count > SCRIPT_MAX_ENTRIES:
+        reply_nack_if_unique(pkt, CMD_SCRIPT_LOAD, NACK_BUSY)
+        return
+
+    pos = 0
+    for _ in range(entry_count):
+        event_ms = int.from_bytes(payload[pos:pos + 4], "big")
+        cue_mask = int.from_bytes(payload[pos + 4:pos + 6], "big") & 0xFFFF
+        pos += 6
+        if cue_mask:
+            script_entries.append((event_ms, cue_mask))
+
+    script_entries.sort(key=lambda item: item[0])
+    script_last_event = "load"
+    print("SCRIPT LOAD id=%04X chunk=%d add=%d total=%d" % (script_id, data[2], entry_count, len(script_entries)))
+    reply_ack_if_unique(pkt, CMD_SCRIPT_LOAD)
+
+
+def handle_script_start(pkt):
+    global script_running, script_start_ms, script_next_index, script_last_heartbeat_ms, script_last_event
+
+    if not ARMED:
+        script_last_event = "start disarmed"
+        reply_nack_if_unique(pkt, CMD_SCRIPT_START, NACK_REJECTED_ARMED)
+        return
+
+    data = pkt.get("data", b"")
+    if len(data) < 4:
+        reply_nack_if_unique(pkt, CMD_SCRIPT_START, NACK_BAD_LENGTH)
+        return
+
+    script_id = int.from_bytes(data[0:2], "big") & 0xFFFF
+    start_delay_ms = int.from_bytes(data[2:4], "big")
+    offset_ms = int.from_bytes(data[4:8], "big") if len(data) >= 8 else 0
+    start_master_ms = int.from_bytes(data[8:12], "big") & 0x3FFFFFFF if len(data) >= 12 else None
+
+    if script_id_loaded != script_id or not script_entries:
+        script_last_event = "start invalid"
+        reply_nack_if_unique(pkt, CMD_SCRIPT_START, NACK_INVALID_VALUE)
+        return
+
+    script_next_index = 0
+    while script_next_index < len(script_entries):
+        if script_entries[script_next_index][0] >= offset_ms:
+            break
+        script_next_index += 1
+
+    if start_master_ms is not None and script_time_sync_valid():
+        script_start_ms = time.ticks_add(master_ms_to_local_ms(start_master_ms), -offset_ms)
+    else:
+        script_start_ms = time.ticks_add(time.ticks_ms(), start_delay_ms - offset_ms)
+    script_running = True
+    script_last_heartbeat_ms = time.ticks_ms()
+    script_last_event = "start"
+    print("SCRIPT START id=%04X entries=%d offset=%d next=%d" % (script_id, len(script_entries), offset_ms, script_next_index))
+    reply_ack_if_unique(pkt, CMD_SCRIPT_START)
+
+
+def handle_script_stop(pkt):
+    global script_running, script_last_heartbeat_ms, script_last_event
+
+    script_running = False
+    script_last_heartbeat_ms = 0
+    script_last_event = "stop"
+    print("SCRIPT STOP")
+    reply_ack_if_unique(pkt, CMD_SCRIPT_STOP)
+
+
+def handle_script_heartbeat(pkt):
+    global script_last_heartbeat_ms, script_last_event
+
+    data = pkt.get("data", b"")
+    if len(data) < 2:
+        return
+
+    script_id = int.from_bytes(data[0:2], "big") & 0xFFFF
+    if script_running and script_id_loaded == script_id:
+        script_last_heartbeat_ms = time.ticks_ms()
+        script_last_event = "heartbeat"
+
+
+def handle_script_step(pkt):
+    global script_last_event
+
+    if not ARMED:
+        script_last_event = "step disarmed"
+        return
+
+    data = pkt.get("data", b"")
+    if len(data) != 6:
+        return
+
+    script_id = int.from_bytes(data[0:2], "big") & 0xFFFF
+    event_ms = int.from_bytes(data[2:6], "big")
+    if script_id_loaded != script_id:
+        script_last_event = "step invalid"
+        return
+
+    fired = 0
+    for entry_ms, cue_mask in script_entries:
+        if entry_ms == event_ms:
+            fire_mask(cue_mask)
+            fired += 1
+
+    if not fired:
+        script_last_event = "step missing"
+        return
+
+    script_last_event = "step"
+
+
+def run_script_scheduler():
+    global script_running, script_next_index, script_last_event
+
+    if not script_running:
+        return
+    if not ARMED:
+        script_running = False
+        script_last_event = "stopped disarmed"
+        return
+    if time.ticks_diff(time.ticks_ms(), script_last_heartbeat_ms) > SCRIPT_HEARTBEAT_TIMEOUT_MS:
+        script_running = False
+        script_last_event = "hb timeout"
+        print("SCRIPT stopped - heartbeat timeout")
+        return
+
+    elapsed = time.ticks_diff(time.ticks_ms(), script_start_ms)
+    while script_next_index < len(script_entries):
+        event_ms, cue_mask = script_entries[script_next_index]
+        if event_ms > elapsed:
+            break
+        script_last_event = "fire"
+        print("SCRIPT FIRE mask=0x%04X event=%d elapsed=%d" % (cue_mask, event_ms, elapsed))
+        fire_mask(cue_mask)
+        script_next_index += 1
+
+    if script_next_index >= len(script_entries):
+        script_running = False
+        script_last_event = "complete"
 
 
 def handle(pkt):
@@ -227,6 +498,34 @@ def handle(pkt):
 
     if cmd == CMD_FIRE:
         handle_fire(pkt)
+        return
+
+    if cmd == CMD_SCRIPT_CLEAR:
+        handle_script_clear(pkt)
+        return
+
+    if cmd == CMD_SCRIPT_LOAD:
+        handle_script_load(pkt)
+        return
+
+    if cmd == CMD_SCRIPT_START:
+        handle_script_start(pkt)
+        return
+
+    if cmd == CMD_SCRIPT_STOP:
+        handle_script_stop(pkt)
+        return
+
+    if cmd == CMD_SCRIPT_HEARTBEAT:
+        handle_script_heartbeat(pkt)
+        return
+
+    if cmd == CMD_TIME_SYNC:
+        handle_time_sync(pkt)
+        return
+
+    if cmd == CMD_SCRIPT_STEP:
+        handle_script_step(pkt)
         return
 
     if cmd == CMD_E77_UPDATE_BEGIN:
@@ -319,9 +618,18 @@ def handle_radio_payload(payload):
     if network_id != NETWORK_ID:
         return
 
-    for b in payload[2:]:
+    radio_seq = None
+    nfcp_offset = 2
+
+    if len(payload) >= 4 and payload[2] != 0xFF and payload[3] == 0xFF:
+        radio_seq = payload[2]
+        nfcp_offset = 3
+
+    for b in payload[nfcp_offset:]:
         pkt = parser.feed(b)
         if pkt and address_matches(pkt):
+            if remember_rx_packet(radio_seq, pkt):
+                return
             handle(pkt)
 
 
@@ -338,6 +646,7 @@ def main():
 
     while True:
         module_ota.poll_timeout()
+        run_script_scheduler()
         payload = nrf_radio.recv(RADIO_RX_TIMEOUT_MS)
         if payload:
             handle_radio_payload(payload)

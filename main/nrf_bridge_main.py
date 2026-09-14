@@ -45,6 +45,9 @@ SCAN_CANDIDATE_CHANNELS = (0,) + tuple(range(74, 101))
 
 local_parser = e77_radio.E77FrameParser()
 uart = None
+rx_seen = []
+stat_rx_duplicate = 0
+stat_rx_wrong_network = 0
 
 
 def int_to_be_signed(value, size):
@@ -118,6 +121,8 @@ def build_stats_payload():
     payload += e77_radio.int_to_be(stat_value(stats, "tx_busy"), 4)
     payload += e77_radio.int_to_be(stat_value(stats, "cca_ok"), 4)
     payload += e77_radio.int_to_be(stat_value(stats, "cca_busy"), 4)
+    payload += e77_radio.int_to_be(stat_rx_duplicate, 4)
+    payload += e77_radio.int_to_be(stat_rx_wrong_network, 4)
     return bytes(payload)
 
 
@@ -127,6 +132,33 @@ def write_local(seq, cmd, payload=b"", flags=e77_radio.FLAG_RESPONSE):
 
 def write_error(seq, cmd, code=1):
     write_local(seq, cmd, bytes([code & 0xFF]), e77_radio.FLAG_RESPONSE | e77_radio.FLAG_ERROR)
+
+
+def remember_rx_packet(seq, frame):
+    global rx_seen
+
+    if seq is None:
+        return False
+
+    now = time.ticks_ms()
+    signature = bytes(frame[:24])
+    kept = []
+    duplicate = False
+
+    for item in rx_seen:
+        age = time.ticks_diff(now, item[0])
+        if age < 1500:
+            kept.append(item)
+            if item[1] == seq and item[2] == signature:
+                duplicate = True
+
+    if not duplicate:
+        kept.append((now, seq, signature))
+        if len(kept) > 16:
+            kept = kept[-16:]
+
+    rx_seen = kept
+    return duplicate
 
 
 def set_network(network_id):
@@ -224,6 +256,8 @@ def build_scan_payload():
 
 
 def handle_local_frame(frame):
+    global stat_rx_duplicate, stat_rx_wrong_network
+
     if frame.cmd == e77_radio.CMD_PING:
         write_local(frame.seq, e77_radio.CMD_PONG)
         return
@@ -239,6 +273,8 @@ def handle_local_frame(frame):
     if frame.cmd == e77_radio.CMD_CLEAR_STATS:
         try:
             nrf_radio.clear_stats()
+            stat_rx_duplicate = 0
+            stat_rx_wrong_network = 0
             write_local(frame.seq, e77_radio.CMD_CLEAR_STATS)
         except Exception:
             write_error(frame.seq, e77_radio.CMD_CLEAR_STATS, 0)
@@ -275,7 +311,7 @@ def handle_local_frame(frame):
             write_error(frame.seq, e77_radio.CMD_SEND_NFCP, 3)
             return
 
-        radio_payload = e77_radio.int_to_be(NETWORK_ID & 0xFFFF, 2) + frame.payload
+        radio_payload = e77_radio.int_to_be(NETWORK_ID & 0xFFFF, 2) + bytes([frame.seq & 0xFF]) + frame.payload
         try:
             nrf_radio.send(radio_payload)
             write_local(frame.seq, e77_radio.CMD_SEND_NFCP, b"\x00")
@@ -308,15 +344,29 @@ def handle_local_uart():
 
 
 def handle_radio_packet(payload):
+    global stat_rx_duplicate, stat_rx_wrong_network
+
     if len(payload) < 3:
         return
 
     network_id = e77_radio.int_from_be(payload[:2])
     if network_id != NETWORK_ID:
+        stat_rx_wrong_network += 1
         return
 
+    radio_seq = None
+    nfcp_offset = 2
+
+    if len(payload) >= 4 and payload[2] != 0xFF and payload[3] == 0xFF:
+        radio_seq = payload[2]
+        nfcp_offset = 3
+
     rssi = nrf_radio.last_rssi()
-    nfcp_frame = payload[2:]
+    nfcp_frame = payload[nfcp_offset:]
+    if remember_rx_packet(radio_seq, nfcp_frame):
+        stat_rx_duplicate += 1
+        return
+
     rx_payload = int_to_be_signed(rssi, 2) + int_to_be_signed(0, 1) + nfcp_frame
     write_local(0, e77_radio.CMD_NFCP_RX, rx_payload, 0)
 

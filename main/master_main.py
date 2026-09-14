@@ -1249,6 +1249,10 @@ def script_heartbeat_for_uid(uid_int, script_id, elapsed_ms=0):
     radio_write_nfcp(nfcp_tx.build_script_heartbeat(uid_int, script_id, elapsed_ms))
 
 
+def script_step_for_uid(uid_int, script_id, event_ms):
+    radio_write_nfcp(nfcp_tx.build_script_step(uid_int, script_id, event_ms))
+
+
 nfcp.load_device_db = load_device_db
 nfcp.save_device_db = save_device_db
 nfcp.clear_device_db = clear_device_db
@@ -1288,6 +1292,7 @@ nfcp.script_stop_broadcast = script_stop_broadcast
 nfcp.script_stop_for_uid = script_stop_for_uid
 nfcp.script_heartbeat_broadcast = script_heartbeat_broadcast
 nfcp.script_heartbeat_for_uid = script_heartbeat_for_uid
+nfcp.script_step_for_uid = script_step_for_uid
 
 
 class NFCPGui:
@@ -2054,9 +2059,6 @@ class NFCPGui:
         self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
 
     def format_script_upload_summary(self):
-        if self.script_fire_mode != "auto":
-            return "Upload: Step mode"
-
         if not self.script_fire_upload_results:
             return "Upload: Not loaded"
 
@@ -2178,6 +2180,10 @@ class NFCPGui:
         if self.script_fire_auto_index >= len(self.loaded_script_steps):
             self.script_fire_auto_index = 0
         self.script_fire_prepared = False
+        self.script_fire_uploaded_id = None
+        self.script_fire_uploaded_uids = []
+        self.script_fire_upload_results = []
+        self.script_fire_upload_warning = False
 
     def get_script_trigger_key(self):
         try:
@@ -2298,6 +2304,7 @@ class NFCPGui:
         for step in self.loaded_script_steps:
             packets = []
             fired_cues = 0
+            step_uids = []
             channel_masks = self.build_script_step_channel_masks(
                 step.get("events", [])
             )
@@ -2309,8 +2316,11 @@ class NFCPGui:
 
                 for uid in uids:
                     packets.append(nfcp_tx.build_unique_fire(uid, cue_mask))
+                    if uid not in step_uids:
+                        step_uids.append(uid)
 
             step["packets"] = packets
+            step["script_step_uids"] = step_uids
             step["fired_cues"] = fired_cues
             step["packet_count"] = len(packets)
 
@@ -2353,9 +2363,6 @@ class NFCPGui:
         self.script_fire_uploaded_uids = []
         self.script_fire_upload_results = []
         self.script_fire_upload_warning = False
-
-        if self.script_fire_mode != "auto":
-            return
 
         self.show_loading_screen("Loading script...\nPreparing module schedules...")
 
@@ -2528,6 +2535,22 @@ class NFCPGui:
         if not self.script_fire_prepared:
             self.prepare_script_fire_packets()
 
+        script_id = self.script_fire_uploaded_id
+        step_uids = step.get("script_step_uids", [])
+        if script_id is not None and step_uids:
+            event_ms = int(step.get("event_ms", 0) or 0)
+            for uid in step_uids:
+                if uid not in self.script_fire_uploaded_uids:
+                    continue
+                try:
+                    nfcp.script_step_for_uid(uid, script_id, event_ms)
+                    packets_sent += 1
+                except Exception as e:
+                    print("Script step command failed:", e)
+
+            if packets_sent:
+                return step.get("fired_cues", 0), packets_sent
+
         for pkt in step.get("packets", []):
             try:
                 radio_write_nfcp(pkt)
@@ -2687,35 +2710,6 @@ class NFCPGui:
                 SCRIPT_START_DELAY_MS
             )
             time.sleep_ms(100)
-
-            start_ok = True
-            start_code = nfcp.ACK_OK
-            start_uid = 0
-            for uid in self.script_fire_uploaded_uids:
-                ok, code = nfcp.script_start_status_for_uid(
-                    uid,
-                    script_id,
-                    SCRIPT_START_DELAY_MS,
-                    self.script_fire_elapsed_ms,
-                    start_master_ms=start_master_ms
-                )
-                if not ok:
-                    start_ok = False
-                    start_code = code
-                    start_uid = uid
-                    break
-
-            if not start_ok:
-                self.script_fire_module_auto_active = False
-                self.set_script_fire_status_label(
-                    "Start failed %08X: %s" %
-                    (
-                        start_uid & 0xFFFFFFFF,
-                        ack_code_text(start_code)
-                    )
-                )
-                self.set_status("Module auto start failed: " + ack_code_text(start_code))
-                return
 
             nfcp.script_start_broadcast(script_id, SCRIPT_START_DELAY_MS, self.script_fire_elapsed_ms, start_master_ms)
             self.script_fire_started_ms = time.ticks_add(
@@ -3355,6 +3349,7 @@ class NFCPGui:
             "TX ok: %d    timeout: %d    busy: %d\n"
             "RX ok: %d    timeout: %d\n"
             "RX CRC errors: %d    bad length: %d\n"
+            "RX duplicate: %d    wrong net: %d\n"
             "CCA ok: %d    busy: %d\n"
             "RSSI: %d dBm    TX power: %d dBm\n"
             "Channel: %d    Payload: %d\n"
@@ -3367,6 +3362,8 @@ class NFCPGui:
             int(stats.get("rx_timeout", 0)),
             int(stats.get("rx_crc_error", 0)),
             int(stats.get("rx_bad_len", 0)),
+            int(stats.get("rx_duplicate", 0)),
+            int(stats.get("rx_wrong_network", 0)),
             cca_ok,
             cca_busy,
             int(stats.get("last_rssi", 0)),

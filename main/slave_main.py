@@ -588,6 +588,36 @@ def handle_script_heartbeat(pkt):
         script_last_event = "heartbeat"
 
 
+def handle_script_step(pkt):
+    global script_last_event
+
+    if not ARMED:
+        script_last_event = "step disarmed"
+        return
+
+    data = pkt.get("data", b"")
+    if len(data) != 6:
+        return
+
+    script_id = int.from_bytes(data[0:2], "big") & 0xFFFF
+    event_ms = int.from_bytes(data[2:6], "big")
+    if script_id_loaded != script_id:
+        script_last_event = "step invalid"
+        return
+
+    fired = 0
+    for entry_ms, cue_mask in script_entries:
+        if entry_ms == event_ms:
+            fire_mask(cue_mask, report_errors=False)
+            fired += 1
+
+    if not fired:
+        script_last_event = "step missing"
+        return
+
+    script_last_event = "step"
+
+
 def run_script_scheduler():
     global script_running, script_next_index, script_last_event
 
@@ -704,6 +734,10 @@ def handle(pkt):
 
     if cmd == CMD_SCRIPT_HEARTBEAT:
         handle_script_heartbeat(pkt)
+        return
+
+    if cmd == CMD_SCRIPT_STEP:
+        handle_script_step(pkt)
         return
 
     if cmd == CMD_TIME_SYNC:
