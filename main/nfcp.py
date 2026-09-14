@@ -50,6 +50,7 @@ CMD_SCRIPT_STOP  = 0x73
 CMD_SCRIPT_HEARTBEAT = 0x74
 CMD_TIME_SYNC = 0x75
 CMD_SCRIPT_STEP = 0x76
+SCRIPT_ENTRY_BYTES = 6
 
 # speed test / ping
 CMD_PING         = 0x7F   # Unique-only ping for latency/throughput tests

@@ -1411,12 +1411,7 @@ class NFCPGui:
         self.script_fire_auto_fired = 0
         self.script_fire_auto_packets = 0
         self.script_fire_step_status_pending = None
-        self.script_fire_module_auto_active = False
-        self.script_fire_uploaded_id = None
-        self.script_fire_uploaded_uids = []
-        self.script_fire_upload_results = []
-        self.script_fire_upload_warning = False
-        self.script_fire_last_heartbeat_ms = time.ticks_ms()
+        self.reset_script_fire_upload_state()
 
     def update_background(self):
         color = lv.color_hex(0x400000) if self.armed else lv.color_hex(0x101010)
@@ -2064,6 +2059,28 @@ class NFCPGui:
         self.script_status_label.set_text(text)
         self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
 
+    def reset_script_fire_upload_state(self):
+        self.script_fire_module_auto_active = False
+        self.script_fire_uploaded_id = None
+        self.script_fire_uploaded_uids = []
+        self.script_fire_upload_results = []
+        self.script_fire_upload_warning = False
+        self.script_fire_last_heartbeat_ms = time.ticks_ms()
+
+    def format_uid_text(self, uid):
+        try:
+            return "0x%08X" % (uid & 0xFFFFFFFF)
+        except:
+            return str(uid)
+
+    def add_script_fire_upload_result(self, uid, entries, ok, reason):
+        self.script_fire_upload_results.append({
+            "uid": uid,
+            "entries": len(entries),
+            "ok": bool(ok),
+            "reason": reason
+        })
+
     def format_script_upload_summary(self):
         if not self.script_fire_upload_results:
             return "Upload: Not loaded"
@@ -2186,10 +2203,7 @@ class NFCPGui:
         if self.script_fire_auto_index >= len(self.loaded_script_steps):
             self.script_fire_auto_index = 0
         self.script_fire_prepared = False
-        self.script_fire_uploaded_id = None
-        self.script_fire_uploaded_uids = []
-        self.script_fire_upload_results = []
-        self.script_fire_upload_warning = False
+        self.reset_script_fire_upload_state()
 
     def get_script_trigger_key(self):
         try:
@@ -2364,11 +2378,7 @@ class NFCPGui:
         return uid_entries
 
     def preload_script_fire_modules(self):
-        self.script_fire_module_auto_active = False
-        self.script_fire_uploaded_id = None
-        self.script_fire_uploaded_uids = []
-        self.script_fire_upload_results = []
-        self.script_fire_upload_warning = False
+        self.reset_script_fire_upload_state()
 
         self.show_loading_screen("Loading script...\nPreparing module schedules...")
 
@@ -2427,10 +2437,7 @@ class NFCPGui:
 
         for uid, entries in uid_entries.items():
             loaded += 1
-            try:
-                uid_text = "0x%08X" % (uid & 0xFFFFFFFF)
-            except:
-                uid_text = str(uid)
+            uid_text = self.format_uid_text(uid)
             upload_text = "Upload %d/%d %s entries=%d" % (
                 loaded,
                 total_modules,
@@ -2444,12 +2451,12 @@ class NFCPGui:
             clear_ok, clear_code = nfcp.script_clear_status_for_uid(uid, script_id)
             if not clear_ok:
                 reason = ack_code_text(clear_code)
-                self.script_fire_upload_results.append({
-                    "uid": uid,
-                    "entries": len(entries),
-                    "ok": False,
-                    "reason": "clear " + reason
-                })
+                self.add_script_fire_upload_result(
+                    uid,
+                    entries,
+                    False,
+                    "clear " + reason
+                )
                 self.set_script_fire_status_label(
                     "Upload clear failed %s: %s" %
                     (
@@ -2463,12 +2470,12 @@ class NFCPGui:
             load_ok, load_code = nfcp.script_load_status_for_uid(uid, script_id, entries)
             if not load_ok:
                 reason = ack_code_text(load_code)
-                self.script_fire_upload_results.append({
-                    "uid": uid,
-                    "entries": len(entries),
-                    "ok": False,
-                    "reason": "load " + reason
-                })
+                self.add_script_fire_upload_result(
+                    uid,
+                    entries,
+                    False,
+                    "load " + reason
+                )
                 self.set_script_fire_status_label(
                     "Upload failed %s: %s" %
                     (
@@ -2479,12 +2486,7 @@ class NFCPGui:
                 self.set_status("Script upload failed: " + reason)
                 continue
 
-            self.script_fire_upload_results.append({
-                "uid": uid,
-                "entries": len(entries),
-                "ok": True,
-                "reason": "loaded"
-            })
+            self.add_script_fire_upload_result(uid, entries, True, "loaded")
 
         self.script_fire_uploaded_id = script_id
         self.script_fire_uploaded_uids = [

@@ -474,7 +474,7 @@ def handle_script_load(pkt):
     script_id = int.from_bytes(data[0:2], "big") & 0xFFFF
     entry_count = data[3]
     payload = data[4:]
-    if len(payload) != entry_count * 6:
+    if len(payload) != entry_count * SCRIPT_ENTRY_BYTES:
         reply_nack_if_unique(pkt, CMD_SCRIPT_LOAD, NACK_BAD_LENGTH)
         return
 
