@@ -277,6 +277,33 @@ def get_local_radio_stats(timeout_ms=1000):
     return e77_radio.parse_stats_payload(frame.payload)
 
 
+def ensure_local_radio_channel(channel, timeout_ms=1000):
+    try:
+        channel = int(channel)
+    except:
+        return False, "Invalid saved channel"
+
+    if channel < 0 or channel > 100:
+        return False, "Invalid saved channel"
+
+    stats = get_local_radio_stats(timeout_ms)
+    if stats:
+        try:
+            actual = int(stats.get("channel", -1))
+        except:
+            actual = -1
+
+        if actual == channel:
+            return True, None
+
+    if set_local_radio_channel(channel, timeout_ms):
+        if stats:
+            return True, "Bridge channel corrected to %d" % channel
+        return True, "Bridge channel set to %d" % channel
+
+    return False, "Bridge channel mismatch"
+
+
 def clear_local_radio_stats(timeout_ms=1000):
     frame = local_radio_command(e77_radio.CMD_CLEAR_STATS, b"", timeout_ms)
     if not frame:
@@ -1782,6 +1809,19 @@ class NFCPGui:
             return out
 
         return self.get_module_saved_continuity(module)
+
+    def ensure_bridge_channel(self):
+        ok, message = ensure_local_radio_channel(self.radio_channel)
+
+        if message:
+            self.set_status(message)
+
+        if not ok:
+            self.radio_error = message or "Bridge channel check failed"
+            return False
+
+        self.radio_error = None
+        return True
 
     def update_modules_busy_buttons(self):
         if hasattr(self, "discover_btn"):
@@ -4857,6 +4897,11 @@ class NFCPGui:
     def refresh_modules_with_continuity(self, event=None):
         self.show_loading_screen("Refreshing modules...\nChecking continuity...")
 
+        if not self.ensure_bridge_channel():
+            self.show_modules_menu()
+            self.set_status(self.radio_error)
+            return
+
         try:
             results = nfcp.continuity_scan()
         except Exception as e:
@@ -4930,25 +4975,28 @@ class NFCPGui:
         info_count = 0
 
         try:
-            self.modules = nfcp.discover()
-            self.load_modules_from_db()
+            if not self.ensure_bridge_channel():
+                final_status = self.radio_error
+            else:
+                self.modules = nfcp.discover()
+                self.load_modules_from_db()
 
-            self.show_loading_screen("Discovering modules...\nChecking continuity...")
-            cont_results = nfcp.continuity_scan()
-            cont_count = len(cont_results) if cont_results else 0
+                self.show_loading_screen("Discovering modules...\nChecking continuity...")
+                cont_results = nfcp.continuity_scan()
+                cont_count = len(cont_results) if cont_results else 0
 
-            self.show_loading_screen("Discovering modules...\nRunning speed tests...")
-            speed_results = nfcp.speed_test_scan()
-            speed_count = len(speed_results) if speed_results else 0
+                self.show_loading_screen("Discovering modules...\nRunning speed tests...")
+                speed_results = nfcp.speed_test_scan()
+                speed_count = len(speed_results) if speed_results else 0
 
-            self.show_loading_screen("Discovering modules...\nReading versions...")
-            info_results = nfcp.info_scan()
-            info_count = len(info_results) if info_results else 0
+                self.show_loading_screen("Discovering modules...\nReading versions...")
+                info_results = nfcp.info_scan()
+                info_count = len(info_results) if info_results else 0
 
-            self.load_modules_from_db()
-            self.update_script_module_mismatch()
-            self.update_open_script_cues()
-            self.update_extra_connected_cues()
+                self.load_modules_from_db()
+                self.update_script_module_mismatch()
+                self.update_open_script_cues()
+                self.update_extra_connected_cues()
 
         except Exception as e:
             print("Discover failed:", e)

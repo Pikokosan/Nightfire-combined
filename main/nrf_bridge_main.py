@@ -133,6 +133,7 @@ def set_network(network_id):
     global NETWORK_ID
 
     NETWORK_ID = network_id & 0xFFFF
+    save_runtime_config()
 
 
 def set_radio_channel(channel):
@@ -143,7 +144,23 @@ def set_radio_channel(channel):
 
     RADIO_CHANNEL = channel
     nrf_radio.channel(RADIO_CHANNEL)
+    save_runtime_config()
     return True
+
+
+def save_runtime_config():
+    try:
+        with open("nrf_bridge_config.py", "w") as f:
+            f.write("NETWORK_ID = 0x%04X\n" % (NETWORK_ID & 0xFFFF))
+            f.write("RADIO_CHANNEL = %d\n" % (RADIO_CHANNEL & 0xFF))
+            f.write("RADIO_ADDRESS = 0x%08X\n" % (RADIO_ADDRESS & 0xFFFFFFFF))
+            f.write("RADIO_TX_POWER = %d\n" % RADIO_TX_POWER)
+            f.write("UART_ID = %d\n" % UART_ID)
+            f.write("UART_BAUD = %d\n" % UART_BAUD)
+            f.write("UART_TX_PIN = %d\n" % UART_TX_PIN)
+            f.write("UART_RX_PIN = %d\n" % UART_RX_PIN)
+    except Exception as e:
+        print("Bridge config save failed:", e)
 
 
 def build_scan_payload():
