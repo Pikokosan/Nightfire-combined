@@ -48,6 +48,7 @@ CMD_SCRIPT_LOAD  = 0x71
 CMD_SCRIPT_START = 0x72
 CMD_SCRIPT_STOP  = 0x73
 CMD_SCRIPT_HEARTBEAT = 0x74
+CMD_TIME_SYNC = 0x75
 
 # speed test / ping
 CMD_PING         = 0x7F   # Unique-only ping for latency/throughput tests
@@ -128,7 +129,7 @@ class NFCP:
 
     # Broadcast: ONLY ARM/DISARM/DISCOVER
     def build_broadcast(self, cmd: int, data: bytes = b"") -> bytes:
-        if cmd not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER, CMD_SCRIPT_START, CMD_SCRIPT_STOP, CMD_SCRIPT_HEARTBEAT):
+        if cmd not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER, CMD_SCRIPT_START, CMD_SCRIPT_STOP, CMD_SCRIPT_HEARTBEAT, CMD_TIME_SYNC):
             raise NFCPError("Broadcast only allowed for ARM/DISARM/DISCOVER/SCRIPT")
         return self._frame(SOF_BROADCAST, bytes([self.node_id, cmd]) + data)
 
@@ -308,20 +309,27 @@ class NFCP:
         )
         return self._frame(SOF_UNIQUE, payload)
 
-    def build_script_start_broadcast(self, script_id: int, start_delay_ms: int, offset_ms: int = 0) -> bytes:
+    def build_time_sync_broadcast(self, master_ticks_ms: int) -> bytes:
+        return self.build_broadcast(CMD_TIME_SYNC, (master_ticks_ms & 0xFFFFFFFF).to_bytes(4, "big"))
+
+    def build_script_start_broadcast(self, script_id: int, start_delay_ms: int, offset_ms: int = 0, start_master_ms=None) -> bytes:
         data = (
             (script_id & 0xFFFF).to_bytes(2, "big") +
             (start_delay_ms & 0xFFFF).to_bytes(2, "big") +
             (offset_ms & 0xFFFFFFFF).to_bytes(4, "big")
         )
+        if start_master_ms is not None:
+            data += (int(start_master_ms) & 0xFFFFFFFF).to_bytes(4, "big")
         return self.build_broadcast(CMD_SCRIPT_START, data)
 
-    def build_script_start(self, target_unique: int, script_id: int, start_delay_ms: int, offset_ms: int = 0) -> bytes:
+    def build_script_start(self, target_unique: int, script_id: int, start_delay_ms: int, offset_ms: int = 0, start_master_ms=None) -> bytes:
         data = (
             (script_id & 0xFFFF).to_bytes(2, "big") +
             (start_delay_ms & 0xFFFF).to_bytes(2, "big") +
             (offset_ms & 0xFFFFFFFF).to_bytes(4, "big")
         )
+        if start_master_ms is not None:
+            data += (int(start_master_ms) & 0xFFFFFFFF).to_bytes(4, "big")
         return self.build_unique_command(target_unique, CMD_SCRIPT_START, data)
 
     def build_script_stop_broadcast(self, script_id: int = 0) -> bytes:
@@ -553,7 +561,7 @@ class NFCPStreamParser:
             pkt["src"] = payload[0]
             pkt["cmd"] = payload[1]
             pkt["data"] = payload[2:]
-            if pkt["cmd"] not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER, CMD_SCRIPT_START, CMD_SCRIPT_STOP, CMD_SCRIPT_HEARTBEAT):
+            if pkt["cmd"] not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER, CMD_SCRIPT_START, CMD_SCRIPT_STOP, CMD_SCRIPT_HEARTBEAT, CMD_TIME_SYNC):
                 return None
 
         elif self.frame_type == SOF_GROUP:

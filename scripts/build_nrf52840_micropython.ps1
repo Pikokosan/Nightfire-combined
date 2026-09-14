@@ -57,8 +57,21 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $Uf2 = Join-Path $NrfPort "build-$Board\firmware.uf2"
-if (Test-Path -LiteralPath $Uf2) {
+$Hex = Join-Path $NrfPort "build-$Board\firmware.hex"
+$ArtifactDir = Join-Path $RepoRoot "firmware\nrf52840"
+$ArtifactUf2 = Join-Path $ArtifactDir "nightfire_nicenano_micropython.uf2"
+$ArtifactHex = Join-Path $ArtifactDir "nightfire_nicenano_micropython.hex"
+
+if (-not (Test-Path -LiteralPath $ArtifactDir)) {
+    New-Item -ItemType Directory -Path $ArtifactDir | Out-Null
+}
+
+if ((Test-Path -LiteralPath $Uf2) -and (Test-Path -LiteralPath $Hex)) {
+    Copy-Item -LiteralPath $Uf2 -Destination $ArtifactUf2 -Force
+    Copy-Item -LiteralPath $Hex -Destination $ArtifactHex -Force
     Write-Host "Built $Uf2"
+    Write-Host "Copied $ArtifactUf2"
+    Write-Host "Copied $ArtifactHex"
 }
 else {
     Write-Host "Built firmware. UF2 was not generated automatically; check build-$Board for output files."

@@ -129,12 +129,11 @@ computer and run:
 powershell -ExecutionPolicy Bypass -File .\scripts\upload_nrf_bridge.ps1 -Port COM15
 ```
 
-Bridge firmware version `0.1.1` and newer also supports the local
-`CMD_BOOTLOADER` command. With the bridge wired to the master UART, this helper
-asks the true master to put the attached bridge into UF2 bootloader mode:
+To enter UF2 bootloader from a running nRF MicroPython app over USB, interrupt
+the REPL and issue `machine.bootloader()` with:
 
 ```powershell
-python .\scripts\enter_nrf_bridge_bootloader_via_master.py --master COM21
+python .\scripts\enter_nrf_bootloader.py --port COM15
 ```
 
 After the UF2 drive appears, copy the built nRF52840 MicroPython firmware to it:
@@ -143,11 +142,24 @@ After the UF2 drive appears, copy the built nRF52840 MicroPython firmware to it:
 Copy-Item .\firmware\nrf52840\nightfire_nicenano_micropython.uf2 F:\firmware.uf2
 ```
 
-Bridge firmware also supports channel scanning. The master Settings screen can
-ask the bridge to scan nRF channels `74-100`, show the best 10 channels, and
-apply a selected channel to every discovered module. Modules ACK the
+Bridge firmware also supports channel scanning. The master Settings screen asks
+the bridge to scan Wi-Fi-avoiding nRF channels, currently channel `0` plus
+`74-100`, scores the best 10 by RSSI margin and busy-sample count, and applies a
+selected channel to every discovered module. Modules ACK the
 `CMD_SET_RADIO_CHANNEL` command and save the selected channel before the master
 switches the local bridge.
+
+For bench testing without using the touchscreen UI:
+
+```powershell
+python .\scripts\test_nrf_channel_scan.py --master COM21
+python .\scripts\test_nrf_channel_apply.py --master COM21 --current-channel 40 --channel 84
+python .\scripts\test_nrf_channel_apply.py --master COM21 --current-channel 84 --channel 40
+```
+
+The apply helper updates the master `nfcp_settings.json` radio channel after a
+successful module and bridge migration. If a channel migration is interrupted,
+restore all modules and the bridge to the same channel before running discovery.
 
 The currently connected test board reports as:
 
@@ -244,6 +256,14 @@ once with `E77 MicroPython app: upload` before they can accept OTA updates.
 
 Radio firmware updates are still supported separately by the radio update flows
 below.
+
+## Module Script Timing
+
+Module-auto script playback uses a heartbeat failsafe and a short time-sync
+burst before start. The master sends `CMD_TIME_SYNC` packets with its current
+tick value, then script start packets include a shared absolute master start
+tick. Modules with a fresh sync schedule from that shared clock; modules without
+sync fall back to the older start-delay behavior.
 
 ## Radio Firmware Updates From The Master
 

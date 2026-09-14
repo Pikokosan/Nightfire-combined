@@ -108,6 +108,23 @@
                 "panel": "shared",
                 "clear": true
             }
+        },
+        {
+            "label": "nRF dummy: USB bootloader",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "${workspaceFolder}\\scripts\\enter_nrf_bootloader.py",
+                "--port",
+                "COM16"
+            ],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
         }
     ]
 }

@@ -16,6 +16,8 @@ CMD_NFCP_RX = 0x11
 CMD_SET_NETWORK = 0x12
 CMD_SET_CHANNEL = 0x13
 CMD_SCAN_CHANNELS = 0x14
+CMD_GET_STATS = 0x15
+CMD_CLEAR_STATS = 0x16
 CMD_BOOTLOADER = 0x30
 CMD_ERROR = 0x40
 
@@ -118,6 +120,32 @@ def parse_nfcp_rx(payload):
         "snr": int_from_be(payload[2:3], signed=True),
         "nfcp_frame": payload[3:],
     }
+
+
+def parse_stats_payload(payload):
+    if len(payload) < 34:
+        return None
+
+    stats = {
+        "tx_ok": int_from_be(payload[0:4]),
+        "tx_timeout": int_from_be(payload[4:8]),
+        "rx_ok": int_from_be(payload[8:12]),
+        "rx_timeout": int_from_be(payload[12:16]),
+        "rx_crc_error": int_from_be(payload[16:20]),
+        "rx_bad_len": int_from_be(payload[20:24]),
+        "channel": byte_value(payload, 24),
+        "tx_power": int_from_be(payload[25:26], signed=True),
+        "last_rssi": int_from_be(payload[26:28], signed=True),
+        "max_payload": int_from_be(payload[28:30]),
+        "address": int_from_be(payload[30:34]),
+    }
+
+    if len(payload) >= 46:
+        stats["tx_busy"] = int_from_be(payload[34:38])
+        stats["cca_ok"] = int_from_be(payload[38:42])
+        stats["cca_busy"] = int_from_be(payload[42:46])
+
+    return stats
 
 
 class Frame(object):

@@ -26,11 +26,16 @@ MAX_CUE_COUNT = 64
 MODULE_CONTINUITY_AUTO_CHECK_MS = 4000
 DISCOVER_IDLE_TIMEOUT_MS = 3000
 DISCOVER_MAX_SCAN_MS = 30000
+DISCOVER_BROADCAST_REPEAT_MS = 700
 SPEED_TEST_TIMEOUT_MS = 2000
+ACK_RETRY_ATTEMPTS = 2
+ACK_RETRY_DELAY_MS = 100
 E77_UPDATE_CHUNK_SIZE = 160
 SCRIPT_LOAD_CHUNK_ENTRIES = 32
 SCRIPT_START_DELAY_MS = 2000
 SCRIPT_START_BROADCAST_REPEATS = 3
+SCRIPT_TIME_SYNC_REPEATS = 3
+SCRIPT_TIME_SYNC_GAP_MS = 20
 SCRIPT_HEARTBEAT_MS = 200
 TRELLIS_ENABLED = True
 TRELLIS_I2C_ID = 0
@@ -224,20 +229,32 @@ def parse_channel_scan_payload(payload):
 
     count = payload[0]
     index = 1
+    entry_size = 7
+    if len(payload) >= 1 + count * 10:
+        entry_size = 10
+
     for _ in range(count):
-        if index + 7 > len(payload):
+        if index + entry_size > len(payload):
             break
         channel = payload[index]
         avg = e77_radio.int_from_be(payload[index + 1:index + 3], signed=True)
         min_rssi = e77_radio.int_from_be(payload[index + 3:index + 5], signed=True)
         max_rssi = e77_radio.int_from_be(payload[index + 5:index + 7], signed=True)
-        results.append({
+        result = {
             "channel": channel,
             "avg": avg,
             "min": min_rssi,
-            "max": max_rssi
-        })
-        index += 7
+            "max": max_rssi,
+            "count": 0,
+            "busy": 0,
+            "score": 0
+        }
+        if entry_size >= 10:
+            result["count"] = payload[index + 7]
+            result["busy"] = payload[index + 8]
+            result["score"] = payload[index + 9]
+        results.append(result)
+        index += entry_size
 
     return results
 
@@ -249,6 +266,22 @@ def scan_local_radio_channels(timeout_ms=8000):
     if frame.cmd != e77_radio.CMD_SCAN_CHANNELS or (frame.flags & e77_radio.FLAG_ERROR):
         return []
     return parse_channel_scan_payload(frame.payload)
+
+
+def get_local_radio_stats(timeout_ms=1000):
+    frame = local_radio_command(e77_radio.CMD_GET_STATS, b"", timeout_ms)
+    if not frame:
+        return None
+    if frame.cmd != e77_radio.CMD_GET_STATS or (frame.flags & e77_radio.FLAG_ERROR):
+        return None
+    return e77_radio.parse_stats_payload(frame.payload)
+
+
+def clear_local_radio_stats(timeout_ms=1000):
+    frame = local_radio_command(e77_radio.CMD_CLEAR_STATS, b"", timeout_ms)
+    if not frame:
+        return False
+    return frame.cmd == e77_radio.CMD_CLEAR_STATS and not (frame.flags & e77_radio.FLAG_ERROR)
 
 
 def get_local_radio_info(timeout_ms=1000):
@@ -507,11 +540,15 @@ def parse_info_rsp(data):
     app_version, index = read_text_field(data, index)
     radio_version, index = read_text_field(data, index)
     script_status, index = read_text_field(data, index)
+    hardware_unique_id, index = read_text_field(data, index)
+    configured_unique_id, index = read_text_field(data, index)
     return {
         "app_name": app_name,
         "app_version": app_version,
         "radio_version": radio_version,
-        "script_status": script_status
+        "script_status": script_status,
+        "hardware_unique_id": hardware_unique_id,
+        "configured_unique_id": configured_unique_id
     }
 
 
@@ -603,9 +640,15 @@ def discover(idle_ms=DISCOVER_IDLE_TIMEOUT_MS, max_scan_ms=DISCOVER_MAX_SCAN_MS)
     discovered_uids = []
     start_ms = time.ticks_ms()
     last_packet_ms = start_ms
+    last_broadcast_ms = start_ms
     max_deadline = time.ticks_add(start_ms, max_scan_ms)
 
     while time.ticks_diff(max_deadline, time.ticks_ms()) > 0:
+        now_ms = time.ticks_ms()
+        if time.ticks_diff(now_ms, last_broadcast_ms) >= DISCOVER_BROADCAST_REPEAT_MS:
+            radio_write_nfcp(nfcp_tx.build_discover_broadcast(nonce))
+            last_broadcast_ms = now_ms
+
         packets = poll_responses()
         for pkt in packets:
             if pkt["cmd"] != nfcp.CMD_DISCOVER_RSP:
@@ -626,9 +669,9 @@ def discover(idle_ms=DISCOVER_IDLE_TIMEOUT_MS, max_scan_ms=DISCOVER_MAX_SCAN_MS)
                 idx[info["unique_id"]] = existing
                 if info["unique_id"] not in discovered_uids:
                     discovered_uids.append(info["unique_id"])
-                last_packet_ms = time.ticks_ms()
+                last_packet_ms = now_ms
 
-        if time.ticks_diff(time.ticks_ms(), last_packet_ms) >= idle_ms:
+        if time.ticks_diff(now_ms, last_packet_ms) >= idle_ms:
             break
 
         time.sleep_ms(1)
@@ -734,6 +777,8 @@ def info_scan(timeout_ms=1000):
             dev["app_name"] = info.get("app_name", "")
             dev["app_version"] = info.get("app_version", "")
             dev["radio_firmware_version"] = info.get("radio_version", "")
+            dev["hardware_unique_id"] = info.get("hardware_unique_id", "")
+            dev["configured_unique_id"] = info.get("configured_unique_id", "")
             dev["info_last_epoch"] = time.time()
             dev["module_online"] = True
             dev["module_last_seen_epoch"] = time.time()
@@ -872,15 +917,11 @@ def disarm():
 
 
 def arm_for_uid(uid_int, timeout_ms=SPEED_TEST_TIMEOUT_MS):
-    drain_uart()
-    radio_write_nfcp(nfcp_tx.build_arm_unique(uid_int))
-    return wait_for_ack(uid_int, nfcp.CMD_ARM, timeout_ms)
+    return send_with_ack(uid_int, nfcp.CMD_ARM, lambda: nfcp_tx.build_arm_unique(uid_int), timeout_ms)
 
 
 def disarm_for_uid(uid_int, timeout_ms=SPEED_TEST_TIMEOUT_MS):
-    drain_uart()
-    radio_write_nfcp(nfcp_tx.build_disarm_unique(uid_int))
-    return wait_for_ack(uid_int, nfcp.CMD_DISARM, timeout_ms)
+    return send_with_ack(uid_int, nfcp.CMD_DISARM, lambda: nfcp_tx.build_disarm_unique(uid_int), timeout_ms)
 
 
 def fire_unique(uid_int, cue_index_0based):
@@ -905,55 +946,30 @@ def set_group(uid_int, new_group):
 
 
 def request_set_network_for_uid(uid_int, new_network, timeout_ms=800):
-    drain_uart()
-    radio_write_nfcp(nfcp_tx.build_set_network(uid_int, new_network))
+    return send_with_ack(
+        uid_int,
+        nfcp.CMD_SET_NETWORK,
+        lambda: nfcp_tx.build_set_network(uid_int, new_network),
+        timeout_ms
+    )
 
-    deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
-    while time.ticks_diff(deadline, time.ticks_ms()) > 0:
-        packets = poll_responses()
-        for pkt in packets:
-            if (pkt["src_unique"] & 0xFFFFFFFF) != (uid_int & 0xFFFFFFFF):
-                continue
 
-            data = pkt.get("data", b"")
-
-            if pkt["cmd"] == nfcp.CMD_ACK and len(data) >= 2:
-                if data[0] == nfcp.CMD_SET_NETWORK:
-                    return data[1] == nfcp.ACK_OK
-
-            if pkt["cmd"] == nfcp.CMD_NACK and len(data) >= 2:
-                if data[0] == nfcp.CMD_SET_NETWORK:
-                    return False
-
-        time.sleep_ms(2)
-
-    return False
+def request_set_unique_for_uid(uid_int, new_unique, timeout_ms=1200):
+    return send_with_ack(
+        uid_int,
+        nfcp.CMD_SET_UNIQUE,
+        lambda: nfcp_tx.build_set_unique(uid_int, new_unique),
+        timeout_ms
+    )
 
 
 def request_set_radio_channel_for_uid(uid_int, new_channel, timeout_ms=1200):
-    drain_uart()
-    radio_write_nfcp(nfcp_tx.build_set_radio_channel(uid_int, new_channel))
-
-    deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
-    while time.ticks_diff(deadline, time.ticks_ms()) > 0:
-        packets = poll_responses()
-        for pkt in packets:
-            if (pkt["src_unique"] & 0xFFFFFFFF) != (uid_int & 0xFFFFFFFF):
-                continue
-
-            data = pkt.get("data", b"")
-
-            if pkt["cmd"] == nfcp.CMD_ACK and len(data) >= 2:
-                if data[0] == nfcp.CMD_SET_RADIO_CHANNEL:
-                    return data[1] == nfcp.ACK_OK
-
-            if pkt["cmd"] == nfcp.CMD_NACK and len(data) >= 2:
-                if data[0] == nfcp.CMD_SET_RADIO_CHANNEL:
-                    return False
-
-        time.sleep_ms(2)
-
-    return False
+    return send_with_ack(
+        uid_int,
+        nfcp.CMD_SET_RADIO_CHANNEL,
+        lambda: nfcp_tx.build_set_radio_channel(uid_int, new_channel),
+        timeout_ms
+    )
 
 
 def wait_for_ack(uid_int, orig_cmd, timeout_ms=1000):
@@ -983,6 +999,35 @@ def wait_for_ack_detail(uid_int, orig_cmd, timeout_ms=1000):
     return False, None
 
 
+def send_with_ack_detail(
+    uid_int,
+    orig_cmd,
+    build_packet,
+    timeout_ms=1000,
+    attempts=ACK_RETRY_ATTEMPTS,
+    retry_delay_ms=ACK_RETRY_DELAY_MS
+):
+    last_code = None
+
+    for attempt in range(attempts):
+        drain_uart()
+        radio_write_nfcp(build_packet())
+        ok, code = wait_for_ack_detail(uid_int, orig_cmd, timeout_ms)
+        if ok or code is not None:
+            return ok, code
+
+        last_code = code
+        if attempt + 1 < attempts:
+            time.sleep_ms(retry_delay_ms + attempt * retry_delay_ms)
+
+    return False, last_code
+
+
+def send_with_ack(uid_int, orig_cmd, build_packet, timeout_ms=1000, attempts=ACK_RETRY_ATTEMPTS):
+    ok, _code = send_with_ack_detail(uid_int, orig_cmd, build_packet, timeout_ms, attempts)
+    return ok
+
+
 def checksum_file(path):
     checksum = 0
     size = 0
@@ -1002,17 +1047,19 @@ def checksum_file(path):
 def e77_update_send_file_for_uid(uid_int, source_path, target_path, transfer_id, progress_cb=None):
     size, checksum = checksum_file(source_path)
 
-    drain_uart()
-    radio_write_nfcp(
-        nfcp_tx.build_e77_update_begin(
+    ok, code = send_with_ack_detail(
+        uid_int,
+        nfcp.CMD_E77_UPDATE_BEGIN,
+        lambda: nfcp_tx.build_e77_update_begin(
             uid_int,
             transfer_id,
             target_path,
             size,
             checksum
-        )
+        ),
+        3000,
+        attempts=2
     )
-    ok, code = wait_for_ack_detail(uid_int, nfcp.CMD_E77_UPDATE_BEGIN, 3000)
     if not ok:
         print("E77 update begin failed:", ack_code_text(code))
         return False
@@ -1025,26 +1072,20 @@ def e77_update_send_file_for_uid(uid_int, source_path, target_path, transfer_id,
                 if not chunk:
                     break
 
-                sent = False
-                for attempt in range(3):
-                    drain_uart()
-                    radio_write_nfcp(
-                        nfcp_tx.build_e77_update_write(
-                            uid_int,
-                            transfer_id,
-                            offset,
-                            chunk
-                        )
-                    )
-                    ok, code = wait_for_ack_detail(uid_int, nfcp.CMD_E77_UPDATE_WRITE, 3000)
-                    if ok:
-                        sent = True
-                        break
-                    if code is not None:
-                        break
-                    time.sleep_ms(100 + attempt * 100)
+                ok, code = send_with_ack_detail(
+                    uid_int,
+                    nfcp.CMD_E77_UPDATE_WRITE,
+                    lambda: nfcp_tx.build_e77_update_write(
+                        uid_int,
+                        transfer_id,
+                        offset,
+                        chunk
+                    ),
+                    3000,
+                    attempts=3
+                )
 
-                if not sent:
+                if not ok:
                     radio_write_nfcp(nfcp_tx.build_e77_update_abort(uid_int, transfer_id))
                     print("E77 update write failed:", ack_code_text(code))
                     return False
@@ -1053,9 +1094,13 @@ def e77_update_send_file_for_uid(uid_int, source_path, target_path, transfer_id,
                 if progress_cb:
                     progress_cb(offset, size)
 
-        drain_uart()
-        radio_write_nfcp(nfcp_tx.build_e77_update_end(uid_int, transfer_id))
-        ok, code = wait_for_ack_detail(uid_int, nfcp.CMD_E77_UPDATE_END, 4000)
+        ok, code = send_with_ack_detail(
+            uid_int,
+            nfcp.CMD_E77_UPDATE_END,
+            lambda: nfcp_tx.build_e77_update_end(uid_int, transfer_id),
+            4000,
+            attempts=2
+        )
         if not ok:
             print("E77 update end failed:", ack_code_text(code))
         return ok
@@ -1069,21 +1114,22 @@ def e77_update_send_file_for_uid(uid_int, source_path, target_path, transfer_id,
 
 
 def e77_update_reboot_for_uid(uid_int, timeout_ms=1000):
-    drain_uart()
-    radio_write_nfcp(nfcp_tx.build_e77_update_reboot(uid_int))
-    return wait_for_ack(uid_int, nfcp.CMD_E77_UPDATE_REBOOT, timeout_ms)
+    return send_with_ack(
+        uid_int,
+        nfcp.CMD_E77_UPDATE_REBOOT,
+        lambda: nfcp_tx.build_e77_update_reboot(uid_int),
+        timeout_ms
+    )
 
 
 def script_clear_status_for_uid(uid_int, script_id, timeout_ms=SPEED_TEST_TIMEOUT_MS):
-    for attempt in range(3):
-        drain_uart()
-        radio_write_nfcp(nfcp_tx.build_script_clear(uid_int, script_id))
-        ok, code = wait_for_ack_detail(uid_int, nfcp.CMD_SCRIPT_CLEAR, timeout_ms)
-        if ok or code is not None:
-            return ok, code
-        time.sleep_ms(100 + attempt * 100)
-
-    return False, None
+    return send_with_ack_detail(
+        uid_int,
+        nfcp.CMD_SCRIPT_CLEAR,
+        lambda: nfcp_tx.build_script_clear(uid_int, script_id),
+        timeout_ms,
+        attempts=3
+    )
 
 
 def script_clear_for_uid(uid_int, script_id, timeout_ms=SPEED_TEST_TIMEOUT_MS):
@@ -1097,19 +1143,15 @@ def script_load_for_uid(uid_int, script_id, entries, timeout_ms=SPEED_TEST_TIMEO
 
     while offset < len(entries):
         chunk = entries[offset:offset + SCRIPT_LOAD_CHUNK_ENTRIES]
-        loaded = False
-        for attempt in range(2):
-            drain_uart()
-            radio_write_nfcp(nfcp_tx.build_script_load(uid_int, script_id, chunk_index, chunk))
-            ok, code = wait_for_ack_detail(uid_int, nfcp.CMD_SCRIPT_LOAD, timeout_ms)
-            if ok:
-                loaded = True
-                break
-            if code is not None:
-                return False
-            time.sleep_ms(100 + attempt * 100)
+        ok, _code = send_with_ack_detail(
+            uid_int,
+            nfcp.CMD_SCRIPT_LOAD,
+            lambda: nfcp_tx.build_script_load(uid_int, script_id, chunk_index, chunk),
+            timeout_ms,
+            attempts=2
+        )
 
-        if not loaded:
+        if not ok:
             return False
 
         offset += len(chunk)
@@ -1118,28 +1160,45 @@ def script_load_for_uid(uid_int, script_id, entries, timeout_ms=SPEED_TEST_TIMEO
     return True
 
 
-def script_start_broadcast(script_id, start_delay_ms=SCRIPT_START_DELAY_MS, offset_ms=0):
+def script_master_ticks_ms():
+    return time.ticks_ms() & 0x3FFFFFFF
+
+
+def script_time_sync_broadcast(master_ticks_ms=None):
+    if master_ticks_ms is None:
+        master_ticks_ms = script_master_ticks_ms()
+    radio_write_nfcp(nfcp_tx.build_time_sync_broadcast(master_ticks_ms))
+
+
+def script_send_time_sync(repeats=SCRIPT_TIME_SYNC_REPEATS):
+    for _ in range(repeats):
+        script_time_sync_broadcast()
+        time.sleep_ms(SCRIPT_TIME_SYNC_GAP_MS)
+
+
+def script_start_broadcast(script_id, start_delay_ms=SCRIPT_START_DELAY_MS, offset_ms=0, start_master_ms=None):
     for _ in range(SCRIPT_START_BROADCAST_REPEATS):
-        radio_write_nfcp(nfcp_tx.build_script_start_broadcast(script_id, start_delay_ms, offset_ms))
+        radio_write_nfcp(nfcp_tx.build_script_start_broadcast(script_id, start_delay_ms, offset_ms, start_master_ms))
         time.sleep_ms(20)
 
 
-def script_start_for_uid(uid_int, script_id, start_delay_ms=SCRIPT_START_DELAY_MS, offset_ms=0, timeout_ms=SPEED_TEST_TIMEOUT_MS):
-    drain_uart()
-    radio_write_nfcp(nfcp_tx.build_script_start(uid_int, script_id, start_delay_ms, offset_ms))
-    return wait_for_ack(uid_int, nfcp.CMD_SCRIPT_START, timeout_ms)
+def script_start_for_uid(uid_int, script_id, start_delay_ms=SCRIPT_START_DELAY_MS, offset_ms=0, timeout_ms=SPEED_TEST_TIMEOUT_MS, start_master_ms=None):
+    return send_with_ack(
+        uid_int,
+        nfcp.CMD_SCRIPT_START,
+        lambda: nfcp_tx.build_script_start(uid_int, script_id, start_delay_ms, offset_ms, start_master_ms),
+        timeout_ms
+    )
 
 
-def script_start_status_for_uid(uid_int, script_id, start_delay_ms=SCRIPT_START_DELAY_MS, offset_ms=0, timeout_ms=SPEED_TEST_TIMEOUT_MS):
-    for attempt in range(2):
-        drain_uart()
-        radio_write_nfcp(nfcp_tx.build_script_start(uid_int, script_id, start_delay_ms, offset_ms))
-        ok, code = wait_for_ack_detail(uid_int, nfcp.CMD_SCRIPT_START, timeout_ms)
-        if ok or code is not None:
-            return ok, code
-        time.sleep_ms(100 + attempt * 100)
-
-    return False, None
+def script_start_status_for_uid(uid_int, script_id, start_delay_ms=SCRIPT_START_DELAY_MS, offset_ms=0, timeout_ms=SPEED_TEST_TIMEOUT_MS, start_master_ms=None):
+    return send_with_ack_detail(
+        uid_int,
+        nfcp.CMD_SCRIPT_START,
+        lambda: nfcp_tx.build_script_start(uid_int, script_id, start_delay_ms, offset_ms, start_master_ms),
+        timeout_ms,
+        attempts=2
+    )
 
 
 def script_stop_broadcast(script_id=0):
@@ -1147,9 +1206,12 @@ def script_stop_broadcast(script_id=0):
 
 
 def script_stop_for_uid(uid_int, script_id=0, timeout_ms=SPEED_TEST_TIMEOUT_MS):
-    drain_uart()
-    radio_write_nfcp(nfcp_tx.build_script_stop(uid_int, script_id))
-    return wait_for_ack(uid_int, nfcp.CMD_SCRIPT_STOP, timeout_ms)
+    return send_with_ack(
+        uid_int,
+        nfcp.CMD_SCRIPT_STOP,
+        lambda: nfcp_tx.build_script_stop(uid_int, script_id),
+        timeout_ms
+    )
 
 
 def script_heartbeat_broadcast(script_id, elapsed_ms=0):
@@ -1184,6 +1246,7 @@ nfcp.fire_unique = fire_unique
 nfcp.fire_unique_mask = fire_unique_mask
 nfcp.set_group = set_group
 nfcp.request_set_network_for_uid = request_set_network_for_uid
+nfcp.request_set_unique_for_uid = request_set_unique_for_uid
 nfcp.request_set_radio_channel_for_uid = request_set_radio_channel_for_uid
 nfcp.e77_update_send_file_for_uid = e77_update_send_file_for_uid
 nfcp.e77_update_reboot_for_uid = e77_update_reboot_for_uid
@@ -1193,6 +1256,7 @@ nfcp.script_load_for_uid = script_load_for_uid
 nfcp.script_start_broadcast = script_start_broadcast
 nfcp.script_start_for_uid = script_start_for_uid
 nfcp.script_start_status_for_uid = script_start_status_for_uid
+nfcp.script_send_time_sync = script_send_time_sync
 nfcp.script_stop_broadcast = script_stop_broadcast
 nfcp.script_stop_for_uid = script_stop_for_uid
 nfcp.script_heartbeat_broadcast = script_heartbeat_broadcast
@@ -1617,13 +1681,28 @@ class NFCPGui:
 
         script_status = self.selected_module.get("script_status", "")
         if script_status:
-            return "FW: %s   Radio: %s\nScript: %s" % (
+            return "FW: %s   Radio: %s   Script: %s" % (
                 fw_text,
                 radio_version,
                 script_status
             )
 
         return "FW: %s   Radio: %s" % (fw_text, radio_version)
+
+    def format_selected_identity(self):
+        if not self.selected_module:
+            return "HW: --   OVR: --"
+
+        hardware_uid = self.selected_module.get("hardware_unique_id", "")
+        configured_uid = self.selected_module.get("configured_unique_id", "")
+
+        if not hardware_uid:
+            return "HW: --   OVR: --"
+
+        if configured_uid in ("", "0x00000000", "0"):
+            configured_uid = "auto"
+
+        return "HW: %s   OVR: %s" % (hardware_uid, configured_uid)
 
     def format_module_continuity_summary(self, module):
         cue_count = self.get_module_cue_count(module)
@@ -2562,6 +2641,11 @@ class NFCPGui:
             self.script_fire_module_auto_active = True
             self.script_fire_uploaded_id = script_id
             self.script_fire_last_heartbeat_ms = time.ticks_ms()
+            nfcp.script_send_time_sync()
+            start_master_ms = time.ticks_add(
+                script_master_ticks_ms(),
+                SCRIPT_START_DELAY_MS
+            )
             time.sleep_ms(100)
 
             start_ok = True
@@ -2572,7 +2656,8 @@ class NFCPGui:
                     uid,
                     script_id,
                     SCRIPT_START_DELAY_MS,
-                    self.script_fire_elapsed_ms
+                    self.script_fire_elapsed_ms,
+                    start_master_ms=start_master_ms
                 )
                 if not ok:
                     start_ok = False
@@ -2592,7 +2677,7 @@ class NFCPGui:
                 self.set_status("Module auto start failed: " + ack_code_text(start_code))
                 return
 
-            nfcp.script_start_broadcast(script_id, SCRIPT_START_DELAY_MS, self.script_fire_elapsed_ms)
+            nfcp.script_start_broadcast(script_id, SCRIPT_START_DELAY_MS, self.script_fire_elapsed_ms, start_master_ms)
             self.script_fire_started_ms = time.ticks_add(
                 time.ticks_ms(),
                 SCRIPT_START_DELAY_MS - self.script_fire_elapsed_ms
@@ -3161,6 +3246,16 @@ class NFCPGui:
             self.show_radio_update
         )
 
+        self.make_button(
+            scr,
+            "STATS",
+            690,
+            135,
+            90,
+            55,
+            self.show_radio_stats
+        )
+
         network_label = lv.label(scr)
         network_label.set_text("Network: %d  Channel: %d" % (self.radio_network_id, self.radio_channel))
         network_label.set_pos(430, 205)
@@ -3206,6 +3301,74 @@ class NFCPGui:
         )
 
         self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_main_menu)
+
+    def format_radio_stats_text(self, stats):
+        if not stats:
+            return "Radio stats unavailable."
+
+        tx_busy = int(stats.get("tx_busy", 0))
+        cca_ok = int(stats.get("cca_ok", 0))
+        cca_busy = int(stats.get("cca_busy", 0))
+        address = int(stats.get("address", 0))
+
+        return (
+            "TX ok: %d    timeout: %d    busy: %d\n"
+            "RX ok: %d    timeout: %d\n"
+            "RX CRC errors: %d    bad length: %d\n"
+            "CCA ok: %d    busy: %d\n"
+            "RSSI: %d dBm    TX power: %d dBm\n"
+            "Channel: %d    Payload: %d\n"
+            "Address: 0x%08X"
+        ) % (
+            int(stats.get("tx_ok", 0)),
+            int(stats.get("tx_timeout", 0)),
+            tx_busy,
+            int(stats.get("rx_ok", 0)),
+            int(stats.get("rx_timeout", 0)),
+            int(stats.get("rx_crc_error", 0)),
+            int(stats.get("rx_bad_len", 0)),
+            cca_ok,
+            cca_busy,
+            int(stats.get("last_rssi", 0)),
+            int(stats.get("tx_power", 0)),
+            int(stats.get("channel", 0)),
+            int(stats.get("max_payload", 0)),
+            address & 0xFFFFFFFF,
+        )
+
+    def show_radio_stats(self, event=None):
+        scr = self.new_screen("Radio Stats", "radio_stats")
+
+        self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_settings)
+        self.make_button(scr, "REFRESH", 180, 400, 160, 55, self.show_radio_stats)
+        self.make_button(scr, "CLEAR", 360, 400, 160, 55, self.clear_radio_stats)
+
+        stats = None
+        try:
+            stats = get_local_radio_stats(600)
+        except Exception as e:
+            print("Radio stats failed:", e)
+
+        label = lv.label(scr)
+        label.set_text(self.format_radio_stats_text(stats))
+        label.set_pos(55, 85)
+
+        if stats:
+            self.set_status("Radio stats loaded")
+        else:
+            self.set_status("Radio stats unavailable")
+
+    def clear_radio_stats(self, event=None):
+        try:
+            if clear_local_radio_stats(600):
+                self.set_status("Radio stats cleared")
+            else:
+                self.set_status("Radio stats clear failed")
+        except Exception as e:
+            print("Radio stats clear failed:", e)
+            self.set_status("Radio stats clear failed")
+
+        self.show_radio_stats()
 
     def file_exists(self, path):
         try:
@@ -3763,11 +3926,24 @@ class NFCPGui:
             row = i // 3
             col = i % 3
             channel = int(item.get("channel", 0))
-            text = "CH %d  avg %d\nmax %d" % (
-                channel,
-                int(item.get("avg", 0)),
-                int(item.get("max", 0))
-            )
+            score = int(item.get("score", 0))
+            busy = int(item.get("busy", 0))
+            count = int(item.get("count", 0))
+            if count:
+                text = "CH %d  Q %d\nmax %d avg %d b%d/%d" % (
+                    channel,
+                    score,
+                    int(item.get("max", 0)),
+                    int(item.get("avg", 0)),
+                    busy,
+                    count
+                )
+            else:
+                text = "CH %d\nmax %d avg %d" % (
+                    channel,
+                    int(item.get("max", 0)),
+                    int(item.get("avg", 0))
+                )
             self.make_button(
                 scr,
                 text,
@@ -4837,6 +5013,16 @@ class NFCPGui:
             self.request_selected_continuity
         )
 
+        self.make_button(
+            scr,
+            "UID AUTO",
+            300,
+            410,
+            120,
+            50,
+            self.reset_selected_uid_to_auto
+        )
+
         uid_text = self.selected_module.get("unique_id", "0x00000000")
         channel_id = self.group_to_int_display(self.selected_module.get("group_id", "--"))
         cue_count = self.get_selected_module_cue_count()
@@ -4866,6 +5052,10 @@ class NFCPGui:
         self.version_label = lv.label(scr)
         self.version_label.set_text(self.format_selected_versions())
         self.version_label.set_pos(25, 102)
+
+        self.identity_label = lv.label(scr)
+        self.identity_label.set_text(self.format_selected_identity())
+        self.identity_label.set_pos(430, 102)
 
         self.build_fixed_cue_grid(scr)
 
@@ -4997,6 +5187,54 @@ class NFCPGui:
             print("Info read failed:", e)
             self.set_status("Version read failed")
 
+    def reset_selected_uid_to_auto(self, event=None):
+        if not self.selected_module:
+            self.set_status("No module selected")
+            return
+
+        uid_text = self.selected_module.get("unique_id", "0x00000000")
+        uid = self.get_selected_module_uid_int()
+        if uid is None:
+            return
+
+        self.set_status("Resetting UID to hardware...")
+
+        try:
+            if not nfcp.request_set_unique_for_uid(uid, 0):
+                self.set_status("UID reset failed")
+                return
+        except Exception as e:
+            print("UID reset failed:", e)
+            self.set_status("UID reset failed")
+            return
+
+        new_uid_text = self.selected_module.get("hardware_unique_id", "")
+        if new_uid_text in ("", "0x00000000", "0"):
+            self.load_modules_from_db()
+            self.show_modules_menu()
+            self.set_status("UID reset - rediscover module")
+            return
+
+        try:
+            db = nfcp.load_device_db()
+            idx = nfcp.index_db_by_unique(db)
+            dev = idx.pop(uid_text, self.selected_module)
+            dev["unique_id"] = new_uid_text
+            dev["configured_unique_id"] = "0x00000000"
+            idx[new_uid_text] = dev
+            db["devices"] = sorted(
+                idx.values(),
+                key=lambda d: self.group_to_int_value(d.get("group_id", None))
+            )
+            nfcp.save_device_db(db)
+            self.selected_module = dev
+            self.load_modules_from_db()
+        except Exception as e:
+            print("UID DB update failed:", e)
+
+        self.show_module_continuity()
+        self.set_status("UID reset to hardware")
+
     def get_selected_module_uid_int(self):
         if not self.selected_module:
             self.set_status("No module selected")
@@ -5024,6 +5262,9 @@ class NFCPGui:
 
         if version and hasattr(self, "version_label"):
             self.version_label.set_text(self.format_selected_versions())
+
+        if version and hasattr(self, "identity_label"):
+            self.identity_label.set_text(self.format_selected_identity())
 
     def apply_last_radio_link_to_module(self, dev, uid_text):
         link = nfcp.get_last_radio_link(uid_text)

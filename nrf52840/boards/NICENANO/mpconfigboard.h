@@ -5,6 +5,8 @@
 #define MICROPY_HW_BOARD_NAME       "nice!nano"
 #define MICROPY_HW_MCU_NAME         "NRF52840"
 
+#define MICROPY_BOARD_ENTER_BOOTLOADER(nargs, args) NICENANO_board_enter_bootloader()
+
 #define MICROPY_HW_ENABLE_USBDEV    (1)
 #define MICROPY_HW_USB_CDC          (1)
 
@@ -46,3 +48,5 @@
 #define MICROPY_HW_USB_VID          (0x239A)
 #define MICROPY_HW_USB_PID          (0x00B3)
 #define MICROPY_HW_USB_CDC_1200BPS_TOUCH (1)
+
+void NICENANO_board_enter_bootloader(void);

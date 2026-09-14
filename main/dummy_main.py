@@ -51,6 +51,7 @@ CUE_MIN = 1
 CUE_MAX = DEFAULT_CUE_COUNT
 SCRIPT_MAX_ENTRIES = 192
 SCRIPT_HEARTBEAT_TIMEOUT_MS = 3000
+SCRIPT_TIME_SYNC_VALID_MS = 10000
 
 
 def clamp_cue_count(cue_count):
@@ -128,6 +129,9 @@ script_running = False
 script_start_ms = 0
 script_next_index = 0
 script_last_heartbeat_ms = 0
+script_time_synced = False
+script_master_offset_ms = 0
+script_time_sync_local_ms = 0
 
 # Clamp cue count to supported protocol range.
 # Continuity masks support 1..64 cues.
@@ -142,6 +146,31 @@ print(
     "CFG: GROUP=0x%04X UNIQUE=0x%08X CUES=%d TYPE=0x%02X NET=0x%04X" %
     (GROUP_ID, UNIQUE_ID, CUE_COUNT, DEVICE_TYPE, RADIO_NETWORK_ID)
 )
+
+
+def handle_time_sync(pkt):
+    global script_time_synced, script_master_offset_ms, script_time_sync_local_ms
+
+    data = pkt.get("data", b"")
+    if len(data) < 4:
+        return
+
+    master_ms = int.from_bytes(data[0:4], "big") & 0x3FFFFFFF
+    local_ms = time.ticks_ms() & 0x3FFFFFFF
+    script_master_offset_ms = time.ticks_diff(master_ms, local_ms)
+    script_time_sync_local_ms = time.ticks_ms()
+    script_time_synced = True
+
+
+def script_time_sync_valid():
+    return (
+        script_time_synced and
+        time.ticks_diff(time.ticks_ms(), script_time_sync_local_ms) <= SCRIPT_TIME_SYNC_VALID_MS
+    )
+
+
+def master_ms_to_local_ms(master_ms):
+    return time.ticks_add(master_ms & 0x3FFFFFFF, -script_master_offset_ms)
 
 last_rx_ms = time.ticks_ms()
 
@@ -367,6 +396,9 @@ def handle_script_start(pkt):
     offset_ms = 0
     if len(data) >= 8:
         offset_ms = int.from_bytes(data[4:8], "big")
+    start_master_ms = None
+    if len(data) >= 12:
+        start_master_ms = int.from_bytes(data[8:12], "big") & 0x3FFFFFFF
 
     if script_id_loaded != script_id or not script_entries:
         reply_nack_if_unique(pkt, CMD_SCRIPT_START, NACK_INVALID_VALUE)
@@ -378,7 +410,10 @@ def handle_script_start(pkt):
             break
         script_next_index += 1
 
-    script_start_ms = time.ticks_add(time.ticks_ms(), start_delay_ms - offset_ms)
+    if start_master_ms is not None and script_time_sync_valid():
+        script_start_ms = time.ticks_add(master_ms_to_local_ms(start_master_ms), -offset_ms)
+    else:
+        script_start_ms = time.ticks_add(time.ticks_ms(), start_delay_ms - offset_ms)
     script_running = True
     script_last_heartbeat_ms = time.ticks_ms()
     reply_ack_if_unique(pkt, CMD_SCRIPT_START)
@@ -514,6 +549,10 @@ def handle(pkt):
 
     if cmd == CMD_SCRIPT_HEARTBEAT:
         handle_script_heartbeat(pkt)
+        return
+
+    if cmd == CMD_TIME_SYNC:
+        handle_time_sync(pkt)
         return
 
     # Continuity allowed even when ARMED, but rate-limited

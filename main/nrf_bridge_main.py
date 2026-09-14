@@ -38,6 +38,10 @@ UART_RX_PIN = getattr(bridge_config, "UART_RX_PIN", DEFAULT_UART_RX_PIN)
 RADIO_POLL_TIMEOUT_MS = 50
 UART_READ_MAX = 64
 POST_SEND_RX_WINDOW_MS = 1500
+SCAN_BUSY_DBM = -85
+SCAN_SAMPLE_MS = 45
+SCAN_SAMPLE_INTERVAL_MS = 3
+SCAN_CANDIDATE_CHANNELS = (0,) + tuple(range(74, 101))
 
 local_parser = e77_radio.E77FrameParser()
 uart = None
@@ -61,6 +65,12 @@ def encode_text_field(text):
 
 def get_node_id():
     try:
+        uid = nrf_radio.device_id32()
+        if uid:
+            return int(uid) & 0xFFFFFFFF
+    except Exception:
+        pass
+    try:
         uid = machine.unique_id()
         if uid:
             return int.from_bytes(uid[-4:], "big") & 0xFFFFFFFF
@@ -76,6 +86,39 @@ def build_info_payload():
         e77_radio.int_to_be(NETWORK_ID & 0xFFFF, 2) +
         encode_text_field(APP_FIRMWARE_VERSION)
     )
+
+
+def stat_value(stats, key, fallback=0):
+    try:
+        return int(stats.get(key, fallback))
+    except Exception:
+        return fallback
+
+
+def build_stats_payload():
+    try:
+        stats = nrf_radio.stats()
+    except Exception:
+        stats = {}
+
+    tx_power = stat_value(stats, "tx_power", RADIO_TX_POWER)
+    last_rssi = stat_value(stats, "last_rssi", 0)
+    payload = bytearray()
+    payload += e77_radio.int_to_be(stat_value(stats, "tx_ok"), 4)
+    payload += e77_radio.int_to_be(stat_value(stats, "tx_timeout"), 4)
+    payload += e77_radio.int_to_be(stat_value(stats, "rx_ok"), 4)
+    payload += e77_radio.int_to_be(stat_value(stats, "rx_timeout"), 4)
+    payload += e77_radio.int_to_be(stat_value(stats, "rx_crc_error"), 4)
+    payload += e77_radio.int_to_be(stat_value(stats, "rx_bad_len"), 4)
+    payload.append(stat_value(stats, "channel", RADIO_CHANNEL) & 0xFF)
+    payload += int_to_be_signed(tx_power, 1)
+    payload += int_to_be_signed(last_rssi, 2)
+    payload += e77_radio.int_to_be(stat_value(stats, "max_payload", 252), 2)
+    payload += e77_radio.int_to_be(stat_value(stats, "address", RADIO_ADDRESS), 4)
+    payload += e77_radio.int_to_be(stat_value(stats, "tx_busy"), 4)
+    payload += e77_radio.int_to_be(stat_value(stats, "cca_ok"), 4)
+    payload += e77_radio.int_to_be(stat_value(stats, "cca_busy"), 4)
+    return bytes(payload)
 
 
 def write_local(seq, cmd, payload=b"", flags=e77_radio.FLAG_RESPONSE):
@@ -106,24 +149,58 @@ def set_radio_channel(channel):
 def build_scan_payload():
     results = []
 
-    for channel in range(74, 101):
-        sample = nrf_radio.noise_sample(channel, duration_ms=45, interval_ms=3)
+    for channel in SCAN_CANDIDATE_CHANNELS:
+        try:
+            sample = nrf_radio.noise_sample(
+                channel,
+                duration_ms=SCAN_SAMPLE_MS,
+                interval_ms=SCAN_SAMPLE_INTERVAL_MS,
+                busy_dbm=SCAN_BUSY_DBM
+            )
+        except TypeError:
+            sample = nrf_radio.noise_sample(
+                channel,
+                duration_ms=SCAN_SAMPLE_MS,
+                interval_ms=SCAN_SAMPLE_INTERVAL_MS
+            )
+        count = int(sample.get("count", 0))
+        avg = int(sample.get("avg", 0))
+        min_rssi = int(sample.get("min", 0))
+        max_rssi = int(sample.get("max", 0))
+        busy_count = int(sample.get("busy_count", 0))
+        if "busy_count" not in sample and max_rssi >= SCAN_BUSY_DBM:
+            busy_count = count
+
+        quiet_margin = SCAN_BUSY_DBM - max_rssi
+        avg_margin = SCAN_BUSY_DBM - avg
+        score = quiet_margin * 4 + avg_margin * 2 - busy_count * 5
+        if score < 0:
+            score = 0
+        if score > 100:
+            score = 100
+
         results.append((
             int(sample.get("channel", channel)),
-            int(sample.get("avg", 0)),
-            int(sample.get("min", 0)),
-            int(sample.get("max", 0)),
+            avg,
+            min_rssi,
+            max_rssi,
+            count,
+            busy_count,
+            score,
         ))
 
-    results.sort(key=lambda item: (item[1], item[3], item[0]))
+    results.sort(key=lambda item: (-item[6], item[3], item[1], item[0]))
     payload = bytearray()
     payload.append(min(10, len(results)))
 
-    for channel, avg, min_rssi, max_rssi in results[:10]:
+    for channel, avg, min_rssi, max_rssi, count, busy_count, score in results[:10]:
         payload.append(channel & 0xFF)
         payload += int_to_be_signed(avg, 2)
         payload += int_to_be_signed(min_rssi, 2)
         payload += int_to_be_signed(max_rssi, 2)
+        payload.append(count & 0xFF)
+        payload.append(busy_count & 0xFF)
+        payload.append(score & 0xFF)
 
     nrf_radio.channel(RADIO_CHANNEL)
     return bytes(payload)
@@ -136,6 +213,18 @@ def handle_local_frame(frame):
 
     if frame.cmd == e77_radio.CMD_GET_INFO:
         write_local(frame.seq, e77_radio.CMD_GET_INFO, build_info_payload())
+        return
+
+    if frame.cmd == e77_radio.CMD_GET_STATS:
+        write_local(frame.seq, e77_radio.CMD_GET_STATS, build_stats_payload())
+        return
+
+    if frame.cmd == e77_radio.CMD_CLEAR_STATS:
+        try:
+            nrf_radio.clear_stats()
+            write_local(frame.seq, e77_radio.CMD_CLEAR_STATS)
+        except Exception:
+            write_error(frame.seq, e77_radio.CMD_CLEAR_STATS, 0)
         return
 
     if frame.cmd == e77_radio.CMD_SET_NETWORK:

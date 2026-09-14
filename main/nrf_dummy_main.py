@@ -34,6 +34,12 @@ SIM_REFRESH_MS = 2500
 
 def get_default_unique_id():
     try:
+        uid = nrf_radio.device_id32()
+        if uid:
+            return int(uid) & 0xFFFFFFFF
+    except Exception:
+        pass
+    try:
         uid = machine.unique_id()
         if uid:
             return int.from_bytes(uid[-4:], "big") & 0xFFFFFFFF
@@ -42,8 +48,9 @@ def get_default_unique_id():
     return 0x52840001
 
 
+CONFIG_UNIQUE_ID = getattr(node_config, "UNIQUE_ID", 0)
 GROUP_ID = getattr(node_config, "GROUP_ID", DEFAULT_GROUP_ID)
-UNIQUE_ID = getattr(node_config, "UNIQUE_ID", get_default_unique_id())
+UNIQUE_ID = (CONFIG_UNIQUE_ID & 0xFFFFFFFF) or get_default_unique_id()
 CUE_COUNT = DEFAULT_CUE_COUNT
 DEVICE_TYPE = DEFAULT_DEVICE_TYPE
 NETWORK_ID = getattr(node_config, "NETWORK_ID", DEFAULT_NETWORK_ID)
@@ -105,14 +112,16 @@ def build_info_payload():
         encode_text_field(APP_FIRMWARE_NAME) +
         encode_text_field(APP_FIRMWARE_VERSION) +
         encode_text_field("nrf-radio-native") +
-        encode_text_field("dummy")
+        encode_text_field("") +
+        encode_text_field("0x%08X" % (get_default_unique_id() & 0xFFFFFFFF)) +
+        encode_text_field("0x%08X" % (CONFIG_UNIQUE_ID & 0xFFFFFFFF))
     )
 
 
 def save_runtime_config():
     try:
         with open("nrf_node_config.py", "w") as f:
-            f.write("UNIQUE_ID = 0x%08X\n" % (UNIQUE_ID & 0xFFFFFFFF))
+            f.write("UNIQUE_ID = 0x%08X\n" % (CONFIG_UNIQUE_ID & 0xFFFFFFFF))
             f.write("GROUP_ID = 0x%04X\n" % (GROUP_ID & 0xFFFF))
             f.write("NETWORK_ID = 0x%04X\n" % (NETWORK_ID & 0xFFFF))
             f.write("RADIO_CHANNEL = %d\n" % (RADIO_CHANNEL & 0xFF))
@@ -185,7 +194,7 @@ def handle_fire(pkt):
 
 
 def handle(pkt):
-    global ARMED, GROUP_ID, NETWORK_ID, RADIO_CHANNEL
+    global ARMED, GROUP_ID, UNIQUE_ID, CONFIG_UNIQUE_ID, NETWORK_ID, RADIO_CHANNEL
 
     cmd = pkt.get("cmd")
     data = pkt.get("data", b"")
@@ -282,6 +291,23 @@ def handle(pkt):
             reply_ack_if_unique(pkt, CMD_SET_RADIO_CHANNEL)
             time.sleep_ms(80)
             nrf_radio.channel(RADIO_CHANNEL)
+        return
+
+    if cmd == CMD_SET_UNIQUE:
+        old_unique = UNIQUE_ID
+        if ARMED:
+            if pkt.get("frame_type") == SOF_UNIQUE:
+                tx_nfcp(nfcp.build_nack(old_unique, CMD_SET_UNIQUE, NACK_REJECTED_ARMED))
+        elif len(data) != 4:
+            if pkt.get("frame_type") == SOF_UNIQUE:
+                tx_nfcp(nfcp.build_nack(old_unique, CMD_SET_UNIQUE, NACK_BAD_LENGTH))
+        else:
+            CONFIG_UNIQUE_ID = int.from_bytes(data, "big") & 0xFFFFFFFF
+            UNIQUE_ID = CONFIG_UNIQUE_ID or get_default_unique_id()
+            save_runtime_config()
+            if pkt.get("frame_type") == SOF_UNIQUE:
+                tx_nfcp(nfcp.build_ack(old_unique, CMD_SET_UNIQUE, ACK_OK))
+            print("NEW UNIQUE_ID = 0x%08X" % UNIQUE_ID)
         return
 
 

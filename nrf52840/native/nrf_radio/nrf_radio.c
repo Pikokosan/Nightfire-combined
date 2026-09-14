@@ -21,6 +21,15 @@ static int last_rssi_dbm = 0;
 static uint32_t current_channel = NRF_RADIO_DEFAULT_CHANNEL;
 static int32_t current_tx_power = 8;
 static uint32_t current_address = NRF_RADIO_DEFAULT_ADDRESS;
+static uint32_t stat_tx_ok = 0;
+static uint32_t stat_tx_timeout = 0;
+static uint32_t stat_rx_ok = 0;
+static uint32_t stat_rx_timeout = 0;
+static uint32_t stat_rx_crc_error = 0;
+static uint32_t stat_rx_bad_len = 0;
+static uint32_t stat_tx_busy = 0;
+static uint32_t stat_cca_ok = 0;
+static uint32_t stat_cca_busy = 0;
 
 static void radio_disable(void) {
     NRF_RADIO->TASKS_DISABLE = 1;
@@ -91,6 +100,54 @@ static void radio_config(uint32_t channel, int32_t tx_power, uint32_t address) {
     NRF_RADIO->SHORTS = RADIO_SHORTS_READY_START_Msk | RADIO_SHORTS_END_DISABLE_Msk;
 }
 
+static bool channel_is_clear(uint32_t cca_ms, int32_t busy_dbm) {
+    if (cca_ms == 0) {
+        return true;
+    }
+
+    radio_disable();
+    memset(rx_packet, 0, sizeof(rx_packet));
+    NRF_RADIO->PACKETPTR = (uint32_t)rx_packet;
+    NRF_RADIO->EVENTS_READY = 0;
+    NRF_RADIO->EVENTS_RSSIEND = 0;
+    NRF_RADIO->EVENTS_DISABLED = 0;
+    NRF_RADIO->TASKS_RXEN = 1;
+
+    uint32_t guard = 1000000;
+    while (!NRF_RADIO->EVENTS_READY && guard--) {
+    }
+    if (!guard) {
+        radio_disable();
+        stat_rx_timeout++;
+        return true;
+    }
+
+    uint32_t start = mp_hal_ticks_ms();
+    while ((mp_hal_ticks_ms() - start) < cca_ms) {
+        NRF_RADIO->EVENTS_RSSIEND = 0;
+        NRF_RADIO->TASKS_RSSISTART = 1;
+
+        guard = 1000000;
+        while (!NRF_RADIO->EVENTS_RSSIEND && guard--) {
+        }
+        if (!guard) {
+            break;
+        }
+
+        int32_t dbm = -(int32_t)NRF_RADIO->RSSISAMPLE;
+        last_rssi_dbm = dbm;
+        if (dbm >= busy_dbm) {
+            radio_disable();
+            stat_cca_busy++;
+            return false;
+        }
+    }
+
+    radio_disable();
+    stat_cca_ok++;
+    return true;
+}
+
 static mp_obj_t nrf_radio_init(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
     enum {
         ARG_channel,
@@ -114,11 +171,38 @@ static mp_obj_t nrf_radio_init(size_t n_args, const mp_obj_t *pos_args, mp_map_t
 }
 static MP_DEFINE_CONST_FUN_OBJ_KW(nrf_radio_init_obj, 0, nrf_radio_init);
 
-static mp_obj_t nrf_radio_send(mp_obj_t payload_obj) {
+static mp_obj_t nrf_radio_send(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    enum {
+        ARG_payload,
+        ARG_cca_ms,
+        ARG_busy_dbm,
+        ARG_backoff_ms,
+    };
+    static const mp_arg_t allowed_args[] = {
+        { MP_QSTR_payload, MP_ARG_REQUIRED | MP_ARG_OBJ, {.u_obj = MP_OBJ_NULL} },
+        { MP_QSTR_cca_ms, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 0} },
+        { MP_QSTR_busy_dbm, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = -85} },
+        { MP_QSTR_backoff_ms, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 0} },
+    };
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
+    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
+
     mp_buffer_info_t payload;
-    mp_get_buffer_raise(payload_obj, &payload, MP_BUFFER_READ);
+    mp_get_buffer_raise(args[ARG_payload].u_obj, &payload, MP_BUFFER_READ);
     if (payload.len > NRF_RADIO_MAX_PAYLOAD) {
         mp_raise_ValueError(MP_ERROR_TEXT("payload too long"));
+    }
+
+    uint32_t cca_ms = (uint32_t)args[ARG_cca_ms].u_int;
+    int32_t busy_dbm = (int32_t)args[ARG_busy_dbm].u_int;
+    uint32_t backoff_ms = (uint32_t)args[ARG_backoff_ms].u_int;
+
+    if (!channel_is_clear(cca_ms, busy_dbm)) {
+        stat_tx_busy++;
+        if (backoff_ms > 0) {
+            mp_hal_delay_ms((mp_hal_ticks_us() % backoff_ms) + 1);
+        }
+        return mp_const_false;
     }
 
     radio_disable();
@@ -135,12 +219,14 @@ static mp_obj_t nrf_radio_send(mp_obj_t payload_obj) {
     }
     if (!guard) {
         radio_disable();
+        stat_tx_timeout++;
         mp_raise_OSError(MP_ETIMEDOUT);
     }
     NRF_RADIO->EVENTS_DISABLED = 0;
+    stat_tx_ok++;
     return mp_const_true;
 }
-static MP_DEFINE_CONST_FUN_OBJ_1(nrf_radio_send_obj, nrf_radio_send);
+static MP_DEFINE_CONST_FUN_OBJ_KW(nrf_radio_send_obj, 1, nrf_radio_send);
 
 static mp_obj_t nrf_radio_recv(size_t n_args, const mp_obj_t *args) {
     uint32_t timeout_ms = 0;
@@ -161,6 +247,7 @@ static mp_obj_t nrf_radio_recv(size_t n_args, const mp_obj_t *args) {
     while (!NRF_RADIO->EVENTS_READY) {
         if (timeout_ms && mp_hal_ticks_ms() - start >= timeout_ms) {
             radio_disable();
+            stat_rx_timeout++;
             return mp_const_none;
         }
     }
@@ -169,6 +256,7 @@ static mp_obj_t nrf_radio_recv(size_t n_args, const mp_obj_t *args) {
     while (!NRF_RADIO->EVENTS_DISABLED) {
         if (timeout_ms && mp_hal_ticks_ms() - start >= timeout_ms) {
             radio_disable();
+            stat_rx_timeout++;
             return mp_const_none;
         }
     }
@@ -177,10 +265,17 @@ static mp_obj_t nrf_radio_recv(size_t n_args, const mp_obj_t *args) {
         last_rssi_dbm = -(int)NRF_RADIO->RSSISAMPLE;
     }
 
-    uint8_t length = rx_packet[0];
-    if (length > NRF_RADIO_MAX_PAYLOAD) {
+    if (!NRF_RADIO->CRCSTATUS) {
+        stat_rx_crc_error++;
         return mp_const_none;
     }
+
+    uint8_t length = rx_packet[0];
+    if (length > NRF_RADIO_MAX_PAYLOAD) {
+        stat_rx_bad_len++;
+        return mp_const_none;
+    }
+    stat_rx_ok++;
     return mp_obj_new_bytes(&rx_packet[1], length);
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(nrf_radio_recv_obj, 0, 1, nrf_radio_recv);
@@ -189,6 +284,40 @@ static mp_obj_t nrf_radio_last_rssi(void) {
     return mp_obj_new_int(last_rssi_dbm);
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(nrf_radio_last_rssi_obj, nrf_radio_last_rssi);
+
+static mp_obj_t nrf_radio_stats(void) {
+    mp_obj_t result = mp_obj_new_dict(14);
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_tx_ok), mp_obj_new_int_from_uint(stat_tx_ok));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_tx_timeout), mp_obj_new_int_from_uint(stat_tx_timeout));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_tx_busy), mp_obj_new_int_from_uint(stat_tx_busy));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_rx_ok), mp_obj_new_int_from_uint(stat_rx_ok));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_rx_timeout), mp_obj_new_int_from_uint(stat_rx_timeout));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_rx_crc_error), mp_obj_new_int_from_uint(stat_rx_crc_error));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_rx_bad_len), mp_obj_new_int_from_uint(stat_rx_bad_len));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_cca_ok), mp_obj_new_int_from_uint(stat_cca_ok));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_cca_busy), mp_obj_new_int_from_uint(stat_cca_busy));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_last_rssi), mp_obj_new_int(last_rssi_dbm));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_channel), mp_obj_new_int_from_uint(current_channel));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_tx_power), mp_obj_new_int(current_tx_power));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_address), mp_obj_new_int_from_uint(current_address));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_max_payload), mp_obj_new_int(NRF_RADIO_MAX_PAYLOAD));
+    return result;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(nrf_radio_stats_obj, nrf_radio_stats);
+
+static mp_obj_t nrf_radio_clear_stats(void) {
+    stat_tx_ok = 0;
+    stat_tx_timeout = 0;
+    stat_rx_ok = 0;
+    stat_rx_timeout = 0;
+    stat_rx_crc_error = 0;
+    stat_rx_bad_len = 0;
+    stat_tx_busy = 0;
+    stat_cca_ok = 0;
+    stat_cca_busy = 0;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(nrf_radio_clear_stats_obj, nrf_radio_clear_stats);
 
 static mp_obj_t nrf_radio_channel(mp_obj_t channel_obj) {
     uint32_t channel = mp_obj_get_int(channel_obj);
@@ -202,16 +331,39 @@ static mp_obj_t nrf_radio_channel(mp_obj_t channel_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(nrf_radio_channel_obj, nrf_radio_channel);
 
+static mp_obj_t nrf_radio_device_id32(void) {
+    uint32_t id0 = NRF_FICR->DEVICEID[0];
+    uint32_t id1 = NRF_FICR->DEVICEID[1];
+
+    if (id0 != 0 && id0 != 0xFFFFFFFFu) {
+        return mp_obj_new_int_from_uint(id0);
+    }
+
+    return mp_obj_new_int_from_uint(id0 ^ id1);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(nrf_radio_device_id32_obj, nrf_radio_device_id32);
+
+static mp_obj_t nrf_radio_device_id(void) {
+    mp_obj_t tuple[2] = {
+        mp_obj_new_int_from_uint(NRF_FICR->DEVICEID[0]),
+        mp_obj_new_int_from_uint(NRF_FICR->DEVICEID[1]),
+    };
+    return mp_obj_new_tuple(2, tuple);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(nrf_radio_device_id_obj, nrf_radio_device_id);
+
 static mp_obj_t nrf_radio_noise_sample(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
     enum {
         ARG_channel,
         ARG_duration_ms,
         ARG_interval_ms,
+        ARG_busy_dbm,
     };
     static const mp_arg_t allowed_args[] = {
         { MP_QSTR_channel, MP_ARG_REQUIRED | MP_ARG_INT, {.u_int = NRF_RADIO_DEFAULT_CHANNEL} },
         { MP_QSTR_duration_ms, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 100} },
         { MP_QSTR_interval_ms, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = 2} },
+        { MP_QSTR_busy_dbm, MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = -85} },
     };
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -219,6 +371,7 @@ static mp_obj_t nrf_radio_noise_sample(size_t n_args, const mp_obj_t *pos_args, 
     uint32_t sample_channel = (uint32_t)args[ARG_channel].u_int;
     uint32_t duration_ms = (uint32_t)args[ARG_duration_ms].u_int;
     uint32_t interval_ms = (uint32_t)args[ARG_interval_ms].u_int;
+    int32_t busy_dbm = (int32_t)args[ARG_busy_dbm].u_int;
 
     if (sample_channel > 100) {
         mp_raise_ValueError(MP_ERROR_TEXT("channel must be 0..100"));
@@ -255,6 +408,7 @@ static mp_obj_t nrf_radio_noise_sample(size_t n_args, const mp_obj_t *pos_args, 
     int max_dbm = 0;
     int sum_dbm = 0;
     int count = 0;
+    int busy_count = 0;
 
     uint32_t start = mp_hal_ticks_ms();
     while ((mp_hal_ticks_ms() - start) < duration_ms || count == 0) {
@@ -278,6 +432,9 @@ static mp_obj_t nrf_radio_noise_sample(size_t n_args, const mp_obj_t *pos_args, 
         }
         sum_dbm += dbm;
         count++;
+        if (dbm >= busy_dbm) {
+            busy_count++;
+        }
 
         mp_hal_delay_ms(interval_ms);
     }
@@ -285,12 +442,13 @@ static mp_obj_t nrf_radio_noise_sample(size_t n_args, const mp_obj_t *pos_args, 
     radio_disable();
     radio_config(previous_channel, previous_tx_power, previous_address);
 
-    mp_obj_t result = mp_obj_new_dict(5);
+    mp_obj_t result = mp_obj_new_dict(6);
     mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_channel), mp_obj_new_int(sample_channel));
     mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_count), mp_obj_new_int(count));
     mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_avg), mp_obj_new_int(count ? (sum_dbm / count) : 0));
     mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_min), mp_obj_new_int(count ? min_dbm : 0));
     mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_max), mp_obj_new_int(count ? max_dbm : 0));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_busy_count), mp_obj_new_int(busy_count));
     return result;
 }
 static MP_DEFINE_CONST_FUN_OBJ_KW(nrf_radio_noise_sample_obj, 1, nrf_radio_noise_sample);
@@ -301,7 +459,11 @@ static const mp_rom_map_elem_t nrf_radio_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_send), MP_ROM_PTR(&nrf_radio_send_obj) },
     { MP_ROM_QSTR(MP_QSTR_recv), MP_ROM_PTR(&nrf_radio_recv_obj) },
     { MP_ROM_QSTR(MP_QSTR_last_rssi), MP_ROM_PTR(&nrf_radio_last_rssi_obj) },
+    { MP_ROM_QSTR(MP_QSTR_stats), MP_ROM_PTR(&nrf_radio_stats_obj) },
+    { MP_ROM_QSTR(MP_QSTR_clear_stats), MP_ROM_PTR(&nrf_radio_clear_stats_obj) },
     { MP_ROM_QSTR(MP_QSTR_channel), MP_ROM_PTR(&nrf_radio_channel_obj) },
+    { MP_ROM_QSTR(MP_QSTR_device_id32), MP_ROM_PTR(&nrf_radio_device_id32_obj) },
+    { MP_ROM_QSTR(MP_QSTR_device_id), MP_ROM_PTR(&nrf_radio_device_id_obj) },
     { MP_ROM_QSTR(MP_QSTR_noise_sample), MP_ROM_PTR(&nrf_radio_noise_sample_obj) },
 };
 static MP_DEFINE_CONST_DICT(nrf_radio_module_globals, nrf_radio_module_globals_table);
