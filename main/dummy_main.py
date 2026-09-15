@@ -351,36 +351,63 @@ def handle_script_clear(pkt):
     reply_ack_if_unique(pkt, CMD_SCRIPT_CLEAR)
 
 
-def handle_script_load(pkt):
-    global script_id_loaded, script_entries
-
-    data = pkt.get("data", b"")
+def parse_script_load_data(data):
     if len(data) < 4:
-        reply_nack_if_unique(pkt, CMD_SCRIPT_LOAD, NACK_BAD_LENGTH)
-        return
+        return None, None, None, NACK_BAD_LENGTH
 
     script_id = int.from_bytes(data[0:2], "big") & 0xFFFF
+    chunk_index = data[2]
     entry_count = data[3]
     payload = data[4:]
     if len(payload) != entry_count * SCRIPT_ENTRY_BYTES:
-        reply_nack_if_unique(pkt, CMD_SCRIPT_LOAD, NACK_BAD_LENGTH)
+        return None, None, None, NACK_BAD_LENGTH
+
+    entries = []
+    pos = 0
+    for _ in range(entry_count):
+        event_ms = int.from_bytes(payload[pos:pos + 4], "big")
+        cue_mask = int.from_bytes(payload[pos + 4:pos + 6], "big") & 0xFFFF
+        pos += SCRIPT_ENTRY_BYTES
+        if cue_mask:
+            entries.append((event_ms, cue_mask))
+
+    return script_id, chunk_index, entries, ACK_OK
+
+
+def find_script_index_at_or_after(offset_ms):
+    index = 0
+    while index < len(script_entries):
+        if script_entries[index][0] >= offset_ms:
+            break
+        index += 1
+    return index
+
+
+def fire_script_event(event_ms):
+    fired = 0
+    for entry_ms, cue_mask in script_entries:
+        if entry_ms == event_ms:
+            print("SCRIPT STEP FIRE mask=0x%04X event=%d" % (cue_mask, event_ms))
+            fired += 1
+    return fired
+
+
+def handle_script_load(pkt):
+    global script_id_loaded, script_entries
+
+    script_id, _chunk_index, entries, code = parse_script_load_data(pkt.get("data", b""))
+    if code != ACK_OK:
+        reply_nack_if_unique(pkt, CMD_SCRIPT_LOAD, code)
         return
 
     if script_id_loaded != script_id:
         clear_script(script_id)
 
-    if len(script_entries) + entry_count > SCRIPT_MAX_ENTRIES:
+    if len(script_entries) + len(entries) > SCRIPT_MAX_ENTRIES:
         reply_nack_if_unique(pkt, CMD_SCRIPT_LOAD, NACK_BUSY)
         return
 
-    pos = 0
-    for _ in range(entry_count):
-        event_ms = int.from_bytes(payload[pos:pos + 4], "big")
-        cue_mask = int.from_bytes(payload[pos + 4:pos + 6], "big") & 0xFFFF
-        pos += 6
-        if cue_mask:
-            script_entries.append((event_ms, cue_mask))
-
+    script_entries.extend(entries)
     script_entries.sort(key=lambda item: item[0])
     reply_ack_if_unique(pkt, CMD_SCRIPT_LOAD)
 
@@ -410,11 +437,7 @@ def handle_script_start(pkt):
         reply_nack_if_unique(pkt, CMD_SCRIPT_START, NACK_INVALID_VALUE)
         return
 
-    script_next_index = 0
-    while script_next_index < len(script_entries):
-        if script_entries[script_next_index][0] >= offset_ms:
-            break
-        script_next_index += 1
+    script_next_index = find_script_index_at_or_after(offset_ms)
 
     if start_master_ms is not None and script_time_sync_valid():
         script_start_ms = time.ticks_add(master_ms_to_local_ms(start_master_ms), -offset_ms)
@@ -458,13 +481,7 @@ def handle_script_step(pkt):
     if script_id_loaded != script_id:
         return
 
-    fired = 0
-    for entry_ms, cue_mask in script_entries:
-        if entry_ms == event_ms:
-            print("SCRIPT STEP FIRE mask=0x%04X event=%d" % (cue_mask, event_ms))
-            fired += 1
-
-    if not fired:
+    if not fire_script_event(event_ms):
         return
 
 
