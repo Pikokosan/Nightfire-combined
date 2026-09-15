@@ -569,13 +569,17 @@ def parse_info_rsp(data):
     script_status, index = read_text_field(data, index)
     hardware_unique_id, index = read_text_field(data, index)
     configured_unique_id, index = read_text_field(data, index)
+    battery_mv, index = read_text_field(data, index)
+    battery_pack_type, index = read_text_field(data, index)
     return {
         "app_name": app_name,
         "app_version": app_version,
         "radio_version": radio_version,
         "script_status": script_status,
         "hardware_unique_id": hardware_unique_id,
-        "configured_unique_id": configured_unique_id
+        "configured_unique_id": configured_unique_id,
+        "battery_mv": battery_mv,
+        "battery_pack_type": battery_pack_type
     }
 
 
@@ -656,6 +660,46 @@ def get_last_radio_link(uid_text):
     return _last_radio_links.get(uid_text, None)
 
 
+def module_mark_online(dev, now=None):
+    if now is None:
+        now = time.time()
+
+    dev["module_online"] = True
+    dev["module_last_seen_epoch"] = now
+
+
+def module_mark_lost(dev, now=None):
+    if now is None:
+        now = time.time()
+
+    dev["module_online"] = False
+    dev["module_lost_epoch"] = now
+
+
+def module_apply_radio_link(dev, uid_text):
+    link = get_last_radio_link(uid_text)
+    if not link:
+        return
+
+    if link.get("radio_rssi", None) is not None:
+        dev["radio_rssi"] = link["radio_rssi"]
+    if link.get("radio_snr", None) is not None:
+        dev["radio_snr"] = link["radio_snr"]
+    dev["radio_last_epoch"] = link.get("radio_last_epoch", time.time())
+
+
+def module_apply_info(dev, info):
+    dev["app_name"] = info.get("app_name", "")
+    dev["app_version"] = info.get("app_version", "")
+    dev["radio_firmware_version"] = info.get("radio_version", "")
+    dev["script_status"] = info.get("script_status", "")
+    dev["hardware_unique_id"] = info.get("hardware_unique_id", "")
+    dev["configured_unique_id"] = info.get("configured_unique_id", "")
+    dev["battery_mv"] = info.get("battery_mv", "")
+    dev["battery_pack_type"] = info.get("battery_pack_type", "")
+    dev["info_last_epoch"] = time.time()
+
+
 def discover(idle_ms=DISCOVER_IDLE_TIMEOUT_MS, max_scan_ms=DISCOVER_MAX_SCAN_MS):
     drain_uart()
 
@@ -689,8 +733,7 @@ def discover(idle_ms=DISCOVER_IDLE_TIMEOUT_MS, max_scan_ms=DISCOVER_MAX_SCAN_MS)
                 if pkt.get("radio_snr", None) is not None:
                     info["radio_snr"] = pkt["radio_snr"]
                 info["radio_last_epoch"] = time.time()
-                info["module_online"] = True
-                info["module_last_seen_epoch"] = time.time()
+                module_mark_online(info)
                 existing = idx.get(info["unique_id"], {})
                 existing.update(info)
                 idx[info["unique_id"]] = existing
@@ -705,8 +748,7 @@ def discover(idle_ms=DISCOVER_IDLE_TIMEOUT_MS, max_scan_ms=DISCOVER_MAX_SCAN_MS)
 
     for uid_text, dev in idx.items():
         if uid_text not in discovered_uids:
-            dev["module_online"] = False
-            dev["module_lost_epoch"] = time.time()
+            module_mark_lost(dev)
 
     db["devices"] = sorted(idx.values(), key=lambda d: d.get("unique_id", ""))
     save_device_db(db)
@@ -801,22 +843,9 @@ def info_scan(timeout_ms=1000):
 
         info = request_info_for_uid(uid, timeout_ms)
         if info:
-            dev["app_name"] = info.get("app_name", "")
-            dev["app_version"] = info.get("app_version", "")
-            dev["radio_firmware_version"] = info.get("radio_version", "")
-            dev["hardware_unique_id"] = info.get("hardware_unique_id", "")
-            dev["configured_unique_id"] = info.get("configured_unique_id", "")
-            dev["info_last_epoch"] = time.time()
-            dev["module_online"] = True
-            dev["module_last_seen_epoch"] = time.time()
-
-            link = get_last_radio_link(uid_text)
-            if link:
-                if link.get("radio_rssi", None) is not None:
-                    dev["radio_rssi"] = link["radio_rssi"]
-                if link.get("radio_snr", None) is not None:
-                    dev["radio_snr"] = link["radio_snr"]
-                dev["radio_last_epoch"] = link.get("radio_last_epoch", time.time())
+            module_apply_info(dev, info)
+            module_mark_online(dev)
+            module_apply_radio_link(dev, uid_text)
 
             results.append({
                 "unique_id": uid_text,
@@ -849,8 +878,7 @@ def continuity_scan(timeout_ms=300):
 
         ok = request_continuity_for_uid(uid, cue_count, timeout_ms)
         if ok is None:
-            dev["module_online"] = False
-            dev["module_lost_epoch"] = time.time()
+            module_mark_lost(dev)
             results.append({
                 "unique_id": uid_text,
                 "cue_count": cue_count,
@@ -868,16 +896,8 @@ def continuity_scan(timeout_ms=300):
 
         dev["continuity"] = {"cues": cues}
         dev["continuity_last_epoch"] = time.time()
-        dev["module_online"] = True
-        dev["module_last_seen_epoch"] = time.time()
-
-        link = get_last_radio_link(uid_text)
-        if link:
-            if link.get("radio_rssi", None) is not None:
-                dev["radio_rssi"] = link["radio_rssi"]
-            if link.get("radio_snr", None) is not None:
-                dev["radio_snr"] = link["radio_snr"]
-            dev["radio_last_epoch"] = link.get("radio_last_epoch", time.time())
+        module_mark_online(dev)
+        module_apply_radio_link(dev, uid_text)
 
         results.append({
             "unique_id": uid_text,
@@ -909,19 +929,12 @@ def speed_test_scan(timeout_ms=SPEED_TEST_TIMEOUT_MS):
         dev["speed_test_ms"] = ping_ms
         dev["speed_test_ok"] = ping_ms is not None
         dev["speed_test_last_epoch"] = time.time()
-        dev["module_online"] = ping_ms is not None
         if ping_ms is None:
-            dev["module_lost_epoch"] = time.time()
+            module_mark_lost(dev)
         else:
-            dev["module_last_seen_epoch"] = time.time()
+            module_mark_online(dev)
 
-        link = get_last_radio_link(uid_text)
-        if link:
-            if link.get("radio_rssi", None) is not None:
-                dev["radio_rssi"] = link["radio_rssi"]
-            if link.get("radio_snr", None) is not None:
-                dev["radio_snr"] = link["radio_snr"]
-            dev["radio_last_epoch"] = link.get("radio_last_epoch", time.time())
+        module_apply_radio_link(dev, uid_text)
 
         results.append({
             "unique_id": uid_text,
@@ -1693,6 +1706,34 @@ class NFCPGui:
             self.format_rssi(self.selected_module),
             self.format_snr(self.selected_module)
         )
+
+    def format_battery(self, module):
+        value = self.format_battery_value(module)
+        return "Batt: %s" % value
+
+    def format_battery_value(self, module):
+        battery_mv = module.get("battery_mv", "")
+        pack_type = module.get("battery_pack_type", "")
+
+        text = "--"
+        try:
+            mv = int(battery_mv)
+            if mv > 0:
+                text = "%.1fV" % (mv / 1000.0)
+        except:
+            if battery_mv:
+                text = str(battery_mv)
+
+        if pack_type:
+            return "%s %s" % (text, pack_type)
+
+        return text
+
+    def format_selected_battery(self):
+        if not self.selected_module:
+            return "Batt: --"
+
+        return self.format_battery(self.selected_module)
 
     def format_selected_versions(self):
         if not self.selected_module:
@@ -4855,6 +4896,10 @@ class NFCPGui:
             rssi_lbl.set_text(self.format_rssi(module))
             rssi_lbl.align(lv.ALIGN.BOTTOM_RIGHT, -8, -6)
 
+            batt_lbl = lv.label(btn)
+            batt_lbl.set_text(self.format_battery_value(module))
+            batt_lbl.align(lv.ALIGN.BOTTOM_LEFT, 8, -6)
+
             btn.add_event_cb(
                 self.make_module_cb(module),
                 lv.EVENT.CLICKED,
@@ -5100,6 +5145,10 @@ class NFCPGui:
         self.radio_link_label.set_text(self.format_selected_radio_link())
         self.radio_link_label.set_pos(25, 82)
 
+        self.battery_label = lv.label(scr)
+        self.battery_label.set_text(self.format_selected_battery())
+        self.battery_label.set_pos(430, 82)
+
         self.version_label = lv.label(scr)
         self.version_label.set_text(self.format_selected_versions())
         self.version_label.set_pos(25, 102)
@@ -5232,7 +5281,11 @@ class NFCPGui:
             else:
                 self.set_status("Version read timeout")
 
-            self.refresh_selected_module_detail_labels(version=True, radio=True)
+            self.refresh_selected_module_detail_labels(
+                version=True,
+                radio=True,
+                battery=True
+            )
 
         except Exception as e:
             print("Info read failed:", e)
@@ -5303,13 +5356,17 @@ class NFCPGui:
         self,
         speed=False,
         radio=False,
-        version=False
+        version=False,
+        battery=False
     ):
         if speed and hasattr(self, "speed_label"):
             self.speed_label.set_text(self.format_selected_speed_test())
 
         if radio and hasattr(self, "radio_link_label"):
             self.radio_link_label.set_text(self.format_selected_radio_link())
+
+        if battery and hasattr(self, "battery_label"):
+            self.battery_label.set_text(self.format_selected_battery())
 
         if version and hasattr(self, "version_label"):
             self.version_label.set_text(self.format_selected_versions())
@@ -5318,15 +5375,7 @@ class NFCPGui:
             self.identity_label.set_text(self.format_selected_identity())
 
     def apply_last_radio_link_to_module(self, dev, uid_text):
-        link = nfcp.get_last_radio_link(uid_text)
-        if not link:
-            return
-
-        if link.get("radio_rssi", None) is not None:
-            dev["radio_rssi"] = link["radio_rssi"]
-        if link.get("radio_snr", None) is not None:
-            dev["radio_snr"] = link["radio_snr"]
-        dev["radio_last_epoch"] = link.get("radio_last_epoch", time.time())
+        module_apply_radio_link(dev, uid_text)
 
     def update_selected_module_record(self, label, updater):
         if not self.selected_module:
@@ -5376,33 +5425,26 @@ class NFCPGui:
             dev["speed_test_ms"] = ping_ms
             dev["speed_test_ok"] = ping_ms is not None
             dev["speed_test_last_epoch"] = time.time()
-            dev["module_online"] = ping_ms is not None
             if ping_ms is None:
-                dev["module_lost_epoch"] = time.time()
+                module_mark_lost(dev)
             else:
-                dev["module_last_seen_epoch"] = time.time()
+                module_mark_online(dev)
 
         self.update_selected_module_record("Speed test", updater)
 
     def save_selected_module_online(self, online):
         def updater(dev, uid_text):
-            dev["module_online"] = bool(online)
             if online:
-                dev["module_last_seen_epoch"] = time.time()
+                module_mark_online(dev)
             else:
-                dev["module_lost_epoch"] = time.time()
+                module_mark_lost(dev)
 
         self.update_selected_module_record("Module online", updater)
 
     def save_selected_module_info(self, info):
         def updater(dev, uid_text):
-            dev["app_name"] = info.get("app_name", "")
-            dev["app_version"] = info.get("app_version", "")
-            dev["radio_firmware_version"] = info.get("radio_version", "")
-            dev["script_status"] = info.get("script_status", "")
-            dev["info_last_epoch"] = time.time()
-            dev["module_online"] = True
-            dev["module_last_seen_epoch"] = time.time()
+            module_apply_info(dev, info)
+            module_mark_online(dev)
 
         self.update_selected_module_record("Info", updater)
 
@@ -5420,8 +5462,7 @@ class NFCPGui:
             dev["cue_count"] = cue_count
             dev["continuity"] = {"cues": cues}
             dev["continuity_last_epoch"] = time.time()
-            dev["module_online"] = True
-            dev["module_last_seen_epoch"] = time.time()
+            module_mark_online(dev)
 
         self.update_selected_module_record("Continuity", updater)
 

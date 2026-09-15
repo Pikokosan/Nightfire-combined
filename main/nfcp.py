@@ -52,6 +52,10 @@ CMD_TIME_SYNC = 0x75
 CMD_SCRIPT_STEP = 0x76
 SCRIPT_ENTRY_BYTES = 6
 
+# INFO_RSP text fields, in order:
+# app_name, app_version, radio_version, script_status,
+# hardware_unique_id, configured_unique_id, battery_mv, battery_pack_type.
+
 # speed test / ping
 CMD_PING         = 0x7F   # Unique-only ping for latency/throughput tests
 PING_REPLY_BYTE  = 0xAA   # Used when CMD_PING payload is empty

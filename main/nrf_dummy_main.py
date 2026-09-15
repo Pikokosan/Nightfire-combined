@@ -36,6 +36,8 @@ SIM_REFRESH_MS = 2500
 SCRIPT_MAX_ENTRIES = 192
 SCRIPT_HEARTBEAT_TIMEOUT_MS = 1500
 SCRIPT_TIME_SYNC_VALID_MS = 10000
+BATTERY_PACK_TYPE = getattr(node_config, "BATTERY_PACK_TYPE", "2S")
+BATTERY_MV = getattr(node_config, "BATTERY_MV", 8200)
 
 def get_default_unique_id():
     try:
@@ -174,7 +176,9 @@ def build_info_payload():
         encode_text_field("nrf-radio-native") +
         encode_text_field("") +
         encode_text_field("0x%08X" % (get_default_unique_id() & 0xFFFFFFFF)) +
-        encode_text_field("0x%08X" % (CONFIG_UNIQUE_ID & 0xFFFFFFFF))
+        encode_text_field("0x%08X" % (CONFIG_UNIQUE_ID & 0xFFFFFFFF)) +
+        encode_text_field(str(int(BATTERY_MV))) +
+        encode_text_field(BATTERY_PACK_TYPE)
     )
 
 

@@ -16,6 +16,8 @@ RADIO_APP_BAUD = 256000
 RADIO_BOOTLOADER_BAUD = 115200
 APP_FIRMWARE_NAME = "dummy"
 APP_FIRMWARE_VERSION = "0.3.0"
+BATTERY_PACK_TYPE = "2S"
+BATTERY_MV = 8200
 
 UART_BAUD = RADIO_APP_BAUD if TRANSPORT == "e77" else 256000
 UART_TX_PIN = 0
@@ -212,7 +214,11 @@ def build_info_payload():
         encode_text_field(APP_FIRMWARE_NAME) +
         encode_text_field(APP_FIRMWARE_VERSION) +
         encode_text_field(radio_version) +
-        encode_text_field(build_script_status_text())
+        encode_text_field(build_script_status_text()) +
+        encode_text_field("") +
+        encode_text_field("") +
+        encode_text_field(str(BATTERY_MV)) +
+        encode_text_field(BATTERY_PACK_TYPE)
     )
 
 

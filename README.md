@@ -48,6 +48,13 @@ E77 MicroPython builds include hardware safety support by default:
 - `B3` enables the pre-arm test path.
 - `B6/B7` are reserved for future LCD I2C as `I2C(1)`.
 
+Modules report battery telemetry in `GET_INFO`. The master saves and displays
+the pack voltage and pack type on the module list and module continuity screen.
+Set the module constants for the hardware being built:
+
+- `BATTERY_PACK_TYPE` describes the pack, such as `2S` for 8.4 V or `3S` for 12.6/14.1 V class packs.
+- `BATTERY_ADC_FULL_SCALE_MV` is the pack voltage represented by a full-scale ADC reading after the resistor divider.
+
 For bench/debug builds that should not use those pins or ADC checks, add
 `-HardwareSafetyOff`:
 

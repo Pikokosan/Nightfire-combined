@@ -50,6 +50,8 @@ PREARM_TEST_ACTIVE = 1
 PREARM_TEST_SETTLE_MS = 20
 CONT_VPWR_SETTLE_MS = 100
 BATTERY_ADC_MIN_RAW = 8000
+BATTERY_ADC_FULL_SCALE_MV = 16800
+BATTERY_PACK_TYPE = "2S"
 SHORT_ADC_MIN_RATIO_PCT = 25
 DISPLAY_I2C_ENABLED = False
 DISPLAY_I2C_BUS = 1
@@ -246,6 +248,17 @@ def read_battery_adc():
     return battery_adc.read_u16()
 
 
+def read_battery_mv():
+    try:
+        raw = read_battery_adc()
+        if raw <= 0:
+            return 0
+        return (int(raw) * BATTERY_ADC_FULL_SCALE_MV) // 65535
+    except Exception as e:
+        print("Battery voltage read failed:", e)
+        return 0
+
+
 def read_short_adc():
     if not HARDWARE_SAFETY_ENABLED or short_adc is None:
         return 0
@@ -405,8 +418,27 @@ def reply_nack_if_unique(pkt, orig_cmd, code):
         tx_nfcp(nfcp.build_nack(UNIQUE_ID, orig_cmd, code))
 
 
+def encode_text_field(text):
+    try:
+        data = text.encode()
+    except Exception:
+        data = b""
+    if len(data) > 63:
+        data = data[:63]
+    return bytes([len(data)]) + data
+
+
 def build_info_payload():
-    return b"\x0fe77-micropython\x050.1.4\x00\x00"
+    return (
+        encode_text_field("e77-micropython") +
+        encode_text_field(APP_FIRMWARE_VERSION) +
+        encode_text_field("") +
+        encode_text_field("") +
+        encode_text_field("") +
+        encode_text_field("") +
+        encode_text_field(str(read_battery_mv())) +
+        encode_text_field(BATTERY_PACK_TYPE)
+    )
 
 
 def update_close_file():

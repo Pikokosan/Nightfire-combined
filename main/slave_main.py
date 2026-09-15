@@ -79,6 +79,10 @@ SCRIPT_MAX_ENTRIES = 192
 SCRIPT_HEARTBEAT_TIMEOUT_MS = 3000
 SCRIPT_TIME_SYNC_VALID_MS = 10000
 LOG_SCRIPT_EVENTS = True
+BATTERY_ADC_ENABLED = False
+BATTERY_ADC_PIN = 26
+BATTERY_ADC_FULL_SCALE_MV = 16800
+BATTERY_PACK_TYPE = "2S"
 
 CUE_COUNT = 16
 
@@ -214,6 +218,14 @@ mc = MC33996(
 )
 mc.begin()
 
+battery_adc = None
+if BATTERY_ADC_ENABLED:
+    try:
+        battery_adc = machine.ADC(BATTERY_ADC_PIN)
+    except Exception as e:
+        battery_adc = None
+        print("Battery ADC init failed:", e)
+
 ARMED = False
 GROUP_ID, UNIQUE_ID, _stored_cues, DEVICE_TYPE, RADIO_NETWORK_ID = load_cfg()
 CUE_COUNT = 16  # this hardware is fixed at 16 cues
@@ -293,6 +305,17 @@ def encode_text_field(text):
     return bytes([len(data)]) + data
 
 
+def read_battery_mv():
+    if battery_adc is None:
+        return 0
+
+    try:
+        return (int(battery_adc.read_u16()) * BATTERY_ADC_FULL_SCALE_MV) // 65535
+    except Exception as e:
+        print("Battery ADC read failed:", e)
+        return 0
+
+
 def build_info_payload():
     radio_info = transport.get_radio_info(300)
     radio_version = ""
@@ -303,7 +326,11 @@ def build_info_payload():
         encode_text_field(APP_FIRMWARE_NAME) +
         encode_text_field(APP_FIRMWARE_VERSION) +
         encode_text_field(radio_version) +
-        encode_text_field(build_script_status_text())
+        encode_text_field(build_script_status_text()) +
+        encode_text_field("") +
+        encode_text_field("") +
+        encode_text_field(str(read_battery_mv())) +
+        encode_text_field(BATTERY_PACK_TYPE)
     )
 
 
