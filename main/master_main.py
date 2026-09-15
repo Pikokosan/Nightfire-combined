@@ -37,6 +37,8 @@ SCRIPT_START_BROADCAST_REPEATS = 3
 SCRIPT_TIME_SYNC_REPEATS = 3
 SCRIPT_TIME_SYNC_GAP_MS = 20
 SCRIPT_HEARTBEAT_MS = 200
+SCRIPT_FIRE_MODE_AUTO = "auto"
+SCRIPT_FIRE_MODE_STEP = "step"
 TRELLIS_ENABLED = True
 TRELLIS_I2C_ID = 0
 TRELLIS_SCL_PIN = 9
@@ -1337,28 +1339,11 @@ class NFCPGui:
         self.manual_last_fire_key = None
         self.manual_last_fire_blink_on = False
         self.manual_last_fire_blink_ms = time.ticks_ms()
-        self.script_fire_mode = "auto"
-        self.script_fire_running = False
-        self.script_fire_elapsed_ms = 0
-        self.script_fire_started_ms = time.ticks_ms()
-        self.script_fire_last_clock_ms = time.ticks_ms()
-        self.script_fire_step_index = 0
-        self.script_fire_auto_index = 0
-        self.script_fire_last_trellis_poll_ms = time.ticks_ms()
-        self.script_fire_trigger_held = False
-        self.script_fire_last_trigger_ms = time.ticks_ms()
+        self.script_fire_mode = SCRIPT_FIRE_MODE_AUTO
         self.last_lvgl_handler_ms = time.ticks_ms()
         self.script_fire_prepared = False
-        self.script_fire_auto_fired = 0
-        self.script_fire_auto_packets = 0
-        self.script_fire_step_status_pending = None
-        self.script_fire_last_step_status_ms = time.ticks_ms()
-        self.script_fire_module_auto_active = False
-        self.script_fire_uploaded_id = None
-        self.script_fire_uploaded_uids = []
-        self.script_fire_upload_results = []
-        self.script_fire_upload_warning = False
-        self.script_fire_last_heartbeat_ms = time.ticks_ms()
+        self.reset_script_fire_runtime_state()
+        self.reset_script_fire_upload_state()
         self.last_module_continuity_auto_ms = time.ticks_ms()
         self.settings = load_app_settings()
         self.auto_module_continuity = bool(
@@ -1418,12 +1403,11 @@ class NFCPGui:
         self.loaded_script_steps = []
         self.open_script_cue_count = 0
         self.extra_connected_cue_count = 0
-        self.script_fire_step_index = 0
-        self.script_fire_auto_index = 0
+
+        self.reset_script_fire_position_state()
         self.script_fire_prepared = False
-        self.script_fire_auto_fired = 0
-        self.script_fire_auto_packets = 0
-        self.script_fire_step_status_pending = None
+        self.reset_script_fire_auto_stats()
+        self.clear_script_fire_pending_step_status()
         self.reset_script_fire_upload_state()
 
     def update_background(self):
@@ -1963,9 +1947,8 @@ class NFCPGui:
             return
 
         if not self.script_fire_running:
-            self.script_fire_elapsed_ms = 0
-            self.script_fire_step_index = 0
-            self.script_fire_auto_index = 0
+            self.stop_script_fire_timer()
+            self.reset_script_fire_position_state()
             self.preload_script_fire_modules()
 
         self.show_script_fire_page()
@@ -2060,7 +2043,7 @@ class NFCPGui:
             except Exception as e:
                 print("Script fire packet prep failed:", e)
         self.update_script_fire_clock(force=True)
-        if self.script_fire_mode == "step":
+        if self.script_fire_mode == SCRIPT_FIRE_MODE_STEP:
             self.update_script_fire_step_status()
         elif self.script_fire_upload_warning and not self.script_fire_running:
             self.set_script_fire_status_label("Loaded with warnings")
@@ -2099,6 +2082,52 @@ class NFCPGui:
 
         self.script_status_label.set_text(text)
         self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
+
+    def reset_script_fire_timing_state(self):
+        now = time.ticks_ms()
+        self.script_fire_running = False
+        self.script_fire_elapsed_ms = 0
+        self.script_fire_started_ms = now
+        self.script_fire_last_clock_ms = now
+
+    def reset_script_fire_position_state(self):
+        self.script_fire_step_index = 0
+        self.script_fire_auto_index = 0
+
+    def reset_script_fire_auto_stats(self):
+        self.script_fire_auto_fired = 0
+        self.script_fire_auto_packets = 0
+
+    def clear_script_fire_pending_step_status(self):
+        self.script_fire_step_status_pending = None
+        self.script_fire_last_step_status_ms = time.ticks_ms()
+
+    def reset_script_fire_runtime_state(self):
+        self.reset_script_fire_timing_state()
+        self.reset_script_fire_position_state()
+        self.reset_script_fire_trigger_state()
+        self.reset_script_fire_auto_stats()
+        self.clear_script_fire_pending_step_status()
+
+    def start_script_fire_timer(self, start_delay_ms=0):
+        self.script_fire_started_ms = time.ticks_add(
+            time.ticks_ms(),
+            start_delay_ms - self.script_fire_elapsed_ms
+        )
+        self.script_fire_running = True
+
+    def pause_script_fire_timer(self):
+        if self.script_fire_running:
+            self.script_fire_elapsed_ms = time.ticks_diff(
+                time.ticks_ms(),
+                self.script_fire_started_ms
+            )
+
+        self.script_fire_running = False
+
+    def stop_script_fire_timer(self):
+        self.script_fire_running = False
+        self.script_fire_elapsed_ms = 0
 
     def reset_script_fire_upload_state(self):
         self.script_fire_module_auto_active = False
@@ -2157,7 +2186,7 @@ class NFCPGui:
                 bool(self.loaded_script_steps)
             )
 
-            if self.script_fire_mode == "auto":
+            if self.script_fire_mode == SCRIPT_FIRE_MODE_AUTO:
                 can_play = can_play and bool(self.script_fire_uploaded_uids)
 
             if can_play:
@@ -2260,7 +2289,7 @@ class NFCPGui:
     def update_script_fire_step_led(self):
         if self.current_view != "script_fire":
             return
-        if self.script_fire_mode != "step":
+        if self.script_fire_mode != SCRIPT_FIRE_MODE_STEP:
             self.clear_trellis_leds()
             return
         if not self.trellis:
@@ -2296,7 +2325,7 @@ class NFCPGui:
         if self.current_view != "script_fire":
             self.script_fire_step_status_pending = None
             return
-        if self.script_fire_mode != "step":
+        if self.script_fire_mode != SCRIPT_FIRE_MODE_STEP:
             self.script_fire_step_status_pending = None
             return
         if self.script_fire_step_status_pending is None:
@@ -2680,7 +2709,7 @@ class NFCPGui:
     def poll_script_fire_auto(self):
         if self.current_view != "script_fire":
             return
-        if self.script_fire_mode != "auto":
+        if self.script_fire_mode != SCRIPT_FIRE_MODE_AUTO:
             return
         if not self.script_fire_running:
             return
@@ -2726,7 +2755,7 @@ class NFCPGui:
     def poll_script_fire_trellis(self):
         if self.current_view != "script_fire":
             return
-        if self.script_fire_mode != "step":
+        if self.script_fire_mode != SCRIPT_FIRE_MODE_STEP:
             return
         if not self.trellis:
             return
@@ -2762,9 +2791,8 @@ class NFCPGui:
         if self.script_fire_running:
             return
 
-        if self.script_fire_mode == "auto":
-            self.script_fire_auto_fired = 0
-            self.script_fire_auto_packets = 0
+        if self.script_fire_mode == SCRIPT_FIRE_MODE_AUTO:
+            self.reset_script_fire_auto_stats()
             if not self.loaded_script_steps:
                 self.set_status("No script steps loaded")
                 return
@@ -2785,11 +2813,7 @@ class NFCPGui:
             time.sleep_ms(100)
 
             nfcp.script_start_broadcast(script_id, SCRIPT_START_DELAY_MS, self.script_fire_elapsed_ms, start_master_ms)
-            self.script_fire_started_ms = time.ticks_add(
-                time.ticks_ms(),
-                SCRIPT_START_DELAY_MS - self.script_fire_elapsed_ms
-            )
-            self.script_fire_running = True
+            self.start_script_fire_timer(SCRIPT_START_DELAY_MS)
             self.send_script_heartbeat(force=True)
             self.update_script_fire_transport_buttons()
             self.set_script_fire_status_label(
@@ -2804,26 +2828,15 @@ class NFCPGui:
         elif not self.script_fire_prepared:
             self.prepare_script_fire_packets()
 
-        self.script_fire_started_ms = time.ticks_add(
-            time.ticks_ms(),
-            -self.script_fire_elapsed_ms
-        )
-        self.script_fire_running = True
+        self.start_script_fire_timer()
         self.update_script_fire_transport_buttons()
 
         self.set_script_fire_status_label("Playing")
         self.set_status("Script fire playing")
 
     def script_fire_pause(self, event=None):
-        if self.script_fire_running:
-            self.script_fire_elapsed_ms = time.ticks_diff(
-                time.ticks_ms(),
-                self.script_fire_started_ms
-            )
-
+        self.pause_script_fire_timer()
         self.stop_module_auto_script("Script pause stop broadcast failed")
-
-        self.script_fire_running = False
         self.update_script_fire_clock(force=True)
         self.update_script_fire_transport_buttons()
 
@@ -2832,12 +2845,9 @@ class NFCPGui:
 
     def script_fire_stop(self, event=None):
         self.stop_module_auto_script()
-
-        self.script_fire_running = False
         self.script_fire_module_auto_active = False
-        self.script_fire_elapsed_ms = 0
-        self.script_fire_step_index = 0
-        self.script_fire_auto_index = 0
+        self.stop_script_fire_timer()
+        self.reset_script_fire_position_state()
         self.update_script_fire_clock(force=True)
         self.update_script_fire_transport_buttons()
 
@@ -2845,7 +2855,7 @@ class NFCPGui:
         self.set_status("Script fire stopped")
 
     def select_script_fire_auto(self, event=None):
-        self.script_fire_mode = "auto"
+        self.script_fire_mode = SCRIPT_FIRE_MODE_AUTO
         self.reset_script_fire_trigger_state()
         self.update_script_fire_mode_buttons()
         self.update_script_fire_transport_buttons()
@@ -2857,11 +2867,10 @@ class NFCPGui:
 
     def select_script_fire_step(self, event=None):
         if self.script_fire_running:
-            self.script_fire_elapsed_ms = self.get_script_fire_elapsed_ms()
-            self.script_fire_running = False
+            self.pause_script_fire_timer()
             self.stop_module_auto_script()
 
-        self.script_fire_mode = "step"
+        self.script_fire_mode = SCRIPT_FIRE_MODE_STEP
         self.reset_script_fire_trigger_state()
         self.update_script_fire_mode_buttons()
         self.update_script_fire_transport_buttons()
@@ -2879,7 +2888,7 @@ class NFCPGui:
         selected_color = lv.color_hex(0x1F7A1F)
         normal_color = lv.color_hex(0x2F4F8F)
 
-        if self.script_fire_mode == "auto":
+        if self.script_fire_mode == SCRIPT_FIRE_MODE_AUTO:
             self.script_auto_btn.set_style_bg_color(selected_color, 0)
             self.script_auto_btn.add_state(lv.STATE.DISABLED)
             self.script_step_btn.set_style_bg_color(normal_color, 0)
