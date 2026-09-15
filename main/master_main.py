@@ -24,9 +24,10 @@ except Exception as e:
 DEFAULT_CUE_COUNT = 16
 MAX_CUE_COUNT = 64
 MODULE_CONTINUITY_AUTO_CHECK_MS = 4000
-DISCOVER_IDLE_TIMEOUT_MS = 3000
-DISCOVER_MAX_SCAN_MS = 30000
-DISCOVER_BROADCAST_REPEAT_MS = 700
+DISCOVER_IDLE_TIMEOUT_MS = 900
+DISCOVER_MIN_SCAN_MS = 1400
+DISCOVER_MAX_SCAN_MS = 10000
+DISCOVER_BROADCAST_REPEAT_MS = 350
 SPEED_TEST_TIMEOUT_MS = 2000
 ACK_RETRY_ATTEMPTS = 2
 ACK_RETRY_DELAY_MS = 100
@@ -736,14 +737,18 @@ def discover(idle_ms=DISCOVER_IDLE_TIMEOUT_MS, max_scan_ms=DISCOVER_MAX_SCAN_MS)
                     info["radio_snr"] = pkt["radio_snr"]
                 info["radio_last_epoch"] = time.time()
                 module_mark_online(info)
+                first_seen_this_scan = info["unique_id"] not in discovered_uids
                 existing = idx.get(info["unique_id"], {})
                 existing.update(info)
                 idx[info["unique_id"]] = existing
-                if info["unique_id"] not in discovered_uids:
+                if first_seen_this_scan:
                     discovered_uids.append(info["unique_id"])
-                last_packet_ms = now_ms
+                    last_packet_ms = now_ms
 
-        if time.ticks_diff(now_ms, last_packet_ms) >= idle_ms:
+        if (
+            time.ticks_diff(now_ms, start_ms) >= DISCOVER_MIN_SCAN_MS and
+            time.ticks_diff(now_ms, last_packet_ms) >= idle_ms
+        ):
             break
 
         time.sleep_ms(1)
@@ -1446,7 +1451,9 @@ class NFCPGui:
             "arm_label",
             "speed_label",
             "radio_link_label",
+            "battery_label",
             "version_label",
+            "identity_label",
             "summary",
             "grid_box",
             "cue_buttons",
@@ -1464,8 +1471,13 @@ class NFCPGui:
             "manual_cue_buttons",
             "manual_cue_labels",
             "script_name_label",
+            "script_stats_label",
+            "script_upload_label",
             "script_clock_label",
             "script_status_label",
+            "script_play_btn",
+            "script_pause_btn",
+            "script_stop_btn",
             "script_auto_btn",
             "script_step_btn",
         )
@@ -1495,13 +1507,14 @@ class NFCPGui:
         if old_view in ("manual_fire", "script_fire") and view_name != old_view:
             self.clear_trellis_leds()
 
-        self.status = lv.label(scr)
-        self.status.set_text("Status: Ready")
-        self.status.align(lv.ALIGN.TOP_LEFT, 20, 15)
-
-        title = lv.label(scr)
-        title.set_text(title_text)
-        title.align(lv.ALIGN.TOP_MID, 0, 10)
+        self.status = self.make_label(
+            scr,
+            "Status: Ready",
+            align=lv.ALIGN.TOP_LEFT,
+            ox=20,
+            oy=15
+        )
+        self.make_label(scr, title_text, align=lv.ALIGN.TOP_MID, ox=0, oy=10)
 
         self.current_screen = scr
 
@@ -1511,16 +1524,65 @@ class NFCPGui:
         return scr
 
     def make_button(self, parent, text, x, y, w, h, cb):
+        btn, _label = self.make_button_with_label(parent, text, x, y, w, h, cb)
+        return btn
+
+    def make_button_with_label(self, parent, text, x, y, w, h, cb):
         btn = lv.button(parent)
         btn.set_pos(x, y)
         btn.set_size(w, h)
-        btn.add_event_cb(cb, lv.EVENT.CLICKED, None)
+
+        if cb is not None:
+            btn.add_event_cb(cb, lv.EVENT.CLICKED, None)
 
         lbl = lv.label(btn)
         lbl.set_text(text)
         lbl.center()
 
-        return btn
+        return btn, lbl
+
+    def make_label(self, parent, text="", x=None, y=None, align=None, ox=0, oy=0):
+        label = lv.label(parent)
+        label.set_text(text)
+
+        if align is not None:
+            label.align(align, ox, oy)
+        elif x is not None and y is not None:
+            label.set_pos(x, y)
+
+        return label
+
+    def set_control_enabled(self, obj, enabled):
+        try:
+            if enabled:
+                obj.remove_state(lv.STATE.DISABLED)
+            else:
+                obj.add_state(lv.STATE.DISABLED)
+        except Exception as e:
+            print("Control state update failed:", e)
+
+    def make_checkbox(self, parent, text, x, y, checked, cb):
+        checkbox = lv.checkbox(parent)
+        checkbox.set_pos(x, y)
+        checkbox.set_text(text)
+
+        if checked:
+            checkbox.add_state(lv.STATE.CHECKED)
+        else:
+            checkbox.remove_state(lv.STATE.CHECKED)
+
+        checkbox.add_event_cb(cb, lv.EVENT.CLICKED, None)
+        return checkbox
+
+    def make_plain_box(self, parent, x, y, w, h, bg_color):
+        obj = lv.obj(parent)
+        obj.set_pos(x, y)
+        obj.set_size(w, h)
+        obj.set_style_bg_color(lv.color_hex(bg_color), 0)
+        obj.set_style_border_width(0, 0)
+        obj.set_style_radius(0, 0)
+        obj.set_style_pad_all(0, 0)
+        return obj
 
     def apply_largest_font(self, obj):
         for name in (
@@ -1900,14 +1962,15 @@ class NFCPGui:
             self.show_manual_fire
         )
 
-        self.arm_btn = lv.button(scr)
-        self.arm_btn.set_pos(440, 315)
-        self.arm_btn.set_size(300, 80)
-        self.arm_btn.add_event_cb(self.toggle_arm, lv.EVENT.CLICKED, None)
-
-        self.arm_btn_label = lv.label(self.arm_btn)
-        self.arm_btn_label.set_text("DISARM" if self.armed else "ARM")
-        self.arm_btn_label.center()
+        self.arm_btn, self.arm_btn_label = self.make_button_with_label(
+            scr,
+            "DISARM" if self.armed else "ARM",
+            440,
+            315,
+            300,
+            80,
+            self.toggle_arm
+        )
 
         self.update_manual_fire_button()
         self.update_script_fire_button()
@@ -1917,25 +1980,16 @@ class NFCPGui:
         if not hasattr(self, "manual_fire_btn"):
             return
 
-        try:
-            if self.armed:
-                self.manual_fire_btn.remove_state(lv.STATE.DISABLED)
-            else:
-                self.manual_fire_btn.add_state(lv.STATE.DISABLED)
-        except Exception as e:
-            print("Manual fire button state update failed:", e)
+        self.set_control_enabled(self.manual_fire_btn, self.armed)
 
     def update_script_fire_button(self):
         if not hasattr(self, "script_fire_btn"):
             return
 
-        try:
-            if self.armed and self.selected_script:
-                self.script_fire_btn.remove_state(lv.STATE.DISABLED)
-            else:
-                self.script_fire_btn.add_state(lv.STATE.DISABLED)
-        except Exception as e:
-            print("Script fire button state update failed:", e)
+        self.set_control_enabled(
+            self.script_fire_btn,
+            self.armed and self.selected_script
+        )
 
     def show_script_fire(self, event=None):
         if not self.selected_script:
@@ -1966,12 +2020,15 @@ class NFCPGui:
 
         self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_main_menu)
 
-        self.script_name_label = lv.label(scr)
-        self.script_name_label.set_text("Script: %s" % (self.loaded_script_name or self.selected_script))
-        self.script_name_label.set_pos(35, 58)
+        self.script_name_label = self.make_label(
+            scr,
+            "Script: %s" % (self.loaded_script_name or self.selected_script),
+            35,
+            58
+        )
 
-        self.script_stats_label = lv.label(scr)
-        self.script_stats_label.set_text(
+        self.script_stats_label = self.make_label(
+            scr,
             "Events: %d   Pyro: %d   Open: %d/%d +%d" %
             (
                 self.loaded_script_event_count,
@@ -1979,16 +2036,19 @@ class NFCPGui:
                 self.open_script_cue_count,
                 self.loaded_script_fire_count,
                 self.extra_connected_cue_count
-            )
+            ),
+            35,
+            82
         )
-        self.script_stats_label.set_pos(35, 82)
 
-        self.script_upload_label = lv.label(scr)
-        self.script_upload_label.set_text(self.format_script_upload_summary())
-        self.script_upload_label.set_pos(35, 106)
+        self.script_upload_label = self.make_label(
+            scr,
+            self.format_script_upload_summary(),
+            35,
+            106
+        )
 
-        self.script_clock_label = lv.label(scr)
-        self.script_clock_label.set_text(self.format_script_fire_time())
+        self.script_clock_label = self.make_label(scr, self.format_script_fire_time())
         clock_font = get_script_clock_font()
         if clock_font:
             self.script_clock_label.set_style_text_font(clock_font, 0)
@@ -2000,14 +2060,13 @@ class NFCPGui:
                 pass
         self.script_clock_label.align(lv.ALIGN.CENTER, -70, -40)
 
-        self.script_status_label = lv.label(scr)
         if self.script_fire_running:
             status_text = "Playing"
         elif self.script_fire_elapsed_ms > 0:
             status_text = "Paused"
         else:
             status_text = "Stopped"
-        self.script_status_label.set_text(status_text)
+        self.script_status_label = self.make_label(scr, status_text)
         self.script_status_label.align(lv.ALIGN.CENTER, -70, 40)
 
         self.script_play_btn = self.make_button(scr, "PLAY", 150, 325, 140, 65, self.script_fire_play)
@@ -2921,13 +2980,10 @@ class NFCPGui:
         if not hasattr(self, "arm_btn"):
             return
 
-        try:
-            if self.has_scanned_modules() and not self.discover_busy:
-                self.arm_btn.remove_state(lv.STATE.DISABLED)
-            else:
-                self.arm_btn.add_state(lv.STATE.DISABLED)
-        except Exception as e:
-            print("Arm button state update failed:", e)
+        self.set_control_enabled(
+            self.arm_btn,
+            self.has_scanned_modules() and not self.discover_busy
+        )
 
     # -------------------------
     # View / Load Script
@@ -2939,19 +2995,20 @@ class NFCPGui:
         self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_main_menu)
 
         if not self.selected_script:
-            label = lv.label(scr)
-            label.set_text("No script loaded yet.")
-            label.align(lv.ALIGN.CENTER, 0, 0)
+            self.make_label(scr, "No script loaded yet.", align=lv.ALIGN.CENTER)
             return
 
-        title = lv.label(scr)
-        title.set_text(self.loaded_script_name or self.selected_script)
-        title.align(lv.ALIGN.TOP_MID, 0, 65)
+        self.make_label(
+            scr,
+            self.loaded_script_name or self.selected_script,
+            align=lv.ALIGN.TOP_MID,
+            oy=65
+        )
 
-        info = lv.label(scr)
+        info_text = ""
 
         if self.loaded_script_type == "cobra":
-            info.set_text(
+            info_text = (
                 "Type: COBRA CSV\n"
                 "File: %s\n"
                 "Firmware: %s\n"
@@ -2978,11 +3035,12 @@ class NFCPGui:
                 )
             )
         else:
-            info.set_text(
+            info_text = (
                 "File: %s\n"
                 "Type: Unknown CSV" % self.selected_script
             )
 
+        info = self.make_label(scr, info_text)
         info.align(lv.ALIGN.CENTER, 0, 35)
 
     def show_load_script(self, event=None):
@@ -3279,52 +3337,34 @@ class NFCPGui:
     def show_settings(self, event=None):
         scr = self.new_screen("Settings", "settings")
 
-        title = lv.label(scr)
-        title.set_text("Module Continuity")
-        title.set_pos(40, 85)
+        self.make_label(scr, "Module Continuity", 40, 85)
 
-        self.auto_continuity_checkbox = lv.checkbox(scr)
-        self.auto_continuity_checkbox.set_pos(45, 130)
-        self.auto_continuity_checkbox.set_text("Auto check every 4 seconds")
-
-        if self.auto_module_continuity:
-            self.auto_continuity_checkbox.add_state(lv.STATE.CHECKED)
-        else:
-            self.auto_continuity_checkbox.remove_state(lv.STATE.CHECKED)
-
-        self.auto_continuity_checkbox.add_event_cb(
+        self.auto_continuity_checkbox = self.make_checkbox(
+            scr,
+            "Auto check every 4 seconds",
+            45,
+            130,
+            self.auto_module_continuity,
             self.toggle_auto_module_continuity,
-            lv.EVENT.CLICKED,
-            None
         )
 
-        self.no_script_color_checkbox = lv.checkbox(scr)
-        self.no_script_color_checkbox.set_pos(45, 175)
-        self.no_script_color_checkbox.set_text("Color modules without script")
-
-        if self.color_cues_without_script:
-            self.no_script_color_checkbox.add_state(lv.STATE.CHECKED)
-        else:
-            self.no_script_color_checkbox.remove_state(lv.STATE.CHECKED)
-
-        self.no_script_color_checkbox.add_event_cb(
+        self.no_script_color_checkbox = self.make_checkbox(
+            scr,
+            "Color modules without script",
+            45,
+            175,
+            self.color_cues_without_script,
             self.toggle_color_cues_without_script,
-            lv.EVENT.CLICKED,
-            None
         )
 
-        radio_title = lv.label(scr)
-        radio_title.set_text("Radio")
-        radio_title.set_pos(430, 85)
+        self.make_label(scr, "Radio", 430, 85)
 
         radio_info = get_local_radio_info(300)
         radio_version = "--"
         if radio_info:
             radio_version = radio_info.get("firmware_version", "") or "--"
 
-        radio_version_label = lv.label(scr)
-        radio_version_label.set_text("Radio FW: %s" % radio_version)
-        radio_version_label.set_pos(430, 105)
+        self.make_label(scr, "Radio FW: %s" % radio_version, 430, 105)
 
         self.make_button(
             scr,
@@ -3346,9 +3386,12 @@ class NFCPGui:
             self.show_radio_stats
         )
 
-        network_label = lv.label(scr)
-        network_label.set_text("Network: %d  Channel: %d" % (self.radio_network_id, self.radio_channel))
-        network_label.set_pos(430, 205)
+        self.make_label(
+            scr,
+            "Network: %d  Channel: %d" % (self.radio_network_id, self.radio_channel),
+            430,
+            205
+        )
 
         self.make_button(
             scr,
@@ -4808,8 +4851,8 @@ class NFCPGui:
             open_cues_loaded = self.open_script_cue_count
             open_cues_total = self.loaded_script_fire_count
 
-            label = lv.label(scr)
-            label.set_text(
+            self.make_label(
+                scr,
                 "Script: %s | Open Cues: %d/%d +%d | Discovered Channels: %d/%d" %
                 (
                     script_name,
@@ -4818,19 +4861,16 @@ class NFCPGui:
                     self.extra_connected_cue_count,
                     discovered_matching_channels,
                     total_script_channels
-                )
+                ),
+                30,
+                55
             )
-            label.set_pos(30, 55)
 
         else:
-            label = lv.label(scr)
-            label.set_text("Select a module to view cue continuity")
-            label.set_pos(30, 55)
+            self.make_label(scr, "Select a module to view cue continuity", 30, 55)
 
         if not self.modules:
-            empty = lv.label(scr)
-            empty.set_text("No modules found. Press DISCOVER.")
-            empty.align(lv.ALIGN.CENTER, 0, 0)
+            self.make_label(scr, "No modules found. Press DISCOVER.", align=lv.ALIGN.CENTER)
             return
 
         page_size = 9
@@ -4843,21 +4883,13 @@ class NFCPGui:
         if self.modules_page >= total_pages:
             self.modules_page = total_pages - 1
 
-        page_label = lv.label(scr)
-        page_label.set_text("Page %d/%d" % (self.modules_page + 1, total_pages))
-        page_label.set_pos(665, 55)
+        self.make_label(scr, "Page %d/%d" % (self.modules_page + 1, total_pages), 665, 55)
 
         if total_pages > 1:
             self.make_button(scr, "PREV", 670, 255, 90, 130, self.prev_modules_page)
             self.make_button(scr, "NEXT", 670, 100, 90, 130, self.next_modules_page)
 
-        module_area = lv.obj(scr)
-        module_area.set_pos(20, 100)
-        module_area.set_size(640, 285)
-        module_area.set_style_bg_color(lv.color_hex(0x101010), 0)
-        module_area.set_style_border_width(0, 0)
-        module_area.set_style_radius(0, 0)
-        module_area.set_style_pad_all(0, 0)
+        module_area = self.make_plain_box(scr, 20, 100, 640, 285, 0x101010)
 
         x0 = 0
         y0 = 0
@@ -4897,16 +4929,13 @@ class NFCPGui:
                 0
             )
 
-            lbl = lv.label(btn)
-            lbl.set_text(text)
+            lbl = self.make_label(btn, text)
             lbl.align(lv.ALIGN.TOP_LEFT, 8, 8)
 
-            rssi_lbl = lv.label(btn)
-            rssi_lbl.set_text(self.format_rssi(module))
+            rssi_lbl = self.make_label(btn, self.format_rssi(module))
             rssi_lbl.align(lv.ALIGN.BOTTOM_RIGHT, -8, -6)
 
-            batt_lbl = lv.label(btn)
-            batt_lbl.set_text(self.format_battery_value(module))
+            batt_lbl = self.make_label(btn, self.format_battery_value(module))
             batt_lbl.align(lv.ALIGN.BOTTOM_LEFT, 8, -6)
 
             btn.add_event_cb(
@@ -5132,45 +5161,37 @@ class NFCPGui:
         channel_id = self.group_to_int_display(self.selected_module.get("group_id", "--"))
         cue_count = self.get_selected_module_cue_count()
 
-        self.module_label = lv.label(scr)
-        self.module_label.set_text(
+        self.module_label = self.make_label(
+            scr,
             "UID: %s   Channel: %s   Cues: %s" % (
                 self.format_uid(uid_text),
                 channel_id,
                 cue_count
-            )
+            ),
+            25,
+            55
         )
-        self.module_label.set_pos(25, 55)
 
-        self.arm_label = lv.label(scr)
-        self.arm_label.set_text("ARM: ON" if self.armed else "ARM: OFF")
-        self.arm_label.set_pos(650, 55)
+        self.arm_label = self.make_label(
+            scr,
+            "ARM: ON" if self.armed else "ARM: OFF",
+            650,
+            55
+        )
 
-        self.speed_label = lv.label(scr)
-        self.speed_label.set_text(self.format_selected_speed_test())
-        self.speed_label.set_pos(300, 82)
+        self.speed_label = self.make_label(scr, self.format_selected_speed_test(), 300, 82)
 
-        self.radio_link_label = lv.label(scr)
-        self.radio_link_label.set_text(self.format_selected_radio_link())
-        self.radio_link_label.set_pos(25, 82)
+        self.radio_link_label = self.make_label(scr, self.format_selected_radio_link(), 25, 82)
 
-        self.battery_label = lv.label(scr)
-        self.battery_label.set_text(self.format_selected_battery())
-        self.battery_label.set_pos(430, 82)
+        self.battery_label = self.make_label(scr, self.format_selected_battery(), 430, 82)
 
-        self.version_label = lv.label(scr)
-        self.version_label.set_text(self.format_selected_versions())
-        self.version_label.set_pos(25, 102)
+        self.version_label = self.make_label(scr, self.format_selected_versions(), 25, 102)
 
-        self.identity_label = lv.label(scr)
-        self.identity_label.set_text(self.format_selected_identity())
-        self.identity_label.set_pos(430, 102)
+        self.identity_label = self.make_label(scr, self.format_selected_identity(), 430, 102)
 
         self.build_fixed_cue_grid(scr)
 
-        self.summary = lv.label(scr)
-        self.summary.set_text("Continuity: 0 / %d" % cue_count)
-        self.summary.set_pos(600, 385)
+        self.summary = self.make_label(scr, "Continuity: 0 / %d" % cue_count, 600, 385)
 
         self.refresh_cues()
 
@@ -5180,14 +5201,7 @@ class NFCPGui:
 
         cue_count = self.get_selected_module_cue_count()
 
-        self.grid_box = lv.obj(parent)
-        self.grid_box.set_size(760, 270)
-        self.grid_box.set_pos(20, 120)
-
-        self.grid_box.set_style_bg_color(lv.color_hex(0x181818), 0)
-        self.grid_box.set_style_pad_all(0, 0)
-        self.grid_box.set_style_border_width(0, 0)
-        self.grid_box.set_style_radius(0, 0)
+        self.grid_box = self.make_plain_box(parent, 20, 120, 760, 270, 0x181818)
 
         self.grid_box.set_scroll_dir(lv.DIR.VER)
         self.grid_box.set_scrollbar_mode(lv.SCROLLBAR_MODE.AUTO)
@@ -5208,8 +5222,7 @@ class NFCPGui:
             btn.set_style_radius(0, 0)
             btn.set_style_border_width(1, 0)
 
-            lbl = lv.label(btn)
-            lbl.set_text("Cue %02d: OPEN" % (i + 1))
+            lbl = self.make_label(btn, "Cue %02d: OPEN" % (i + 1))
             lbl.center()
 
             self.cue_buttons.append(btn)
