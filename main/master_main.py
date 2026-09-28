@@ -12,7 +12,7 @@ import display_driver
 import ujson as json
 import urandom as random
 import nfcp
-import e77_radio
+import bridge_radio
 from adafruit_trellis import Trellis
 
 try:
@@ -29,9 +29,12 @@ DISCOVER_MIN_SCAN_MS = 1400
 DISCOVER_MAX_SCAN_MS = 10000
 DISCOVER_BROADCAST_REPEAT_MS = 350
 SPEED_TEST_TIMEOUT_MS = 2000
+RANGE_TEST_INTERVAL_MS = 500
+RANGE_TEST_TIMEOUT_MS = 300
+RANGE_TEST_HISTORY_LEN = 32
 ACK_RETRY_ATTEMPTS = 2
 ACK_RETRY_DELAY_MS = 100
-E77_UPDATE_CHUNK_SIZE = 160
+OTA_UPDATE_CHUNK_SIZE = 160
 SCRIPT_LOAD_CHUNK_ENTRIES = 4
 SCRIPT_START_DELAY_MS = 2000
 SCRIPT_START_BROADCAST_REPEATS = 3
@@ -57,10 +60,11 @@ SRC_ID = 0x01
 DEVICE_DB_PATH = "nfcp_devices.json"
 SETTINGS_PATH = "nfcp_settings.json"
 
-RADIO_NETWORK_ID = e77_radio.DEFAULT_NETWORK_ID
+RADIO_NETWORK_ID = bridge_radio.DEFAULT_NETWORK_ID
 RADIO_CHANNEL = 40
 RADIO_APP_BAUD = 256000
-RADIO_BOOTLOADER_BAUD = 115200
+RADIO_BOOT_READY_RETRY_MS = 3000
+RADIO_BOOT_READY_RETRY_GAP_MS = 250
 
 UART_ID = 2
 BAUDRATE = RADIO_APP_BAUD
@@ -76,10 +80,11 @@ uart = UART(
 
 nfcp_tx = nfcp.NFCP(SRC_ID)
 nfcp_rx = nfcp.NFCPStreamParser()
-radio_rx = e77_radio.E77FrameParser()
+radio_rx = bridge_radio.BridgeFrameParser()
 radio_seq = 1
 _last_packets = []
 _last_radio_links = {}
+_last_discovery_info_count = 0
 lvgl_fs_drv = None
 script_clock_font = None
 
@@ -149,7 +154,7 @@ def next_radio_seq():
 
 
 def radio_write_nfcp(pkt):
-    uart.write(e77_radio.build_send_nfcp(next_radio_seq(), pkt))
+    uart.write(bridge_radio.build_send_nfcp(next_radio_seq(), pkt))
 
 
 def uart_read_some(max_bytes=256):
@@ -170,10 +175,10 @@ def local_radio_command(cmd, payload=b"", timeout_ms=1000):
     global radio_rx
 
     drain_uart()
-    radio_rx = e77_radio.E77FrameParser()
+    radio_rx = bridge_radio.BridgeFrameParser()
 
     seq = next_radio_seq()
-    uart.write(e77_radio.build_frame(seq, cmd, payload))
+    uart.write(bridge_radio.build_frame(seq, cmd, payload))
 
     deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
     while time.ticks_diff(deadline, time.ticks_ms()) > 0:
@@ -193,35 +198,35 @@ def local_radio_command(cmd, payload=b"", timeout_ms=1000):
 
 
 def radio_ping(timeout_ms=1000):
-    frame = local_radio_command(e77_radio.CMD_PING, b"", timeout_ms)
-    return bool(frame and frame.cmd == e77_radio.CMD_PONG and not (frame.flags & e77_radio.FLAG_ERROR))
+    frame = local_radio_command(bridge_radio.CMD_PING, b"", timeout_ms)
+    return bool(frame and frame.cmd == bridge_radio.CMD_PONG and not (frame.flags & bridge_radio.FLAG_ERROR))
 
 
 def set_local_radio_network(network_id, timeout_ms=1000):
     frame = local_radio_command(
-        e77_radio.CMD_SET_NETWORK,
+        bridge_radio.CMD_SET_NETWORK,
         (network_id & 0xFFFF).to_bytes(2, "big"),
         timeout_ms
     )
 
     return bool(
         frame and
-        frame.cmd == e77_radio.CMD_SET_NETWORK and
-        not (frame.flags & e77_radio.FLAG_ERROR)
+        frame.cmd == bridge_radio.CMD_SET_NETWORK and
+        not (frame.flags & bridge_radio.FLAG_ERROR)
     )
 
 
 def set_local_radio_channel(channel, timeout_ms=1000):
     frame = local_radio_command(
-        e77_radio.CMD_SET_CHANNEL,
+        bridge_radio.CMD_SET_CHANNEL,
         bytes([channel & 0xFF]),
         timeout_ms
     )
 
     return bool(
         frame and
-        frame.cmd == e77_radio.CMD_SET_CHANNEL and
-        not (frame.flags & e77_radio.FLAG_ERROR)
+        frame.cmd == bridge_radio.CMD_SET_CHANNEL and
+        not (frame.flags & bridge_radio.FLAG_ERROR)
     )
 
 
@@ -240,9 +245,9 @@ def parse_channel_scan_payload(payload):
         if index + entry_size > len(payload):
             break
         channel = payload[index]
-        avg = e77_radio.int_from_be(payload[index + 1:index + 3], signed=True)
-        min_rssi = e77_radio.int_from_be(payload[index + 3:index + 5], signed=True)
-        max_rssi = e77_radio.int_from_be(payload[index + 5:index + 7], signed=True)
+        avg = bridge_radio.int_from_be(payload[index + 1:index + 3], signed=True)
+        min_rssi = bridge_radio.int_from_be(payload[index + 3:index + 5], signed=True)
+        max_rssi = bridge_radio.int_from_be(payload[index + 5:index + 7], signed=True)
         result = {
             "channel": channel,
             "avg": avg,
@@ -263,21 +268,21 @@ def parse_channel_scan_payload(payload):
 
 
 def scan_local_radio_channels(timeout_ms=8000):
-    frame = local_radio_command(e77_radio.CMD_SCAN_CHANNELS, b"", timeout_ms)
+    frame = local_radio_command(bridge_radio.CMD_SCAN_CHANNELS, b"", timeout_ms)
     if not frame:
         return []
-    if frame.cmd != e77_radio.CMD_SCAN_CHANNELS or (frame.flags & e77_radio.FLAG_ERROR):
+    if frame.cmd != bridge_radio.CMD_SCAN_CHANNELS or (frame.flags & bridge_radio.FLAG_ERROR):
         return []
     return parse_channel_scan_payload(frame.payload)
 
 
 def get_local_radio_stats(timeout_ms=1000):
-    frame = local_radio_command(e77_radio.CMD_GET_STATS, b"", timeout_ms)
+    frame = local_radio_command(bridge_radio.CMD_GET_STATS, b"", timeout_ms)
     if not frame:
         return None
-    if frame.cmd != e77_radio.CMD_GET_STATS or (frame.flags & e77_radio.FLAG_ERROR):
+    if frame.cmd != bridge_radio.CMD_GET_STATS or (frame.flags & bridge_radio.FLAG_ERROR):
         return None
-    return e77_radio.parse_stats_payload(frame.payload)
+    return bridge_radio.parse_stats_payload(frame.payload)
 
 
 def ensure_local_radio_channel(channel, timeout_ms=1000):
@@ -308,19 +313,30 @@ def ensure_local_radio_channel(channel, timeout_ms=1000):
 
 
 def clear_local_radio_stats(timeout_ms=1000):
-    frame = local_radio_command(e77_radio.CMD_CLEAR_STATS, b"", timeout_ms)
+    frame = local_radio_command(bridge_radio.CMD_CLEAR_STATS, b"", timeout_ms)
     if not frame:
         return False
-    return frame.cmd == e77_radio.CMD_CLEAR_STATS and not (frame.flags & e77_radio.FLAG_ERROR)
+    return frame.cmd == bridge_radio.CMD_CLEAR_STATS and not (frame.flags & bridge_radio.FLAG_ERROR)
+
+
+def reset_local_radio(timeout_ms=1000):
+    frame = local_radio_command(bridge_radio.CMD_RESET, b"", timeout_ms)
+    ok = bool(
+        frame and
+        frame.cmd == bridge_radio.CMD_RESET and
+        not (frame.flags & bridge_radio.FLAG_ERROR)
+    )
+    time.sleep_ms(1200)
+    return ok
 
 
 def get_local_radio_info(timeout_ms=1000):
-    frame = local_radio_command(e77_radio.CMD_GET_INFO, b"", timeout_ms)
+    frame = local_radio_command(bridge_radio.CMD_GET_INFO, b"", timeout_ms)
     if not frame:
         return None
-    if frame.cmd != e77_radio.CMD_GET_INFO or (frame.flags & e77_radio.FLAG_ERROR):
+    if frame.cmd != bridge_radio.CMD_GET_INFO or (frame.flags & bridge_radio.FLAG_ERROR):
         return None
-    return e77_radio.parse_get_info(frame.payload)
+    return bridge_radio.parse_get_info(frame.payload)
 
 
 def check_radio_ready(network_id, channel=None):
@@ -330,10 +346,30 @@ def check_radio_ready(network_id, channel=None):
     if not set_local_radio_network(network_id, 1000):
         return False
 
-    if channel is not None and not set_local_radio_channel(channel, 1000):
-        return False
+    if channel is not None:
+        ok, _message = ensure_local_radio_channel(channel, 1000)
+        if not ok:
+            return False
 
     return radio_ping(1000)
+
+
+def check_radio_ready_with_retry(network_id, channel=None, timeout_ms=RADIO_BOOT_READY_RETRY_MS):
+    deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
+    reset_tried = False
+
+    while True:
+        if check_radio_ready(network_id, channel):
+            return True
+
+        if not reset_tried and radio_ping(300):
+            reset_tried = True
+            reset_local_radio(500)
+
+        if time.ticks_diff(deadline, time.ticks_ms()) <= 0:
+            return False
+
+        time.sleep_ms(RADIO_BOOT_READY_RETRY_GAP_MS)
 
 
 def trellis_pressed_keys(trellis):
@@ -598,9 +634,9 @@ def poll_responses(max_packets=8):
         frame = radio_rx.feed(b)
         if not frame:
             continue
-        if frame.cmd != e77_radio.CMD_NFCP_RX:
+        if frame.cmd != bridge_radio.CMD_NFCP_RX:
             continue
-        rx_info = e77_radio.parse_nfcp_rx(frame.payload)
+        rx_info = bridge_radio.parse_nfcp_rx(frame.payload)
         if not rx_info:
             continue
         nfcp_data = rx_info.get("nfcp_frame", b"")
@@ -703,7 +739,15 @@ def module_apply_info(dev, info):
     dev["info_last_epoch"] = time.time()
 
 
-def discover(idle_ms=DISCOVER_IDLE_TIMEOUT_MS, max_scan_ms=DISCOVER_MAX_SCAN_MS):
+def discover(
+    idle_ms=DISCOVER_IDLE_TIMEOUT_MS,
+    max_scan_ms=DISCOVER_MAX_SCAN_MS,
+    collect_info=True,
+    info_timeout_ms=1000
+):
+    global _last_discovery_info_count
+
+    _last_discovery_info_count = 0
     drain_uart()
 
     nonce = random.getrandbits(16)
@@ -757,9 +801,33 @@ def discover(idle_ms=DISCOVER_IDLE_TIMEOUT_MS, max_scan_ms=DISCOVER_MAX_SCAN_MS)
         if uid_text not in discovered_uids:
             module_mark_lost(dev)
 
+    if collect_info:
+        for uid_text in discovered_uids:
+            dev = idx.get(uid_text, None)
+            if not dev:
+                continue
+
+            try:
+                uid = int(uid_text, 16) & 0xFFFFFFFF
+            except:
+                continue
+
+            info = request_info_for_uid(uid, info_timeout_ms)
+            if not info:
+                continue
+
+            module_apply_info(dev, info)
+            module_mark_online(dev)
+            module_apply_radio_link(dev, uid_text)
+            _last_discovery_info_count += 1
+
     db["devices"] = sorted(idx.values(), key=lambda d: d.get("unique_id", ""))
     save_device_db(db)
     return db["devices"]
+
+
+def get_last_discovery_info_count():
+    return _last_discovery_info_count
 
 
 def request_continuity_for_uid(uid_int, cue_count_hint=16, timeout_ms=300):
@@ -1091,13 +1159,13 @@ def checksum_file(path):
     return size, checksum
 
 
-def e77_update_send_file_for_uid(uid_int, source_path, target_path, transfer_id, progress_cb=None):
+def ota_update_send_file_for_uid(uid_int, source_path, target_path, transfer_id, progress_cb=None):
     size, checksum = checksum_file(source_path)
 
     ok, code = send_with_ack_detail(
         uid_int,
-        nfcp.CMD_E77_UPDATE_BEGIN,
-        lambda: nfcp_tx.build_e77_update_begin(
+        nfcp.CMD_OTA_UPDATE_BEGIN,
+        lambda: nfcp_tx.build_ota_update_begin(
             uid_int,
             transfer_id,
             target_path,
@@ -1108,21 +1176,21 @@ def e77_update_send_file_for_uid(uid_int, source_path, target_path, transfer_id,
         attempts=2
     )
     if not ok:
-        print("E77 update begin failed:", ack_code_text(code))
+        print("OTA update begin failed:", ack_code_text(code))
         return False
 
     offset = 0
     try:
         with open(source_path, "rb") as f:
             while offset < size:
-                chunk = f.read(E77_UPDATE_CHUNK_SIZE)
+                chunk = f.read(OTA_UPDATE_CHUNK_SIZE)
                 if not chunk:
                     break
 
                 ok, code = send_with_ack_detail(
                     uid_int,
-                    nfcp.CMD_E77_UPDATE_WRITE,
-                    lambda: nfcp_tx.build_e77_update_write(
+                    nfcp.CMD_OTA_UPDATE_WRITE,
+                    lambda: nfcp_tx.build_ota_update_write(
                         uid_int,
                         transfer_id,
                         offset,
@@ -1133,8 +1201,8 @@ def e77_update_send_file_for_uid(uid_int, source_path, target_path, transfer_id,
                 )
 
                 if not ok:
-                    radio_write_nfcp(nfcp_tx.build_e77_update_abort(uid_int, transfer_id))
-                    print("E77 update write failed:", ack_code_text(code))
+                    radio_write_nfcp(nfcp_tx.build_ota_update_abort(uid_int, transfer_id))
+                    print("OTA update write failed:", ack_code_text(code))
                     return False
 
                 offset += len(chunk)
@@ -1143,28 +1211,28 @@ def e77_update_send_file_for_uid(uid_int, source_path, target_path, transfer_id,
 
         ok, code = send_with_ack_detail(
             uid_int,
-            nfcp.CMD_E77_UPDATE_END,
-            lambda: nfcp_tx.build_e77_update_end(uid_int, transfer_id),
+            nfcp.CMD_OTA_UPDATE_END,
+            lambda: nfcp_tx.build_ota_update_end(uid_int, transfer_id),
             4000,
             attempts=2
         )
         if not ok:
-            print("E77 update end failed:", ack_code_text(code))
+            print("OTA update end failed:", ack_code_text(code))
         return ok
     except Exception as e:
-        print("E77 update send failed:", e)
+        print("OTA update send failed:", e)
         try:
-            radio_write_nfcp(nfcp_tx.build_e77_update_abort(uid_int, transfer_id))
+            radio_write_nfcp(nfcp_tx.build_ota_update_abort(uid_int, transfer_id))
         except:
             pass
         return False
 
 
-def e77_update_reboot_for_uid(uid_int, timeout_ms=1000):
+def ota_update_reboot_for_uid(uid_int, timeout_ms=1000):
     return send_with_ack(
         uid_int,
-        nfcp.CMD_E77_UPDATE_REBOOT,
-        lambda: nfcp_tx.build_e77_update_reboot(uid_int),
+        nfcp.CMD_OTA_UPDATE_REBOOT,
+        lambda: nfcp_tx.build_ota_update_reboot(uid_int),
         timeout_ms
     )
 
@@ -1288,6 +1356,7 @@ nfcp.poll_responses = poll_responses
 nfcp.get_last_packets = get_last_packets
 nfcp.get_last_radio_link = get_last_radio_link
 nfcp.discover = discover
+nfcp.get_last_discovery_info_count = get_last_discovery_info_count
 nfcp.request_continuity_for_uid = request_continuity_for_uid
 nfcp.continuity_scan = continuity_scan
 nfcp.request_ping_for_uid = request_ping_for_uid
@@ -1304,8 +1373,8 @@ nfcp.set_group = set_group
 nfcp.request_set_network_for_uid = request_set_network_for_uid
 nfcp.request_set_unique_for_uid = request_set_unique_for_uid
 nfcp.request_set_radio_channel_for_uid = request_set_radio_channel_for_uid
-nfcp.e77_update_send_file_for_uid = e77_update_send_file_for_uid
-nfcp.e77_update_reboot_for_uid = e77_update_reboot_for_uid
+nfcp.ota_update_send_file_for_uid = ota_update_send_file_for_uid
+nfcp.ota_update_reboot_for_uid = ota_update_reboot_for_uid
 nfcp.script_clear_status_for_uid = script_clear_status_for_uid
 nfcp.script_clear_for_uid = script_clear_for_uid
 nfcp.script_load_for_uid = script_load_for_uid
@@ -1344,6 +1413,16 @@ class NFCPGui:
         self.manual_last_fire_key = None
         self.manual_last_fire_blink_on = False
         self.manual_last_fire_blink_ms = time.ticks_ms()
+        self.range_test_modules = []
+        self.range_test_index = 0
+        self.range_test_active = False
+        self.range_test_sent = 0
+        self.range_test_received = 0
+        self.range_test_total_ms = 0
+        self.range_test_last_ms = None
+        self.range_test_last_rssi = None
+        self.range_test_history = []
+        self.range_test_last_poll_ms = time.ticks_ms()
         self.script_fire_mode = SCRIPT_FIRE_MODE_AUTO
         self.last_lvgl_handler_ms = time.ticks_ms()
         self.script_fire_prepared = False
@@ -1370,6 +1449,8 @@ class NFCPGui:
 
         self.group_edit_value = 1
         self.group_edit_text = ""
+        self.channel_edit_value = self.radio_channel
+        self.channel_edit_text = str(self.radio_channel)
 
         self.trellis, self.trellis_error = init_trellis_boot_check()
         if self.trellis_error:
@@ -1377,8 +1458,8 @@ class NFCPGui:
             self.show_trellis_error()
             return
 
-        if not check_radio_ready(self.radio_network_id, self.radio_channel):
-            self.radio_error = "E77 radio not responding"
+        if not check_radio_ready_with_retry(self.radio_network_id, self.radio_channel):
+            self.radio_error = "Radio bridge not responding"
             print(self.radio_error)
             self.show_radio_error()
             return
@@ -1465,6 +1546,8 @@ class NFCPGui:
             "group_edit_label",
             "network_edit_box",
             "network_edit_label",
+            "channel_edit_box",
+            "channel_edit_label",
             "manual_channel_label",
             "manual_module_label",
             "manual_summary_label",
@@ -1480,6 +1563,12 @@ class NFCPGui:
             "script_stop_btn",
             "script_auto_btn",
             "script_step_btn",
+            "range_target_label",
+            "range_stats_label",
+            "range_link_label",
+            "range_history_label",
+            "range_start_btn",
+            "range_stop_btn",
         )
 
         for name in names:
@@ -1605,7 +1694,7 @@ class NFCPGui:
 
         label = lv.label(scr)
         label.set_text(
-            "E77 radio is not responding.\n"
+            "Radio bridge is not responding.\n"
             "Check radio power, UART wiring, and firmware."
         )
         label.align(lv.ALIGN.CENTER, 0, -20)
@@ -1614,13 +1703,13 @@ class NFCPGui:
         retry.set_style_bg_color(lv.color_hex(0x2F4F8F), 0)
 
     def retry_radio_boot_check(self, event=None):
-        if check_radio_ready(self.radio_network_id):
+        if check_radio_ready_with_retry(self.radio_network_id, self.radio_channel):
             self.radio_error = None
             self.load_modules_from_db()
             self.show_main_menu()
             return
 
-        self.radio_error = "E77 radio not responding"
+        self.radio_error = "Radio bridge not responding"
         self.show_radio_error()
 
     def show_trellis_error(self):
@@ -1645,8 +1734,8 @@ class NFCPGui:
             self.show_trellis_error()
             return
 
-        if not check_radio_ready(self.radio_network_id):
-            self.radio_error = "E77 radio not responding"
+        if not check_radio_ready_with_retry(self.radio_network_id, self.radio_channel):
+            self.radio_error = "Radio bridge not responding"
             print(self.radio_error)
             self.show_radio_error()
             return
@@ -1915,6 +2004,25 @@ class NFCPGui:
 
         self.radio_error = None
         return True
+
+    def count_online_modules(self, modules):
+        count = 0
+
+        for module in modules or []:
+            if not self.module_is_lost(module):
+                count += 1
+
+        return count
+
+    def recover_bridge_radio(self):
+        self.set_status("Resetting bridge radio...")
+
+        try:
+            reset_local_radio(1000)
+        except Exception as e:
+            print("Bridge reset failed:", e)
+
+        return self.ensure_bridge_channel()
 
     def update_modules_busy_buttons(self):
         if hasattr(self, "discover_btn"):
@@ -2502,7 +2610,7 @@ class NFCPGui:
                 for uid in channel_uids.get(channel, []):
                     if uid not in uid_entries:
                         uid_entries[uid] = []
-                    uid_entries[uid].append((event_ms, cue_mask & 0xFFFF))
+                    uid_entries[uid].append((event_ms, cue_mask & ((1 << MAX_CUE_COUNT) - 1)))
 
         return uid_entries
 
@@ -3368,20 +3476,10 @@ class NFCPGui:
 
         self.make_button(
             scr,
-            "RADIO UPDATE",
+            "STATS",
             430,
             135,
             250,
-            55,
-            self.show_radio_update
-        )
-
-        self.make_button(
-            scr,
-            "STATS",
-            690,
-            135,
-            90,
             55,
             self.show_radio_stats
         )
@@ -3398,17 +3496,27 @@ class NFCPGui:
             "NETWORK ID",
             430,
             235,
-            160,
+            150,
             55,
             self.show_change_network
         )
 
         self.make_button(
             scr,
-            "PAIR",
-            610,
+            "CHANNEL",
+            590,
             235,
-            130,
+            100,
+            55,
+            self.show_change_channel
+        )
+
+        self.make_button(
+            scr,
+            "PAIR",
+            700,
+            235,
+            80,
             55,
             self.pair_modules_to_network
         )
@@ -3430,10 +3538,218 @@ class NFCPGui:
             300,
             90,
             50,
-            self.show_e77_update
+            self.show_ota_update
+        )
+
+        self.make_button(
+            scr,
+            "RANGE TEST",
+            430,
+            360,
+            250,
+            50,
+            self.show_range_test
         )
 
         self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_main_menu)
+
+    def reset_range_test_stats(self):
+        self.range_test_active = False
+        self.range_test_sent = 0
+        self.range_test_received = 0
+        self.range_test_total_ms = 0
+        self.range_test_last_ms = None
+        self.range_test_last_rssi = None
+        self.range_test_history = []
+        self.range_test_last_poll_ms = time.ticks_ms()
+
+    def get_range_test_module(self):
+        if not self.range_test_modules:
+            return None
+
+        if self.range_test_index < 0:
+            self.range_test_index = 0
+        if self.range_test_index >= len(self.range_test_modules):
+            self.range_test_index = len(self.range_test_modules) - 1
+
+        return self.range_test_modules[self.range_test_index]
+
+    def format_range_target(self):
+        module = self.get_range_test_module()
+        if not module:
+            return "Target: --"
+
+        return "Target CH %s  UID %s" % (
+            self.group_to_int_display(module.get("group_id", "--")),
+            self.format_uid(module.get("unique_id", "0x00000000"))
+        )
+
+    def format_range_stats(self):
+        sent = self.range_test_sent
+        received = self.range_test_received
+        lost = sent - received
+        loss_pct = 0
+        avg_ms = None
+
+        if sent > 0:
+            loss_pct = int((lost * 100) // sent)
+        if received > 0:
+            avg_ms = self.range_test_total_ms // received
+
+        last_text = "--" if self.range_test_last_ms is None else "%dms" % self.range_test_last_ms
+        avg_text = "--" if avg_ms is None else "%dms" % avg_ms
+
+        return (
+            "Sent: %d   OK: %d   Lost: %d   Loss: %d%%\n"
+            "Last: %s   Avg: %s"
+        ) % (sent, received, lost, loss_pct, last_text, avg_text)
+
+    def format_range_link(self):
+        rssi_text = "--"
+        if self.range_test_last_rssi is not None:
+            try:
+                rssi_text = "%ddBm" % int(self.range_test_last_rssi)
+            except:
+                rssi_text = "--"
+
+        state = "RUNNING" if self.range_test_active else "STOPPED"
+        return "RSSI: %s   State: %s" % (rssi_text, state)
+
+    def format_range_history(self):
+        if not self.range_test_history:
+            return "History: --"
+
+        return "History: " + "".join(self.range_test_history)
+
+    def refresh_range_test_labels(self):
+        if hasattr(self, "range_target_label"):
+            self.range_target_label.set_text(self.format_range_target())
+        if hasattr(self, "range_stats_label"):
+            self.range_stats_label.set_text(self.format_range_stats())
+        if hasattr(self, "range_link_label"):
+            self.range_link_label.set_text(self.format_range_link())
+        if hasattr(self, "range_history_label"):
+            self.range_history_label.set_text(self.format_range_history())
+
+        if hasattr(self, "range_start_btn"):
+            self.set_control_enabled(self.range_start_btn, not self.range_test_active)
+        if hasattr(self, "range_stop_btn"):
+            self.set_control_enabled(self.range_stop_btn, self.range_test_active)
+
+    def show_range_test(self, event=None):
+        self.load_modules_from_db()
+        self.range_test_modules = list(self.modules)
+
+        if not self.range_test_modules:
+            self.set_status("Range test needs discovered modules")
+            return
+
+        if self.range_test_index < 0:
+            self.range_test_index = 0
+        if self.range_test_index >= len(self.range_test_modules):
+            self.range_test_index = len(self.range_test_modules) - 1
+
+        scr = self.new_screen("Range Test", "range_test")
+
+        self.make_button(scr, "BACK", 20, 400, 140, 55, self.leave_range_test)
+        self.make_button(scr, "TARGET -", 40, 95, 170, 85, self.range_target_prev)
+        self.make_button(scr, "TARGET +", 40, 210, 170, 85, self.range_target_next)
+
+        self.range_start_btn = self.make_button(scr, "START", 250, 400, 140, 55, self.start_range_test)
+        self.range_stop_btn = self.make_button(scr, "STOP", 410, 400, 140, 55, self.stop_range_test)
+
+        self.range_target_label = self.make_label(scr, self.format_range_target(), 245, 80)
+        self.range_stats_label = self.make_label(scr, self.format_range_stats(), 245, 130)
+        self.range_link_label = self.make_label(scr, self.format_range_link(), 245, 205)
+        self.range_history_label = self.make_label(scr, self.format_range_history(), 245, 255)
+
+        self.refresh_range_test_labels()
+
+    def leave_range_test(self, event=None):
+        self.range_test_active = False
+        self.show_settings()
+
+    def range_target_prev(self, event=None):
+        if self.range_test_active:
+            self.stop_range_test()
+        self.range_test_index -= 1
+        if self.range_test_index < 0 and self.range_test_modules:
+            self.range_test_index = len(self.range_test_modules) - 1
+        self.reset_range_test_stats()
+        self.refresh_range_test_labels()
+
+    def range_target_next(self, event=None):
+        if self.range_test_active:
+            self.stop_range_test()
+        self.range_test_index += 1
+        if self.range_test_modules and self.range_test_index >= len(self.range_test_modules):
+            self.range_test_index = 0
+        self.reset_range_test_stats()
+        self.refresh_range_test_labels()
+
+    def start_range_test(self, event=None):
+        if not self.get_range_test_module():
+            self.set_status("No range target selected")
+            return
+
+        self.reset_range_test_stats()
+        self.range_test_active = True
+        self.range_test_last_poll_ms = time.ticks_add(
+            time.ticks_ms(),
+            -RANGE_TEST_INTERVAL_MS
+        )
+        self.refresh_range_test_labels()
+        self.set_status("Range test started")
+
+    def stop_range_test(self, event=None):
+        self.range_test_active = False
+        self.refresh_range_test_labels()
+        self.set_status("Range test stopped")
+
+    def poll_range_test(self):
+        if self.current_view != "range_test" or not self.range_test_active:
+            return
+
+        now = time.ticks_ms()
+        if time.ticks_diff(now, self.range_test_last_poll_ms) < RANGE_TEST_INTERVAL_MS:
+            return
+
+        self.range_test_last_poll_ms = now
+        module = self.get_range_test_module()
+        if not module:
+            self.stop_range_test()
+            return
+
+        uid_text = module.get("unique_id", "0x00000000")
+        try:
+            uid = int(uid_text, 16) & 0xFFFFFFFF
+        except:
+            self.set_status("Bad range target UID")
+            self.stop_range_test()
+            return
+
+        self.range_test_sent += 1
+        ping_ms = nfcp.request_ping_for_uid(uid, RANGE_TEST_TIMEOUT_MS)
+
+        if ping_ms is None:
+            self.range_test_history.append("x")
+            self.range_test_last_ms = None
+            self.set_status("Range ping lost")
+        else:
+            self.range_test_received += 1
+            self.range_test_total_ms += int(ping_ms)
+            self.range_test_last_ms = int(ping_ms)
+            self.range_test_history.append("|")
+            link = get_last_radio_link(uid_text)
+            if link and link.get("radio_rssi", None) is not None:
+                self.range_test_last_rssi = link.get("radio_rssi", None)
+                module["radio_rssi"] = self.range_test_last_rssi
+                module["radio_last_epoch"] = link.get("radio_last_epoch", time.time())
+
+        if len(self.range_test_history) > RANGE_TEST_HISTORY_LEN:
+            self.range_test_history = self.range_test_history[-RANGE_TEST_HISTORY_LEN:]
+
+        self.refresh_range_test_labels()
 
     def format_radio_stats_text(self, stats):
         if not stats:
@@ -3513,13 +3829,13 @@ class NFCPGui:
         except:
             return False
 
-    def find_e77_update_manifest(self):
-        self.mount_sd_for_radio_update()
+    def find_ota_update_manifest(self):
+        self.mount_sd_for_ota_update()
         paths = (
-            "/sd/e77_update.json",
-            "/sd/firmware/e77_update.json",
-            "/e77_update.json",
-            "e77_update.json",
+            "/sd/ota_update.json",
+            "/sd/firmware/ota_update.json",
+            "/ota_update.json",
+            "ota_update.json",
         )
 
         for path in paths:
@@ -3530,12 +3846,12 @@ class NFCPGui:
                     manifest["manifest_path"] = path
                     return manifest
                 except Exception as e:
-                    print("E77 update manifest read failed:", e)
+                    print("OTA update manifest read failed:", e)
                     return None
 
         return None
 
-    def resolve_e77_update_source(self, manifest_path, source):
+    def resolve_ota_update_source(self, manifest_path, source):
         if source.startswith("/"):
             return source
 
@@ -3549,7 +3865,7 @@ class NFCPGui:
             return "/" + source
         return base + "/" + source
 
-    def module_supports_e77_update(self, module, manifest=None):
+    def module_supports_ota_update(self, module, manifest=None):
         app_name = str(module.get("app_name", "") or "")
         target = ""
 
@@ -3557,38 +3873,32 @@ class NFCPGui:
             target = str(manifest.get("target", "") or "")
 
         if target:
-            if target == "slave":
-                return app_name == "slave"
-            if target == "dummy":
-                return app_name == "dummy"
+            if target == "field":
+                return app_name == "field-module"
+            if target == "field-module":
+                return app_name == "field-module"
             if target == "nrf-dummy":
                 return app_name == "nrf-dummy"
-            if target == "e77":
-                return app_name == "e77-micropython"
             return False
-
-        if app_name == "e77-micropython":
-            return True
 
         return False
 
-    def show_e77_update(self, event=None):
-        scr = self.new_screen("" \
-        "OTA", "e77_update")
+    def show_ota_update(self, event=None):
+        scr = self.new_screen("OTA", "ota_update")
         self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_settings)
 
         self.load_modules_from_db()
-        manifest = self.find_e77_update_manifest()
+        manifest = self.find_ota_update_manifest()
         modules = [
             module for module in self.modules
-            if self.module_supports_e77_update(module, manifest)
+            if self.module_supports_ota_update(module, manifest)
         ]
 
         label = lv.label(scr)
         if not manifest:
             label.set_text(
-                "No E77 update manifest found.\n"
-                "Use /sd/e77_update.json."
+                "No OTA update manifest found.\n"
+                "Use /sd/ota_update.json."
             )
             label.align(lv.ALIGN.CENTER, 0, -45)
             return
@@ -3598,7 +3908,7 @@ class NFCPGui:
                 "Manifest: %s\nTarget: %s\nVersion: %s\nFiles: %d\nModules: %d" %
             (
                 manifest.get("manifest_path", "--"),
-                manifest.get("target", "e77"),
+                manifest.get("target", "--"),
                 manifest.get("version", "--"),
                 len(files),
                 len(modules)
@@ -3613,30 +3923,30 @@ class NFCPGui:
             285,
             300,
             75,
-            self.run_e77_update
+            self.run_ota_update
         )
 
-    def run_e77_update(self, event=None):
-        manifest = self.find_e77_update_manifest()
+    def run_ota_update(self, event=None):
+        manifest = self.find_ota_update_manifest()
         if not manifest:
-            self.set_status("No E77 update manifest")
-            self.show_e77_update()
+            self.set_status("No OTA update manifest")
+            self.show_ota_update()
             return
 
         files = manifest.get("files", [])
         if not files:
-            self.set_status("E77 update manifest empty")
-            self.show_e77_update()
+            self.set_status("OTA update manifest empty")
+            self.show_ota_update()
             return
 
         self.load_modules_from_db()
         modules = [
             module for module in self.modules
-            if self.module_supports_e77_update(module, manifest)
+            if self.module_supports_ota_update(module, manifest)
         ]
         if not modules:
-            self.set_status("No E77 modules found")
-            self.show_e77_update()
+            self.set_status("No matching modules found")
+            self.show_ota_update()
             return
 
         total_ok = 0
@@ -3663,12 +3973,12 @@ class NFCPGui:
                     total_failed += 1
                     continue
 
-                source_path = self.resolve_e77_update_source(
+                source_path = self.resolve_ota_update_source(
                     manifest.get("manifest_path", ""),
                     source
                 )
                 if not self.file_exists(source_path):
-                    print("E77 update source missing:", source_path)
+                    print("OTA update source missing:", source_path)
                     module_ok = False
                     total_failed += 1
                     continue
@@ -3678,19 +3988,19 @@ class NFCPGui:
                     file_transfer_id = 1
 
                 self.show_loading_screen(
-                    "E77 update...\n%s -> %s" %
+                    "OTA update...\n%s -> %s" %
                     (self.format_uid(uid_text), target)
                 )
 
                 def progress(done, size):
                     if hasattr(self, "loading_label"):
                         self.loading_label.set_text(
-                            "E77 update...\n%s %d/%d" %
+                            "OTA update...\n%s %d/%d" %
                             (self.format_uid(uid_text), done, size)
                         )
                         self.flush_ui()
 
-                if not nfcp.e77_update_send_file_for_uid(
+                if not nfcp.ota_update_send_file_for_uid(
                     uid,
                     source_path,
                     target,
@@ -3703,16 +4013,16 @@ class NFCPGui:
 
             if module_ok:
                 self.show_loading_screen(
-                    "E77 update...\nRebooting %s" %
+                    "OTA update...\nRebooting %s" %
                     self.format_uid(uid_text)
                 )
-                nfcp.e77_update_reboot_for_uid(uid)
+                nfcp.ota_update_reboot_for_uid(uid)
                 total_ok += 1
 
-        self.show_e77_update()
-        self.set_status("E77 update complete - %d ok, %d failed" % (total_ok, total_failed))
+        self.show_ota_update()
+        self.set_status("OTA update complete - %d ok, %d failed" % (total_ok, total_failed))
 
-    def mount_sd_for_radio_update(self):
+    def mount_sd_for_ota_update(self):
         if sdcard_driver is None:
             return
 
@@ -3726,50 +4036,6 @@ class NFCPGui:
         except Exception as e:
             print("SD mount failed:", e)
 
-    def find_radio_update(self):
-        try:
-            import e77_bootloader
-            self.mount_sd_for_radio_update()
-            return e77_bootloader.find_firmware()
-        except Exception as e:
-            print("Radio firmware check failed:", e)
-            return None
-
-    def show_radio_update(self, event=None):
-        scr = self.new_screen("Radio Update", "radio_update")
-
-        self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_settings)
-
-        info = self.find_radio_update()
-
-        label = lv.label(scr)
-        if info:
-            version = info.get("version", "")
-            if version:
-                label.set_text(
-                    "Firmware found:\n%s\nVersion: %s" %
-                    (info.get("path", "--"), version)
-                )
-            else:
-                label.set_text("Firmware found:\n%s" % info.get("path", "--"))
-
-            self.make_button(
-                scr,
-                "START UPDATE",
-                250,
-                285,
-                300,
-                75,
-                self.run_radio_update
-            )
-        else:
-            label.set_text(
-                "No radio firmware found.\n"
-                "Use /sd/latest.json or /sd/firmware/latest.json."
-            )
-
-        label.align(lv.ALIGN.CENTER, 0, -45)
-
     def restore_radio_uart(self):
         global uart, radio_rx
 
@@ -3780,71 +4046,10 @@ class NFCPGui:
                 tx=Pin(TX_PIN),
                 rx=Pin(RX_PIN)
             )
-            radio_rx = e77_radio.E77FrameParser()
+            radio_rx = bridge_radio.BridgeFrameParser()
             drain_uart()
         except Exception as e:
             print("Radio UART restore failed:", e)
-
-    def run_radio_update(self, event=None):
-        try:
-            import e77_bootloader
-        except Exception as e:
-            print("Radio updater import failed:", e)
-            self.set_status("Radio updater missing")
-            return
-
-        self.mount_sd_for_radio_update()
-        info = e77_bootloader.find_firmware()
-        if not info:
-            self.set_status("No radio firmware found")
-            self.show_radio_update()
-            return
-
-        self.show_loading_screen("Radio update...\nStarting...")
-
-        last_progress_ms = {"value": 0}
-
-        def progress(message):
-            print("Radio update:", message)
-
-            now = time.ticks_ms()
-            if time.ticks_diff(now, last_progress_ms["value"]) < 500:
-                return
-
-            last_progress_ms["value"] = now
-
-            try:
-                if hasattr(self, "loading_label"):
-                    self.loading_label.set_text("Radio update...\n" + message)
-                    self.loading_label.align(lv.ALIGN.CENTER, 0, -20)
-                    self.flush_ui()
-            except Exception:
-                pass
-
-        result = None
-        try:
-            result = e77_bootloader.flash_first_available(
-                UART_ID,
-                TX_PIN,
-                RX_PIN,
-                app_baud=BAUDRATE,
-                boot_baud=RADIO_BOOTLOADER_BAUD,
-                progress_cb=progress
-            )
-        except Exception as e:
-            print("Radio update failed:", e)
-            self.restore_radio_uart()
-            self.show_radio_update()
-            self.set_status("Radio update failed")
-            return
-
-        self.restore_radio_uart()
-        self.show_radio_update()
-
-        if result:
-            self.set_status("Radio update complete")
-        else:
-            self.set_status("Radio update finished")
 
     def show_change_network(self, event=None):
         scr = self.new_screen("Radio Network", "radio_network")
@@ -3954,9 +4159,100 @@ class NFCPGui:
         self.set_status("Network changed to %d" % self.radio_network_id)
         self.show_settings()
 
+    def show_change_channel(self, event=None):
+        scr = self.new_screen("Radio Channel", "radio_channel")
+
+        self.channel_edit_value = self.radio_channel
+        self.channel_edit_text = str(self.radio_channel)
+
+        self.make_button(scr, "BACK", 20, 400, 120, 55, self.show_settings)
+        self.make_button(scr, "SAVE", 650, 400, 120, 55, self.save_channel_change)
+
+        title = lv.label(scr)
+        title.set_text("Radio Channel")
+        title.align(lv.ALIGN.TOP_MID, 0, 75)
+
+        self.channel_edit_box = lv.obj(scr)
+        self.channel_edit_box.set_size(260, 70)
+        self.channel_edit_box.align(lv.ALIGN.TOP_MID, 0, 110)
+        self.channel_edit_box.set_style_bg_color(lv.color_hex(0x202020), 0)
+        self.channel_edit_box.set_style_border_color(lv.color_hex(0xFFFFFF), 0)
+        self.channel_edit_box.set_style_border_width(2, 0)
+        self.channel_edit_box.set_style_radius(8, 0)
+        self.channel_edit_box.set_style_pad_all(0, 0)
+
+        self.channel_edit_label = lv.label(self.channel_edit_box)
+        self.channel_edit_label.set_text(self.channel_edit_text)
+        self.channel_edit_label.center()
+
+        self.build_channel_number_pad(scr)
+
+    def build_channel_number_pad(self, parent):
+        x0 = 145
+        y0 = 205
+        btn_w = 150
+        btn_h = 42
+        gap = 12
+
+        keys = [
+            ["1", "2", "3"],
+            ["4", "5", "6"],
+            ["7", "8", "9"],
+            ["CLR", "0", "DEL"]
+        ]
+
+        for row in range(4):
+            for col in range(3):
+                key = keys[row][col]
+                x = x0 + col * (btn_w + gap)
+                y = y0 + row * (btn_h + gap)
+                self.make_button(parent, key, x, y, btn_w, btn_h, self.make_channel_key_cb(key))
+
+    def make_channel_key_cb(self, key):
+        def cb(event):
+            self.channel_key_pressed(key)
+
+        return cb
+
+    def channel_key_pressed(self, key):
+        if key == "CLR":
+            self.channel_edit_text = ""
+        elif key == "DEL":
+            if len(self.channel_edit_text) > 0:
+                self.channel_edit_text = self.channel_edit_text[:-1]
+        else:
+            if len(self.channel_edit_text) < 3:
+                if self.channel_edit_text == "0":
+                    self.channel_edit_text = key
+                else:
+                    self.channel_edit_text += key
+
+        if self.channel_edit_text == "":
+            self.channel_edit_value = 0
+        else:
+            try:
+                self.channel_edit_value = int(self.channel_edit_text)
+                if self.channel_edit_value > 100:
+                    self.channel_edit_value = 100
+                    self.channel_edit_text = "100"
+            except:
+                self.channel_edit_value = 0
+                self.channel_edit_text = ""
+
+        if hasattr(self, "channel_edit_label"):
+            self.channel_edit_label.set_text(self.channel_edit_text or "_")
+            self.channel_edit_label.center()
+
+    def save_channel_change(self, event=None):
+        if self.channel_edit_value < 0 or self.channel_edit_value > 100:
+            self.set_status("Invalid channel")
+            return
+
+        self.apply_radio_channel(self.channel_edit_value, fail_view="radio_channel")
+
     def pair_modules_to_network(self, event=None):
         target_network = self.radio_network_id & 0xFFFF
-        pair_network = e77_radio.DEFAULT_NETWORK_ID & 0xFFFF
+        pair_network = bridge_radio.DEFAULT_NETWORK_ID & 0xFFFF
 
         self.show_loading_screen("Pairing modules...\nScanning default network...")
 
@@ -4096,7 +4392,13 @@ class NFCPGui:
 
         return cb
 
-    def apply_radio_channel(self, channel):
+    def show_channel_apply_failure(self, fail_view):
+        if fail_view == "radio_channel":
+            self.show_change_channel()
+        else:
+            self.show_channel_scan_results()
+
+    def apply_radio_channel(self, channel, fail_view="channel_scan"):
         try:
             channel = int(channel)
         except:
@@ -4112,6 +4414,20 @@ class NFCPGui:
         ok_count = 0
         failed_count = 0
         changed_uids = []
+        previous_channel = self.radio_channel
+
+        self.show_loading_screen("Switching channel...\nChecking bridge...")
+
+        if channel != previous_channel:
+            if not set_local_radio_channel(channel):
+                self.show_channel_apply_failure(fail_view)
+                self.set_status("Bridge cannot switch to channel %d" % channel)
+                return
+
+            if not set_local_radio_channel(previous_channel):
+                self.show_channel_apply_failure(fail_view)
+                self.set_status("Bridge restore failed")
+                return
 
         self.show_loading_screen("Switching channel...\nModules first...")
 
@@ -4130,7 +4446,7 @@ class NFCPGui:
                 failed_count += 1
 
         if failed_count:
-            self.show_channel_scan_results()
+            self.show_channel_apply_failure(fail_view)
             self.set_status(
                 "Channel not changed - %d ok, %d failed" %
                 (ok_count, failed_count)
@@ -4138,7 +4454,7 @@ class NFCPGui:
             return
 
         if not set_local_radio_channel(channel):
-            self.show_channel_scan_results()
+            self.show_channel_apply_failure(fail_view)
             self.set_status("Bridge channel set failed")
             return
 
@@ -4990,6 +5306,11 @@ class NFCPGui:
 
         try:
             results = nfcp.continuity_scan()
+            if not results and self.modules:
+                self.show_loading_screen("Refreshing modules...\nResetting bridge...")
+                if self.recover_bridge_radio():
+                    self.show_loading_screen("Refreshing modules...\nChecking continuity...")
+                    results = nfcp.continuity_scan()
         except Exception as e:
             print("Continuity scan failed:", e)
             self.set_status("Continuity scan failed")
@@ -5066,6 +5387,12 @@ class NFCPGui:
             else:
                 self.modules = nfcp.discover()
                 self.load_modules_from_db()
+                if self.count_online_modules(self.modules) == 0:
+                    self.show_loading_screen("Discovering modules...\nResetting bridge...")
+                    if self.recover_bridge_radio():
+                        self.show_loading_screen("Discovering modules...\nWaiting for responses...")
+                        self.modules = nfcp.discover()
+                        self.load_modules_from_db()
 
                 self.show_loading_screen("Discovering modules...\nChecking continuity...")
                 cont_results = nfcp.continuity_scan()
@@ -5075,9 +5402,7 @@ class NFCPGui:
                 speed_results = nfcp.speed_test_scan()
                 speed_count = len(speed_results) if speed_results else 0
 
-                self.show_loading_screen("Discovering modules...\nReading versions...")
-                info_results = nfcp.info_scan()
-                info_count = len(info_results) if info_results else 0
+                info_count = nfcp.get_last_discovery_info_count()
 
                 self.load_modules_from_db()
                 self.update_script_module_mismatch()
@@ -5980,6 +6305,9 @@ class NFCPGui:
             self.poll_script_fire_auto()
             self.poll_script_fire_trellis()
             self.update_pending_script_fire_step_status()
+
+        if self.current_view == "range_test":
+            self.poll_range_test()
 
         if (
             self.auto_module_continuity and

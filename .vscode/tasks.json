@@ -20,68 +20,14 @@
             }
         },
         {
-            "label": "Slave device: upload",
+            "label": "Field module: upload",
             "type": "shell",
             "command": "powershell",
             "args": [
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                "${workspaceFolder}\\scripts\\upload_slave_to_com10.ps1"
-            ],
-            "group": "build",
-            "problemMatcher": [],
-            "presentation": {
-                "reveal": "always",
-                "panel": "shared",
-                "clear": true
-            }
-        },
-        {
-            "label": "Dummy device: upload",
-            "type": "shell",
-            "command": "powershell",
-            "args": [
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                "${workspaceFolder}\\scripts\\upload_dummy_to_com11.ps1"
-            ],
-            "group": "build",
-            "problemMatcher": [],
-            "presentation": {
-                "reveal": "always",
-                "panel": "shared",
-                "clear": true
-            }
-        },
-        {
-            "label": "E77 MicroPython app: upload",
-            "type": "shell",
-            "command": "powershell",
-            "args": [
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                "${workspaceFolder}\\scripts\\upload_e77_micropython_app.ps1"
-            ],
-            "group": "build",
-            "problemMatcher": [],
-            "presentation": {
-                "reveal": "always",
-                "panel": "shared",
-                "clear": true
-            }
-        },
-        {
-            "label": "E77 OTA package: build",
-            "type": "shell",
-            "command": "powershell",
-            "args": [
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                "${workspaceFolder}\\scripts\\build_e77_ota_package.ps1"
+                "${workspaceFolder}\\scripts\\upload_field_module_to_com10.ps1"
             ],
             "group": "build",
             "problemMatcher": [],
@@ -100,6 +46,24 @@
                 "Bypass",
                 "-File",
                 "${workspaceFolder}\\scripts\\upload_nrf_dummy.ps1"
+            ],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
+            "label": "Module OTA package: build",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\scripts\\build_module_ota_package.ps1"
             ],
             "group": "build",
             "problemMatcher": [],

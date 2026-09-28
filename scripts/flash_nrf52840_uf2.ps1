@@ -1,10 +1,17 @@
 param(
-    [string]$MicroPythonRoot = "C:\Users\hog28\OneDrive\Documents\NightfirePY\e77-micropython\micropython",
+    [string]$MicroPythonRoot = "",
     [string]$Board = "NICENANO",
     [string]$BootloaderDrive = "F:"
 )
 
 $ErrorActionPreference = "Stop"
+
+if (-not $MicroPythonRoot) {
+    $MicroPythonRoot = $env:MICROPYTHON_ROOT
+}
+if (-not $MicroPythonRoot) {
+    $MicroPythonRoot = "C:\Users\hog28\OneDrive\Documents\NightfirePY\nrf-micropython\micropython"
+}
 
 $Uf2 = Join-Path $MicroPythonRoot "ports\nrf\build-$Board\firmware.uf2"
 

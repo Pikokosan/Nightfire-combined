@@ -15,11 +15,11 @@ import raw_micropython_upload as raw
 
 MASTER_RX_CODE = r'''
 from machine import UART, Pin
-import e77_radio
+import bridge_radio
 import time
 
 uart = UART(2, baudrate=256000, tx=Pin(15), rx=Pin(16))
-parser = e77_radio.E77FrameParser()
+parser = bridge_radio.BridgeFrameParser()
 deadline = time.ticks_add(time.ticks_ms(), 6000)
 while time.ticks_diff(deadline, time.ticks_ms()) > 0:
     if uart.any():

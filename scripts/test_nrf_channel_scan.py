@@ -13,10 +13,10 @@ import raw_micropython_upload as raw
 MASTER_CODE = r'''
 from machine import UART, Pin
 import time
-import e77_radio
+import bridge_radio
 
 uart = UART(2, baudrate=256000, tx=Pin(15), rx=Pin(16))
-parser = e77_radio.E77FrameParser()
+parser = bridge_radio.BridgeFrameParser()
 
 def read_frame(seq, timeout_ms=9000):
     deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
@@ -45,9 +45,9 @@ def parse_scan(payload):
             break
         item = {
             "channel": payload[index],
-            "avg": e77_radio.int_from_be(payload[index + 1:index + 3], signed=True),
-            "min": e77_radio.int_from_be(payload[index + 3:index + 5], signed=True),
-            "max": e77_radio.int_from_be(payload[index + 5:index + 7], signed=True),
+            "avg": bridge_radio.int_from_be(payload[index + 1:index + 3], signed=True),
+            "min": bridge_radio.int_from_be(payload[index + 3:index + 5], signed=True),
+            "max": bridge_radio.int_from_be(payload[index + 5:index + 7], signed=True),
             "count": 0,
             "busy": 0,
             "score": 0,
@@ -61,11 +61,11 @@ def parse_scan(payload):
     return out
 
 seq = 0x54
-uart.write(e77_radio.build_frame(seq, e77_radio.CMD_SCAN_CHANNELS))
+uart.write(bridge_radio.build_frame(seq, bridge_radio.CMD_SCAN_CHANNELS))
 frame = read_frame(seq)
 if not frame:
     print("SCAN_TIMEOUT")
-elif frame.flags & e77_radio.FLAG_ERROR:
+elif frame.flags & bridge_radio.FLAG_ERROR:
     print("SCAN_ERROR", bytes(frame.payload))
 else:
     for item in parse_scan(frame.payload):

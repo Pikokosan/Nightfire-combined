@@ -10,7 +10,7 @@ import serial
 sys.path.insert(0, "main")
 sys.path.insert(0, "scripts")
 
-import e77_radio
+import bridge_radio
 import raw_micropython_upload as raw
 
 
@@ -24,11 +24,11 @@ print("RX", p, nrf_radio.last_rssi())
 
 MASTER_SEND_CODE = r'''
 from machine import UART, Pin
-import e77_radio
+import bridge_radio
 import time
 
 uart = UART(2, baudrate=256000, tx=Pin(15), rx=Pin(16))
-parser = e77_radio.E77FrameParser()
+parser = bridge_radio.BridgeFrameParser()
 
 def read_one(timeout_ms=3000):
     deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
@@ -43,13 +43,13 @@ def read_one(timeout_ms=3000):
     return None
 
 payload = bytes({payload!r})
-uart.write(e77_radio.build_frame(0x43, e77_radio.CMD_SET_CHANNEL, bytes([{channel}])))
+uart.write(bridge_radio.build_frame(0x43, bridge_radio.CMD_SET_CHANNEL, bytes([{channel}])))
 frame = read_one()
 if frame:
     print("SET_CHANNEL", frame.cmd, frame.flags, bytes(frame.payload))
 else:
     print("SET_CHANNEL_TIMEOUT")
-uart.write(e77_radio.build_frame(0x44, e77_radio.CMD_SEND_NFCP, payload))
+uart.write(bridge_radio.build_frame(0x44, bridge_radio.CMD_SEND_NFCP, payload))
 frame = read_one()
 if frame:
     print("MASTER_RX", frame.cmd, frame.flags, bytes(frame.payload))

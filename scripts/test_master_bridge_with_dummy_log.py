@@ -14,11 +14,11 @@ import raw_micropython_upload as raw
 MASTER_CODE = r'''
 from machine import UART, Pin
 import time
-import e77_radio
+import bridge_radio
 import nfcp
 
 uart = UART(2, baudrate=256000, tx=Pin(15), rx=Pin(16))
-parser = e77_radio.E77FrameParser()
+parser = bridge_radio.BridgeFrameParser()
 
 def read_frames(timeout_ms=7000):
     frames = []
@@ -38,17 +38,17 @@ n = nfcp.NFCP(1)
 stream = nfcp.NFCPStreamParser()
 
 seq = 0x31
-uart.write(e77_radio.build_frame(seq, e77_radio.CMD_PING))
+uart.write(bridge_radio.build_frame(seq, bridge_radio.CMD_PING))
 frames = read_frames(1000)
 print("PING_FRAMES", [(f.seq, f.cmd, f.flags, bytes(f.payload)) for f in frames])
 
 seq = 0x52
-uart.write(e77_radio.build_send_nfcp(seq, n.build_discover_broadcast(0x9ABC)))
+uart.write(bridge_radio.build_send_nfcp(seq, n.build_discover_broadcast(0x9ABC)))
 frames = read_frames(7000)
 print("DISC_FRAMES", [(f.seq, f.cmd, f.flags, len(f.payload), bytes(f.payload[:8])) for f in frames])
 for f in frames:
-    if f.cmd == e77_radio.CMD_NFCP_RX:
-        rx = e77_radio.parse_nfcp_rx(f.payload)
+    if f.cmd == bridge_radio.CMD_NFCP_RX:
+        rx = bridge_radio.parse_nfcp_rx(f.payload)
         print("RADIO_LINK", rx.get("rssi"), rx.get("snr"), len(rx.get("nfcp_frame", b"")))
         for b in rx.get("nfcp_frame", b""):
             pkt = stream.feed(b)

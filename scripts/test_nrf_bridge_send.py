@@ -9,17 +9,17 @@ import serial
 sys.path.insert(0, "main")
 sys.path.insert(0, "scripts")
 
-import e77_radio
+import bridge_radio
 import raw_micropython_upload as raw
 
 
 CODE = r'''
 from machine import UART, Pin
-import e77_radio
+import bridge_radio
 import time
 
 uart = UART(2, baudrate=256000, tx=Pin(15), rx=Pin(16))
-parser = e77_radio.E77FrameParser()
+parser = bridge_radio.BridgeFrameParser()
 
 def read_one(timeout_ms=1500):
     deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
@@ -35,7 +35,7 @@ def read_one(timeout_ms=1500):
     return None
 
 def command(seq, cmd, payload=b"", timeout_ms=1500):
-    uart.write(e77_radio.build_frame(seq, cmd, payload))
+    uart.write(bridge_radio.build_frame(seq, cmd, payload))
     frame = read_one(timeout_ms)
     if not frame:
         print("CMD", seq, cmd, "TIMEOUT")
@@ -43,11 +43,11 @@ def command(seq, cmd, payload=b"", timeout_ms=1500):
     print("CMD", seq, "RX", frame.cmd, frame.flags, bytes(frame.payload))
     return frame
 
-command(1, e77_radio.CMD_GET_INFO)
-command(2, e77_radio.CMD_CLEAR_STATS)
-command(3, e77_radio.CMD_GET_STATS)
-command(4, e77_radio.CMD_SEND_NFCP, b"abc", 3000)
-command(5, e77_radio.CMD_GET_STATS)
+command(1, bridge_radio.CMD_GET_INFO)
+command(2, bridge_radio.CMD_CLEAR_STATS)
+command(3, bridge_radio.CMD_GET_STATS)
+command(4, bridge_radio.CMD_SEND_NFCP, b"abc", 3000)
+command(5, bridge_radio.CMD_GET_STATS)
 '''
 
 

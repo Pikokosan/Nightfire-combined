@@ -37,11 +37,11 @@ CMD_NACK         = 0x51
 CMD_INFO_REQ     = 0x52
 CMD_INFO_RSP     = 0x53
 
-CMD_E77_UPDATE_BEGIN  = 0x60
-CMD_E77_UPDATE_WRITE  = 0x61
-CMD_E77_UPDATE_END    = 0x62
-CMD_E77_UPDATE_ABORT  = 0x63
-CMD_E77_UPDATE_REBOOT = 0x64
+CMD_OTA_UPDATE_BEGIN  = 0x60
+CMD_OTA_UPDATE_WRITE  = 0x61
+CMD_OTA_UPDATE_END    = 0x62
+CMD_OTA_UPDATE_ABORT  = 0x63
+CMD_OTA_UPDATE_REBOOT = 0x64
 
 CMD_SCRIPT_CLEAR = 0x70
 CMD_SCRIPT_LOAD  = 0x71
@@ -50,7 +50,7 @@ CMD_SCRIPT_STOP  = 0x73
 CMD_SCRIPT_HEARTBEAT = 0x74
 CMD_TIME_SYNC = 0x75
 CMD_SCRIPT_STEP = 0x76
-SCRIPT_ENTRY_BYTES = 6
+SCRIPT_ENTRY_BYTES = 12
 
 # INFO_RSP text fields, in order:
 # app_name, app_version, radio_version, script_status,
@@ -150,7 +150,7 @@ class NFCP:
             return self.build_broadcast(CMD_DISCOVER)
         return self.build_broadcast(CMD_DISCOVER, (nonce & 0xFFFF).to_bytes(2, "big"))
 
-    # FIRE (group/unique only) — mask is now 1..8 bytes
+    # FIRE (group/unique only) ? mask is now 1..8 bytes
     def build_group_fire(self, group_addr: int, mask: int) -> bytes:
         mask_bytes = self._encode_fire_mask(mask)
         payload = (
@@ -250,10 +250,10 @@ class NFCP:
         )
         return self._frame(SOF_UNIQUE, payload)
 
-    def build_e77_update_begin(self, target_unique: int, transfer_id: int, path: str, size: int, checksum: int) -> bytes:
+    def build_ota_update_begin(self, target_unique: int, transfer_id: int, path: str, size: int, checksum: int) -> bytes:
         path_bytes = path.encode()
         if len(path_bytes) > 64:
-            raise NFCPError("E77 update path too long")
+            raise NFCPError("OTA update path too long")
         data = (
             (transfer_id & 0xFFFF).to_bytes(2, "big") +
             (size & 0xFFFFFFFF).to_bytes(4, "big") +
@@ -261,32 +261,32 @@ class NFCP:
             bytes([len(path_bytes) & 0xFF]) +
             path_bytes
         )
-        return self.build_unique_command(target_unique, CMD_E77_UPDATE_BEGIN, data)
+        return self.build_unique_command(target_unique, CMD_OTA_UPDATE_BEGIN, data)
 
-    def build_e77_update_write(self, target_unique: int, transfer_id: int, offset: int, chunk: bytes) -> bytes:
+    def build_ota_update_write(self, target_unique: int, transfer_id: int, offset: int, chunk: bytes) -> bytes:
         data = (
             (transfer_id & 0xFFFF).to_bytes(2, "big") +
             (offset & 0xFFFFFFFF).to_bytes(4, "big") +
             chunk
         )
-        return self.build_unique_command(target_unique, CMD_E77_UPDATE_WRITE, data)
+        return self.build_unique_command(target_unique, CMD_OTA_UPDATE_WRITE, data)
 
-    def build_e77_update_end(self, target_unique: int, transfer_id: int) -> bytes:
+    def build_ota_update_end(self, target_unique: int, transfer_id: int) -> bytes:
         return self.build_unique_command(
             target_unique,
-            CMD_E77_UPDATE_END,
+            CMD_OTA_UPDATE_END,
             (transfer_id & 0xFFFF).to_bytes(2, "big")
         )
 
-    def build_e77_update_abort(self, target_unique: int, transfer_id: int = 0) -> bytes:
+    def build_ota_update_abort(self, target_unique: int, transfer_id: int = 0) -> bytes:
         return self.build_unique_command(
             target_unique,
-            CMD_E77_UPDATE_ABORT,
+            CMD_OTA_UPDATE_ABORT,
             (transfer_id & 0xFFFF).to_bytes(2, "big")
         )
 
-    def build_e77_update_reboot(self, target_unique: int) -> bytes:
-        return self.build_unique_command(target_unique, CMD_E77_UPDATE_REBOOT)
+    def build_ota_update_reboot(self, target_unique: int) -> bytes:
+        return self.build_unique_command(target_unique, CMD_OTA_UPDATE_REBOOT)
 
     def build_script_clear(self, target_unique: int, script_id: int) -> bytes:
         payload = (
@@ -305,7 +305,7 @@ class NFCP:
 
         for event_ms, cue_mask in entries:
             data += (int(event_ms) & 0xFFFFFFFF).to_bytes(4, "big")
-            data += (int(cue_mask) & 0xFFFF).to_bytes(2, "big")
+            data += (int(cue_mask) & 0xFFFFFFFFFFFFFFFF).to_bytes(8, "big")
 
         payload = (
             bytes([self.node_id]) +
@@ -591,11 +591,11 @@ class NFCPStreamParser:
                 CMD_SET_RADIO_CHANNEL,
                 CMD_CONTINUITY_REQ,
                 CMD_INFO_REQ,
-                CMD_E77_UPDATE_BEGIN,
-                CMD_E77_UPDATE_WRITE,
-                CMD_E77_UPDATE_END,
-                CMD_E77_UPDATE_ABORT,
-                CMD_E77_UPDATE_REBOOT,
+                CMD_OTA_UPDATE_BEGIN,
+                CMD_OTA_UPDATE_WRITE,
+                CMD_OTA_UPDATE_END,
+                CMD_OTA_UPDATE_ABORT,
+                CMD_OTA_UPDATE_REBOOT,
                 CMD_SCRIPT_CLEAR,
                 CMD_SCRIPT_LOAD,
                 CMD_SCRIPT_STEP,
@@ -626,11 +626,11 @@ class NFCPStreamParser:
             CMD_SET_RADIO_CHANNEL,
             CMD_CONTINUITY_REQ,
             CMD_INFO_REQ,
-            CMD_E77_UPDATE_BEGIN,
-            CMD_E77_UPDATE_WRITE,
-            CMD_E77_UPDATE_END,
-            CMD_E77_UPDATE_ABORT,
-            CMD_E77_UPDATE_REBOOT,
+            CMD_OTA_UPDATE_BEGIN,
+            CMD_OTA_UPDATE_WRITE,
+            CMD_OTA_UPDATE_END,
+            CMD_OTA_UPDATE_ABORT,
+            CMD_OTA_UPDATE_REBOOT,
             CMD_SCRIPT_CLEAR,
             CMD_SCRIPT_LOAD,
             CMD_SCRIPT_STEP,

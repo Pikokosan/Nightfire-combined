@@ -13,7 +13,7 @@ import raw_micropython_upload as raw
 MASTER_CODE = r'''
 from machine import UART, Pin
 import time
-import e77_radio
+import bridge_radio
 import nfcp
 
 CURRENT_CHANNEL = __CURRENT_CHANNEL__
@@ -24,7 +24,7 @@ TIMEOUT_MS = __TIMEOUT_MS__
 DISCOVER_REPEAT_MS = 700
 
 uart = UART(2, baudrate=256000, tx=Pin(15), rx=Pin(16))
-radio_parser = e77_radio.E77FrameParser()
+radio_parser = bridge_radio.BridgeFrameParser()
 nfcp_parser = nfcp.NFCPStreamParser()
 tx = nfcp.NFCP(0x01)
 seq = 0x60
@@ -52,7 +52,7 @@ def read_local_frame(want_seq, timeout_ms=2000):
 
 def local_command(cmd, payload=b"", timeout_ms=2000):
     s = next_seq()
-    uart.write(e77_radio.build_frame(s, cmd, payload))
+    uart.write(bridge_radio.build_frame(s, cmd, payload))
     return read_local_frame(s, timeout_ms)
 
 def parse_scan(payload):
@@ -69,9 +69,9 @@ def parse_scan(payload):
             break
         item = {
             "channel": payload[index],
-            "avg": e77_radio.int_from_be(payload[index + 1:index + 3], signed=True),
-            "min": e77_radio.int_from_be(payload[index + 3:index + 5], signed=True),
-            "max": e77_radio.int_from_be(payload[index + 5:index + 7], signed=True),
+            "avg": bridge_radio.int_from_be(payload[index + 1:index + 3], signed=True),
+            "min": bridge_radio.int_from_be(payload[index + 3:index + 5], signed=True),
+            "max": bridge_radio.int_from_be(payload[index + 5:index + 7], signed=True),
             "count": 0,
             "busy": 0,
             "score": 0,
@@ -85,11 +85,11 @@ def parse_scan(payload):
     return out
 
 def bridge_set_channel(channel):
-    frame = local_command(e77_radio.CMD_SET_CHANNEL, bytes([channel & 0xFF]), 1500)
-    return bool(frame and frame.cmd == e77_radio.CMD_SET_CHANNEL and not (frame.flags & e77_radio.FLAG_ERROR))
+    frame = local_command(bridge_radio.CMD_SET_CHANNEL, bytes([channel & 0xFF]), 1500)
+    return bool(frame and frame.cmd == bridge_radio.CMD_SET_CHANNEL and not (frame.flags & bridge_radio.FLAG_ERROR))
 
 def send_nfcp(frame, timeout_ms=2200):
-    return local_command(e77_radio.CMD_SEND_NFCP, frame, timeout_ms)
+    return local_command(bridge_radio.CMD_SEND_NFCP, frame, timeout_ms)
 
 def poll_nfcp(timeout_ms=500):
     deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
@@ -99,9 +99,9 @@ def poll_nfcp(timeout_ms=500):
             data = uart.read(128) or b""
             for b in data:
                 local = radio_parser.feed(b)
-                if not local or local.cmd != e77_radio.CMD_NFCP_RX:
+                if not local or local.cmd != bridge_radio.CMD_NFCP_RX:
                     continue
-                rx = e77_radio.parse_nfcp_rx(local.payload)
+                rx = bridge_radio.parse_nfcp_rx(local.payload)
                 if not rx:
                     continue
                 for nb in rx["nfcp_frame"]:
@@ -175,8 +175,8 @@ def save_master_channel(channel):
         json.dump(settings, f)
 
 bridge_set_channel(CURRENT_CHANNEL)
-scan_frame = local_command(e77_radio.CMD_SCAN_CHANNELS, b"", 9000)
-if not scan_frame or scan_frame.flags & e77_radio.FLAG_ERROR:
+scan_frame = local_command(bridge_radio.CMD_SCAN_CHANNELS, b"", 9000)
+if not scan_frame or scan_frame.flags & bridge_radio.FLAG_ERROR:
     print("SCAN_FAILED")
 else:
     scan = parse_scan(scan_frame.payload)

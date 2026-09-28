@@ -71,12 +71,12 @@ def begin(pkt, unique_id, busy, ack_cb, nack_cb):
     global expected_size, expected_checksum, received_size, checksum, last_ms, update_file
 
     if busy:
-        nack_cb(pkt, CMD_E77_UPDATE_BEGIN, NACK_REJECTED_ARMED)
+        nack_cb(pkt, CMD_OTA_UPDATE_BEGIN, NACK_REJECTED_ARMED)
         return
 
     data = pkt.get("data", b"")
     if len(data) < 11:
-        nack_cb(pkt, CMD_E77_UPDATE_BEGIN, NACK_BAD_LENGTH)
+        nack_cb(pkt, CMD_OTA_UPDATE_BEGIN, NACK_BAD_LENGTH)
         return
 
     new_transfer_id = int.from_bytes(data[0:2], "big") & 0xFFFF
@@ -85,18 +85,18 @@ def begin(pkt, unique_id, busy, ack_cb, nack_cb):
     path_len = data[10]
 
     if len(data) != 11 + path_len:
-        nack_cb(pkt, CMD_E77_UPDATE_BEGIN, NACK_BAD_LENGTH)
+        nack_cb(pkt, CMD_OTA_UPDATE_BEGIN, NACK_BAD_LENGTH)
         return
 
     try:
         requested_path = bytes(data[11:]).decode()
     except Exception:
-        nack_cb(pkt, CMD_E77_UPDATE_BEGIN, NACK_INVALID_VALUE)
+        nack_cb(pkt, CMD_OTA_UPDATE_BEGIN, NACK_INVALID_VALUE)
         return
 
     requested_path = safe_path(requested_path)
     if requested_path is None or size < 1 or size > MAX_FILE_SIZE:
-        nack_cb(pkt, CMD_E77_UPDATE_BEGIN, NACK_INVALID_VALUE)
+        nack_cb(pkt, CMD_OTA_UPDATE_BEGIN, NACK_INVALID_VALUE)
         return
 
     reset(remove_temp=True)
@@ -108,7 +108,7 @@ def begin(pkt, unique_id, busy, ack_cb, nack_cb):
     except Exception as e:
         print("OTA begin open failed:", e)
         reset(remove_temp=True)
-        nack_cb(pkt, CMD_E77_UPDATE_BEGIN, NACK_INTERNAL_ERROR)
+        nack_cb(pkt, CMD_OTA_UPDATE_BEGIN, NACK_INTERNAL_ERROR)
         return
 
     active = True
@@ -120,7 +120,7 @@ def begin(pkt, unique_id, busy, ack_cb, nack_cb):
     received_size = 0
     checksum = 0
     last_ms = time.ticks_ms()
-    ack_cb(pkt, CMD_E77_UPDATE_BEGIN)
+    ack_cb(pkt, CMD_OTA_UPDATE_BEGIN)
 
 
 def write(pkt, unique_id, ack_cb, nack_cb):
@@ -128,7 +128,7 @@ def write(pkt, unique_id, ack_cb, nack_cb):
 
     data = pkt.get("data", b"")
     if len(data) < 6:
-        nack_cb(pkt, CMD_E77_UPDATE_WRITE, NACK_BAD_LENGTH)
+        nack_cb(pkt, CMD_OTA_UPDATE_WRITE, NACK_BAD_LENGTH)
         return
 
     pkt_transfer_id = int.from_bytes(data[0:2], "big") & 0xFFFF
@@ -136,16 +136,16 @@ def write(pkt, unique_id, ack_cb, nack_cb):
     chunk = data[6:]
 
     if not active or pkt_transfer_id != transfer_id:
-        nack_cb(pkt, CMD_E77_UPDATE_WRITE, NACK_INVALID_VALUE)
+        nack_cb(pkt, CMD_OTA_UPDATE_WRITE, NACK_INVALID_VALUE)
         return
 
     if offset < received_size and offset + len(chunk) <= received_size:
         last_ms = time.ticks_ms()
-        ack_cb(pkt, CMD_E77_UPDATE_WRITE)
+        ack_cb(pkt, CMD_OTA_UPDATE_WRITE)
         return
 
     if offset != received_size or received_size + len(chunk) > expected_size:
-        nack_cb(pkt, CMD_E77_UPDATE_WRITE, NACK_INVALID_VALUE)
+        nack_cb(pkt, CMD_OTA_UPDATE_WRITE, NACK_INVALID_VALUE)
         return
 
     try:
@@ -153,7 +153,7 @@ def write(pkt, unique_id, ack_cb, nack_cb):
     except Exception as e:
         print("OTA write failed:", e)
         reset(remove_temp=True)
-        nack_cb(pkt, CMD_E77_UPDATE_WRITE, NACK_INTERNAL_ERROR)
+        nack_cb(pkt, CMD_OTA_UPDATE_WRITE, NACK_INTERNAL_ERROR)
         return
 
     for b in chunk:
@@ -163,23 +163,23 @@ def write(pkt, unique_id, ack_cb, nack_cb):
 
     received_size += len(chunk)
     last_ms = time.ticks_ms()
-    ack_cb(pkt, CMD_E77_UPDATE_WRITE)
+    ack_cb(pkt, CMD_OTA_UPDATE_WRITE)
 
 
 def end(pkt, unique_id, ack_cb, nack_cb):
     data = pkt.get("data", b"")
     if len(data) != 2:
-        nack_cb(pkt, CMD_E77_UPDATE_END, NACK_BAD_LENGTH)
+        nack_cb(pkt, CMD_OTA_UPDATE_END, NACK_BAD_LENGTH)
         return
 
     pkt_transfer_id = int.from_bytes(data, "big") & 0xFFFF
     if not active or pkt_transfer_id != transfer_id:
-        nack_cb(pkt, CMD_E77_UPDATE_END, NACK_INVALID_VALUE)
+        nack_cb(pkt, CMD_OTA_UPDATE_END, NACK_INVALID_VALUE)
         return
 
     if received_size != expected_size or checksum != expected_checksum:
         reset(remove_temp=True)
-        nack_cb(pkt, CMD_E77_UPDATE_END, NACK_INVALID_VALUE)
+        nack_cb(pkt, CMD_OTA_UPDATE_END, NACK_INVALID_VALUE)
         return
 
     try:
@@ -189,24 +189,24 @@ def end(pkt, unique_id, ack_cb, nack_cb):
     except Exception as e:
         print("OTA finalize failed:", e)
         reset(remove_temp=True)
-        nack_cb(pkt, CMD_E77_UPDATE_END, NACK_INTERNAL_ERROR)
+        nack_cb(pkt, CMD_OTA_UPDATE_END, NACK_INTERNAL_ERROR)
         return
 
     reset(remove_temp=False)
-    ack_cb(pkt, CMD_E77_UPDATE_END)
+    ack_cb(pkt, CMD_OTA_UPDATE_END)
 
 
 def abort(pkt, unique_id, ack_cb, nack_cb):
     reset(remove_temp=True)
-    ack_cb(pkt, CMD_E77_UPDATE_ABORT)
+    ack_cb(pkt, CMD_OTA_UPDATE_ABORT)
 
 
 def reboot(pkt, unique_id, busy, ack_cb, nack_cb):
     if busy:
-        nack_cb(pkt, CMD_E77_UPDATE_REBOOT, NACK_REJECTED_ARMED)
+        nack_cb(pkt, CMD_OTA_UPDATE_REBOOT, NACK_REJECTED_ARMED)
         return False
 
-    ack_cb(pkt, CMD_E77_UPDATE_REBOOT)
+    ack_cb(pkt, CMD_OTA_UPDATE_REBOOT)
     return True
 
 

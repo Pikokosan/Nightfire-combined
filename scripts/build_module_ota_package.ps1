@@ -1,6 +1,6 @@
 param(
-    [ValidateSet("slave", "dummy", "nrf-dummy")]
-    [string]$Target = "slave",
+    [ValidateSet("field", "nrf-dummy")]
+    [string]$Target = "field",
     [string]$Version = "",
     [string]$OutputDir = ""
 )
@@ -17,8 +17,7 @@ if (-not $OutputDir) {
 $Output = Join-Path $Root $OutputDir
 
 $entry = switch ($Target) {
-    "slave" { "slave_main.py" }
-    "dummy" { "dummy_main.py" }
+    "field" { "field_main.py" }
     "nrf-dummy" { "nrf_dummy_main.py" }
 }
 
@@ -38,19 +37,12 @@ $files = @(
     @{ Source = "module_ota.py"; Target = "/module_ota.py" }
 )
 
-if ($Target -eq "slave") {
+if ($Target -eq "field") {
     $files += @(
-        @{ Source = "e77_radio.py"; Target = "/e77_radio.py" },
-        @{ Source = "module_transport.py"; Target = "/module_transport.py" },
-        @{ Source = "e77_bootloader.py"; Target = "/e77_bootloader.py" },
-        @{ Source = "mc33996_driver.py"; Target = "/mc33996_driver.py" }
-    )
-}
-elseif ($Target -eq "dummy") {
-    $files += @(
-        @{ Source = "e77_radio.py"; Target = "/e77_radio.py" },
-        @{ Source = "module_transport.py"; Target = "/module_transport.py" },
-        @{ Source = "e77_bootloader.py"; Target = "/e77_bootloader.py" }
+        @{ Source = "shift_register74hc595.py"; Target = "/shift_register74hc595.py" },
+        @{ Source = "analog_mux74hc4051.py"; Target = "/analog_mux74hc4051.py" },
+        @{ Source = "adc_scaling.py"; Target = "/adc_scaling.py" },
+        @{ Source = "field_measurement.py"; Target = "/field_measurement.py" }
     )
 }
 
@@ -78,7 +70,7 @@ $manifest = [ordered]@{
     files = $manifestFiles
 }
 
-$manifest | ConvertTo-Json -Depth 8 | Set-Content -Encoding ASCII (Join-Path $Output "e77_update.json")
+$manifest | ConvertTo-Json -Depth 8 | Set-Content -Encoding ASCII (Join-Path $Output "ota_update.json")
 
 Write-Host "Done. Copy the contents of this folder to the master SD card root:"
 Write-Host $Output

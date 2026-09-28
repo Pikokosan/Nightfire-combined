@@ -24,11 +24,11 @@ for i in range(8):
 
 MASTER_BURST_CODE = r'''
 from machine import UART, Pin
-import e77_radio
+import bridge_radio
 import time
 
 uart = UART(2, baudrate=256000, tx=Pin(15), rx=Pin(16))
-parser = e77_radio.E77FrameParser()
+parser = bridge_radio.BridgeFrameParser()
 
 def read_one(timeout_ms=500):
     deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
@@ -42,11 +42,11 @@ def read_one(timeout_ms=500):
             time.sleep_ms(2)
     return None
 
-uart.write(e77_radio.build_frame(1, e77_radio.CMD_SET_CHANNEL, bytes([{channel}])))
+uart.write(bridge_radio.build_frame(1, bridge_radio.CMD_SET_CHANNEL, bytes([{channel}])))
 print("SET", read_one())
 payload = bytes({payload!r})
 for i in range(5):
-    uart.write(e77_radio.build_frame((i + 2) & 0xFF, e77_radio.CMD_SEND_NFCP, payload))
+    uart.write(bridge_radio.build_frame((i + 2) & 0xFF, bridge_radio.CMD_SEND_NFCP, payload))
     f = read_one()
     if f:
         print("BURST", i, f.cmd, f.flags, bytes(f.payload))

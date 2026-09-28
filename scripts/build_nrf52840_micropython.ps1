@@ -1,14 +1,28 @@
 param(
-    [string]$MicroPythonRoot = "C:\Users\hog28\OneDrive\Documents\NightfirePY\e77-micropython\micropython",
+    [string]$MicroPythonRoot = "",
     [string]$Board = "NICENANO",
     [string]$BoardDir = "",
     [string]$Bootloader = "open_bootloader",
     [int]$BootloaderVersionMajor = 1,
     [int]$BootloaderVersionMinor = 2,
-    [string]$ToolchainDir = "C:\Users\hog28\OneDrive\Documents\NightfirePY\e77-micropython\arm-toolchain\arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi\bin"
+    [string]$ToolchainDir = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+if (-not $MicroPythonRoot) {
+    $MicroPythonRoot = $env:MICROPYTHON_ROOT
+}
+if (-not $MicroPythonRoot) {
+    $MicroPythonRoot = "C:\Users\hog28\OneDrive\Documents\NightfirePY\nrf-micropython\micropython"
+}
+
+if (-not $ToolchainDir) {
+    $ToolchainDir = $env:ARM_TOOLCHAIN_DIR
+}
+if (-not $ToolchainDir) {
+    $ToolchainDir = "C:\Users\hog28\OneDrive\Documents\NightfirePY\nrf-micropython\arm-toolchain\arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi\bin"
+}
 
 function ConvertTo-WslPath([string]$WindowsPath) {
     $resolved = (Resolve-Path $WindowsPath).Path -replace '\\', '/'

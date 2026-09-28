@@ -1,4 +1,4 @@
-# E77 local UART protocol for NFCP-over-radio.
+# Local UART protocol for the nRF radio bridge.
 
 SOF0 = 0xAA
 SOF1 = 0x55
@@ -19,6 +19,7 @@ CMD_SCAN_CHANNELS = 0x14
 CMD_GET_STATS = 0x15
 CMD_CLEAR_STATS = 0x16
 CMD_BOOTLOADER = 0x30
+CMD_RESET = 0x31
 CMD_ERROR = 0x40
 
 DEFAULT_NETWORK_ID = 0x04D2
@@ -65,7 +66,7 @@ def build_frame(seq, cmd, payload=b"", flags=0):
     if payload is None:
         payload = b""
     if len(payload) > MAX_PAYLOAD:
-        raise ValueError("E77 payload too large")
+        raise ValueError("radio bridge payload too large")
 
     body = bytearray([4 + len(payload), VERSION, flags & 0xFF, seq & 0xFF, cmd & 0xFF])
     body += bytearray(payload)
@@ -160,7 +161,7 @@ class Frame(object):
         self.payload = payload
 
 
-class E77FrameParser(object):
+class BridgeFrameParser(object):
     def __init__(self):
         self.reset()
 

@@ -13,11 +13,11 @@ import raw_micropython_upload as raw
 MASTER_CODE = r'''
 from machine import UART, Pin
 import time
-import e77_radio
+import bridge_radio
 
 DO_CLEAR = {do_clear}
 uart = UART(2, baudrate=256000, tx=Pin(15), rx=Pin(16))
-parser = e77_radio.E77FrameParser()
+parser = bridge_radio.BridgeFrameParser()
 
 def read_frame(seq, timeout_ms=1000):
     deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
@@ -34,24 +34,24 @@ def read_frame(seq, timeout_ms=1000):
 
 seq = 0x44
 if DO_CLEAR:
-    uart.write(e77_radio.build_frame(seq, e77_radio.CMD_CLEAR_STATS))
+    uart.write(bridge_radio.build_frame(seq, bridge_radio.CMD_CLEAR_STATS))
     frame = read_frame(seq, 1500)
     if not frame:
         print("CLEAR_TIMEOUT")
-    elif frame.flags & e77_radio.FLAG_ERROR:
+    elif frame.flags & bridge_radio.FLAG_ERROR:
         print("CLEAR_ERROR", bytes(frame.payload))
     else:
         print("CLEAR_OK")
     seq = (seq + 1) & 0xFF
 
-uart.write(e77_radio.build_frame(seq, e77_radio.CMD_GET_STATS))
+uart.write(bridge_radio.build_frame(seq, bridge_radio.CMD_GET_STATS))
 frame = read_frame(seq, 1500)
 if not frame:
     print("STATS_TIMEOUT")
-elif frame.flags & e77_radio.FLAG_ERROR:
+elif frame.flags & bridge_radio.FLAG_ERROR:
     print("STATS_ERROR", bytes(frame.payload))
 else:
-    stats = e77_radio.parse_stats_payload(frame.payload)
+    stats = bridge_radio.parse_stats_payload(frame.payload)
     print("STATS", stats)
 '''
 

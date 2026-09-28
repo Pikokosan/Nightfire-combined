@@ -115,5 +115,5 @@ simple radio payload:
 network_id(2 bytes, big-endian) | nfcp_frame
 ```
 
-That mirrors the current E77 payload shape so the master-side transport can be
-adapted cleanly later.
+That mirrors the current bridge payload shape so the master-side transport can
+stay small and predictable.

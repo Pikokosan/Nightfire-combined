@@ -1,8 +1,7 @@
 # Select one device entrypoint before upload:
-#   dummy_main.py
-#   slave_main.py
+#   field_main.py
 #   master_main.py
-#   e77_main.py
+#   nrf_dummy_main.py
 
-print('Choose dummy_main.py, slave_main.py, master_main.py, or e77_main.py as main.py before deploying.')
+print('Choose field_main.py, master_main.py, or nrf_dummy_main.py as main.py before deploying.')
 

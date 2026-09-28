@@ -326,7 +326,7 @@ def parse_script_load_data(data):
     pos = 0
     for _ in range(entry_count):
         event_ms = int.from_bytes(payload[pos:pos + 4], "big")
-        cue_mask = int.from_bytes(payload[pos + 4:pos + 6], "big") & 0xFFFF
+        cue_mask = int.from_bytes(payload[pos + 4:pos + 12], "big") & 0xFFFFFFFFFFFFFFFF
         pos += SCRIPT_ENTRY_BYTES
         if cue_mask:
             entries.append((event_ms, cue_mask))
@@ -551,23 +551,23 @@ def handle(pkt):
         handle_script_step(pkt)
         return
 
-    if cmd == CMD_E77_UPDATE_BEGIN:
+    if cmd == CMD_OTA_UPDATE_BEGIN:
         module_ota.begin(pkt, UNIQUE_ID, ARMED, reply_ack_if_unique, reply_nack_if_unique)
         return
 
-    if cmd == CMD_E77_UPDATE_WRITE:
+    if cmd == CMD_OTA_UPDATE_WRITE:
         module_ota.write(pkt, UNIQUE_ID, reply_ack_if_unique, reply_nack_if_unique)
         return
 
-    if cmd == CMD_E77_UPDATE_END:
+    if cmd == CMD_OTA_UPDATE_END:
         module_ota.end(pkt, UNIQUE_ID, reply_ack_if_unique, reply_nack_if_unique)
         return
 
-    if cmd == CMD_E77_UPDATE_ABORT:
+    if cmd == CMD_OTA_UPDATE_ABORT:
         module_ota.abort(pkt, UNIQUE_ID, reply_ack_if_unique, reply_nack_if_unique)
         return
 
-    if cmd == CMD_E77_UPDATE_REBOOT:
+    if cmd == CMD_OTA_UPDATE_REBOOT:
         if module_ota.reboot(pkt, UNIQUE_ID, ARMED, reply_ack_if_unique, reply_nack_if_unique):
             time.sleep_ms(250)
             machine.reset()
@@ -612,7 +612,11 @@ def handle(pkt):
             save_runtime_config()
             reply_ack_if_unique(pkt, CMD_SET_RADIO_CHANNEL)
             time.sleep_ms(80)
-            nrf_radio.channel(RADIO_CHANNEL)
+            nrf_radio.init(
+                channel=RADIO_CHANNEL,
+                tx_power=RADIO_TX_POWER,
+                address=RADIO_ADDRESS,
+            )
         return
 
     if cmd == CMD_SET_UNIQUE:
@@ -656,23 +660,47 @@ def handle_radio_payload(payload):
             handle(pkt)
 
 
+def init_radio():
+    try:
+        nrf_radio.init(
+            channel=RADIO_CHANNEL,
+            tx_power=RADIO_TX_POWER,
+            address=RADIO_ADDRESS,
+        )
+        return True
+    except Exception as e:
+        print("Radio init failed:", e)
+        return False
+
+
 def main():
-    nrf_radio.init(
-        channel=RADIO_CHANNEL,
-        tx_power=RADIO_TX_POWER,
-        address=RADIO_ADDRESS,
-    )
+    global ARMED, script_running
+
+    radio_ready = init_radio()
     print(
         "Nightfire nRF52840 dummy radio node uid=0x%08X group=0x%04X net=0x%04X" %
         (UNIQUE_ID, GROUP_ID, NETWORK_ID)
     )
 
     while True:
-        module_ota.poll_timeout()
-        run_script_scheduler()
-        payload = nrf_radio.recv(RADIO_RX_TIMEOUT_MS)
-        if payload:
-            handle_radio_payload(payload)
+        try:
+            module_ota.poll_timeout()
+            run_script_scheduler()
+
+            if not radio_ready:
+                time.sleep_ms(250)
+                radio_ready = init_radio()
+                continue
+
+            payload = nrf_radio.recv(RADIO_RX_TIMEOUT_MS)
+            if payload:
+                handle_radio_payload(payload)
+        except Exception as e:
+            print("Dummy main loop error:", e)
+            radio_ready = False
+            ARMED = False
+            script_running = False
+            time.sleep_ms(100)
 
 
 main()

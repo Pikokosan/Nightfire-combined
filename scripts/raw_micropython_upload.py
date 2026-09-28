@@ -168,6 +168,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", required=True)
     parser.add_argument("--baud", type=int, default=115200)
+    parser.add_argument("--chunk-size", type=int, default=256)
     parser.add_argument("--delete", action="append", default=[], help="Remote file to remove before uploading")
     parser.add_argument("copies", nargs="+", help="Pairs of local_path:remote_path")
     args = parser.parse_args()
@@ -189,7 +190,7 @@ def main():
 
             for copy in args.copies:
                 local_path, remote_path = copy.rsplit(":", 1)
-                upload_file(port, local_path, remote_path)
+                upload_file(port, local_path, remote_path, args.chunk_size)
 
             print("Resetting device...")
             try:
