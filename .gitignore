@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.pyo
 dist/
+build/
 tools/
 .pytest_cache/
 .mypy_cache/
@@ -17,6 +18,7 @@ env/
 # Local environment and logs
 .env
 *.log
+.codex/
 
 # OS noise
 Thumbs.db

@@ -42,7 +42,8 @@ if ($Target -eq "field") {
         @{ Source = "shift_register74hc595.py"; Target = "/shift_register74hc595.py" },
         @{ Source = "analog_mux74hc4051.py"; Target = "/analog_mux74hc4051.py" },
         @{ Source = "adc_scaling.py"; Target = "/adc_scaling.py" },
-        @{ Source = "field_measurement.py"; Target = "/field_measurement.py" }
+        @{ Source = "field_measurement.py"; Target = "/field_measurement.py" },
+        @{ Source = "lcd1602_i2c.py"; Target = "/lcd1602_i2c.py" }
     )
 }
 

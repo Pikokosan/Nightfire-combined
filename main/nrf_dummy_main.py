@@ -5,6 +5,12 @@ import machine
 import module_ota
 import nrf_radio
 from nfcp import *
+from machine import I2C, Pin
+
+try:
+    from lcd1602_i2c import I2cLcd1602
+except Exception:
+    I2cLcd1602 = None
 
 try:
     import nrf_node_config as node_config
@@ -20,10 +26,10 @@ DEFAULT_GROUP_ID = 0x0001
 DEFAULT_CUE_COUNT = 16
 DEFAULT_DEVICE_TYPE = 0x10
 
-RADIO_CHANNEL = getattr(node_config, "RADIO_CHANNEL", 40)
+RADIO_CHANNEL = getattr(node_config, "RADIO_CHANNEL", 90)
 RADIO_ADDRESS = 0x67676767
 RADIO_TX_POWER = 8
-RADIO_RX_TIMEOUT_MS = 10
+RADIO_RX_TIMEOUT_MS = getattr(node_config, "RADIO_RX_TIMEOUT_MS", 50)
 RX_DEDUPE_WINDOW_MS = 1500
 RX_DEDUPE_CACHE_LIMIT = 16
 
@@ -38,6 +44,27 @@ SCRIPT_HEARTBEAT_TIMEOUT_MS = 1500
 SCRIPT_TIME_SYNC_VALID_MS = 10000
 BATTERY_PACK_TYPE = getattr(node_config, "BATTERY_PACK_TYPE", "2S")
 BATTERY_MV = getattr(node_config, "BATTERY_MV", 8200)
+LCD_ENABLED = getattr(node_config, "LCD_ENABLED", True)
+LCD_I2C_ID = getattr(node_config, "LCD_I2C_ID", 0)
+LCD_SDA_PIN = getattr(node_config, "LCD_SDA_PIN", 36)
+LCD_SCL_PIN = getattr(node_config, "LCD_SCL_PIN", 38)
+LCD_I2C_FREQ = getattr(node_config, "LCD_I2C_FREQ", 100000)
+LCD_ADDRESS = getattr(node_config, "LCD_ADDRESS", None)
+LCD_MAPPING = getattr(node_config, "LCD_MAPPING", "upper")
+LCD_COLS = getattr(node_config, "LCD_COLS", 16)
+LCD_ROWS = getattr(node_config, "LCD_ROWS", 2)
+LCD_REFRESH_MS = getattr(node_config, "LCD_REFRESH_MS", 350)
+LCD_BUTTON_DEBOUNCE_MS = getattr(node_config, "LCD_BUTTON_DEBOUNCE_MS", 80)
+LCD_CONTINUITY_PAGE_SIZE = getattr(node_config, "LCD_CONTINUITY_PAGE_SIZE", 8)
+MASTER_LINK_TIMEOUT_MS = getattr(node_config, "MASTER_LINK_TIMEOUT_MS", 15000)
+UP_BUTTON_PIN = getattr(node_config, "UP_BUTTON_PIN", 45)
+DOWN_BUTTON_PIN = getattr(node_config, "DOWN_BUTTON_PIN", 47)
+OK_FWD_BUTTON_PIN = getattr(node_config, "OK_FWD_BUTTON_PIN", getattr(node_config, "OK_BUTTON_PIN", 43))
+BACK_BUTTON_PIN = getattr(node_config, "BACK_BUTTON_PIN", 10)
+
+
+def valid_radio_channel(channel):
+    return channel == 0 or (74 <= channel <= 100)
 
 def get_default_unique_id():
     try:
@@ -79,6 +106,29 @@ _sim_open = set()
 _sim_last_refresh = 0
 tx_seq = 1
 rx_seen = []
+debug_radio_payloads = 0
+debug_nfcp_packets = 0
+debug_discover_packets = 0
+lcd_display = None
+lcd_buttons = []
+lcd_mode = "home"
+lcd_menu_index = 0
+lcd_active_view = ""
+lcd_cont_detail_index = -1
+lcd_edit_target = ""
+lcd_edit_value = 0
+lcd_force_refresh = True
+lcd_last_refresh_ms = 0
+last_master_rx_ms = 0
+
+LCD_MENU_ITEMS = (
+    "System Info",
+    "Continuity",
+    "Script",
+    "Set Group",
+    "Set Network",
+    "Set Channel",
+)
 
 
 def ticks_rand(limit):
@@ -185,12 +235,384 @@ def build_info_payload():
 def save_runtime_config():
     try:
         with open("nrf_node_config.py", "w") as f:
+            f.write("# Auto-saved nRF dummy config.\n")
             f.write("UNIQUE_ID = 0x%08X\n" % (CONFIG_UNIQUE_ID & 0xFFFFFFFF))
             f.write("GROUP_ID = 0x%04X\n" % (GROUP_ID & 0xFFFF))
             f.write("NETWORK_ID = 0x%04X\n" % (NETWORK_ID & 0xFFFF))
             f.write("RADIO_CHANNEL = %d\n" % (RADIO_CHANNEL & 0xFF))
+            f.write("BATTERY_PACK_TYPE = \"%s\"\n" % BATTERY_PACK_TYPE)
+            f.write("BATTERY_MV = %d\n" % int(BATTERY_MV or 0))
+            f.write("LCD_ENABLED = %s\n" % ("True" if LCD_ENABLED else "False"))
+            f.write("LCD_I2C_ID = %d\n" % LCD_I2C_ID)
+            f.write("LCD_SDA_PIN = %d\n" % LCD_SDA_PIN)
+            f.write("LCD_SCL_PIN = %d\n" % LCD_SCL_PIN)
+            f.write("LCD_I2C_FREQ = %d\n" % LCD_I2C_FREQ)
+            if LCD_ADDRESS is None:
+                f.write("LCD_ADDRESS = None\n")
+            else:
+                f.write("LCD_ADDRESS = 0x%02X\n" % LCD_ADDRESS)
+            f.write("LCD_MAPPING = \"%s\"\n" % LCD_MAPPING)
+            f.write("LCD_COLS = %d\n" % LCD_COLS)
+            f.write("LCD_ROWS = %d\n" % LCD_ROWS)
+            f.write("LCD_REFRESH_MS = %d\n" % LCD_REFRESH_MS)
+            f.write("LCD_BUTTON_DEBOUNCE_MS = %d\n" % LCD_BUTTON_DEBOUNCE_MS)
+            f.write("LCD_CONTINUITY_PAGE_SIZE = %d\n" % LCD_CONTINUITY_PAGE_SIZE)
+            f.write("MASTER_LINK_TIMEOUT_MS = %d\n" % MASTER_LINK_TIMEOUT_MS)
+            f.write("UP_BUTTON_PIN = %d\n" % UP_BUTTON_PIN)
+            f.write("DOWN_BUTTON_PIN = %d\n" % DOWN_BUTTON_PIN)
+            if OK_FWD_BUTTON_PIN is None:
+                f.write("OK_FWD_BUTTON_PIN = None\n")
+            else:
+                f.write("OK_FWD_BUTTON_PIN = %d\n" % OK_FWD_BUTTON_PIN)
+            f.write("OK_BUTTON_PIN = OK_FWD_BUTTON_PIN\n")
+            if BACK_BUTTON_PIN is None:
+                f.write("BACK_BUTTON_PIN = None\n")
+            else:
+                f.write("BACK_BUTTON_PIN = %d\n" % BACK_BUTTON_PIN)
     except Exception as e:
         print("Config save failed:", e)
+
+
+class DebouncedButton:
+    def __init__(self, pin_id, debounce_ms=80):
+        self.pin = None
+        self.debounce_ms = int(debounce_ms)
+        self.last_raw = False
+        self.stable = False
+        self.changed_ms = time.ticks_ms()
+        if pin_id is not None:
+            try:
+                self.pin = Pin(pin_id, Pin.IN, Pin.PULL_UP)
+                self.last_raw = self.read_raw()
+                self.stable = self.last_raw
+            except Exception as e:
+                print("LCD button init failed P%s:" % str(pin_id), e)
+
+    def read_raw(self):
+        if self.pin is None:
+            return False
+        try:
+            return self.pin.value() == 0
+        except Exception:
+            return False
+
+    def update(self, now):
+        raw = self.read_raw()
+        if raw != self.last_raw:
+            self.last_raw = raw
+            self.changed_ms = now
+            return False
+
+        if raw != self.stable and time.ticks_diff(now, self.changed_ms) >= self.debounce_ms:
+            self.stable = raw
+            return self.stable
+
+        return False
+
+
+def count_mask_bits(mask):
+    mask = int(mask or 0)
+    count = 0
+    while mask:
+        count += mask & 1
+        mask >>= 1
+    return count
+
+
+def lcd_trim(text):
+    return str(text)[:LCD_COLS]
+
+
+def record_master_rx():
+    global last_master_rx_ms, lcd_force_refresh
+
+    last_master_rx_ms = time.ticks_ms()
+    lcd_force_refresh = True
+
+
+def init_lcd_ui():
+    global lcd_display, lcd_buttons, lcd_force_refresh
+
+    if not LCD_ENABLED:
+        return
+    if I2cLcd1602 is None:
+        print("LCD driver unavailable")
+        return
+
+    try:
+        try:
+            i2c = I2C(
+                LCD_I2C_ID,
+                sda=Pin(LCD_SDA_PIN),
+                scl=Pin(LCD_SCL_PIN),
+                freq=LCD_I2C_FREQ,
+            )
+        except TypeError:
+            i2c = I2C(LCD_I2C_ID, sda=Pin(LCD_SDA_PIN), scl=Pin(LCD_SCL_PIN))
+
+        address = I2cLcd1602.find_address(i2c, LCD_ADDRESS)
+        if address is None:
+            print("LCD not found on I2C")
+            return
+
+        lcd_display = I2cLcd1602(i2c, address, LCD_COLS, LCD_ROWS, mapping=LCD_MAPPING)
+        lcd_display.show_lines("Nightfire Dummy", "Booting...")
+        lcd_buttons = [
+            ("up", DebouncedButton(UP_BUTTON_PIN, LCD_BUTTON_DEBOUNCE_MS)),
+            ("down", DebouncedButton(DOWN_BUTTON_PIN, LCD_BUTTON_DEBOUNCE_MS)),
+        ]
+        if OK_FWD_BUTTON_PIN is not None:
+            lcd_buttons.append(("ok", DebouncedButton(OK_FWD_BUTTON_PIN, LCD_BUTTON_DEBOUNCE_MS)))
+        if BACK_BUTTON_PIN is not None:
+            lcd_buttons.append(("back", DebouncedButton(BACK_BUTTON_PIN, LCD_BUTTON_DEBOUNCE_MS)))
+        lcd_force_refresh = True
+        print("LCD ready at 0x%02X mapping=%s" % (address, LCD_MAPPING))
+    except Exception as e:
+        lcd_display = None
+        print("LCD init failed:", e)
+
+
+def lcd_continuity_detail_pages():
+    page_size = max(1, int(LCD_CONTINUITY_PAGE_SIZE or 1))
+    return max(1, (CUE_COUNT + page_size - 1) // page_size)
+
+
+def lcd_start_edit(target, value):
+    global lcd_mode, lcd_edit_target, lcd_edit_value
+
+    lcd_mode = "edit"
+    lcd_edit_target = target
+    lcd_edit_value = int(value or 0)
+
+
+def lcd_open_menu_item():
+    global lcd_mode, lcd_active_view, lcd_cont_detail_index
+
+    item = LCD_MENU_ITEMS[lcd_menu_index]
+    if item == "System Info":
+        lcd_mode = "view"
+        lcd_active_view = "system"
+    elif item == "Continuity":
+        lcd_mode = "view"
+        lcd_active_view = "continuity"
+        lcd_cont_detail_index = -1
+    elif item == "Script":
+        lcd_mode = "view"
+        lcd_active_view = "script"
+    elif item == "Set Group":
+        lcd_start_edit("group", GROUP_ID)
+    elif item == "Set Network":
+        lcd_start_edit("network", NETWORK_ID)
+    elif item == "Set Channel":
+        lcd_start_edit("channel", RADIO_CHANNEL)
+
+
+def lcd_adjust_edit(delta):
+    global lcd_edit_value
+
+    if lcd_edit_target == "channel":
+        lcd_edit_value = (lcd_edit_value + delta) % 101
+        while not valid_radio_channel(lcd_edit_value):
+            lcd_edit_value = (lcd_edit_value + delta) % 101
+    else:
+        lcd_edit_value = (lcd_edit_value + delta) & 0xFFFF
+
+
+def lcd_save_edit():
+    global GROUP_ID, NETWORK_ID, RADIO_CHANNEL, lcd_mode, lcd_active_view
+
+    if ARMED:
+        lcd_mode = "view"
+        lcd_active_view = "edit_blocked"
+        return
+
+    if lcd_edit_target == "group":
+        GROUP_ID = lcd_edit_value & 0xFFFF
+    elif lcd_edit_target == "network":
+        NETWORK_ID = lcd_edit_value & 0xFFFF
+    elif lcd_edit_target == "channel":
+        if not valid_radio_channel(lcd_edit_value):
+            lcd_mode = "view"
+            lcd_active_view = "edit_blocked"
+            return
+        RADIO_CHANNEL = lcd_edit_value % 101
+
+    save_runtime_config()
+
+    if lcd_edit_target == "channel":
+        try:
+            nrf_radio.init(
+                channel=RADIO_CHANNEL,
+                tx_power=RADIO_TX_POWER,
+                address=RADIO_ADDRESS,
+            )
+        except Exception as e:
+            print("LCD channel radio init failed:", e)
+
+    lcd_mode = "menu"
+
+
+def lcd_button_action(name):
+    global lcd_mode, lcd_menu_index, lcd_force_refresh, lcd_cont_detail_index
+
+    if lcd_mode == "home":
+        if name == "ok":
+            lcd_mode = "menu"
+        lcd_force_refresh = True
+        return
+
+    if lcd_mode == "menu":
+        if name == "up":
+            lcd_menu_index = (lcd_menu_index - 1) % len(LCD_MENU_ITEMS)
+        elif name == "down":
+            lcd_menu_index = (lcd_menu_index + 1) % len(LCD_MENU_ITEMS)
+        elif name == "back":
+            lcd_mode = "home"
+        elif name == "ok":
+            lcd_open_menu_item()
+        lcd_force_refresh = True
+        return
+
+    if lcd_mode == "view":
+        if name == "back":
+            lcd_mode = "menu"
+        elif lcd_active_view == "continuity" and name == "up":
+            lcd_cont_detail_index -= 1
+            if lcd_cont_detail_index < -1:
+                lcd_cont_detail_index = lcd_continuity_detail_pages() - 1
+        elif lcd_active_view == "continuity" and name == "down":
+            lcd_cont_detail_index += 1
+            if lcd_cont_detail_index >= lcd_continuity_detail_pages():
+                lcd_cont_detail_index = -1
+        elif name == "ok":
+            lcd_mode = "menu"
+        lcd_force_refresh = True
+        return
+
+    if lcd_mode == "edit":
+        if name == "up":
+            lcd_adjust_edit(1)
+        elif name == "down":
+            lcd_adjust_edit(-1)
+        elif name == "back":
+            lcd_mode = "menu"
+        elif name == "ok":
+            lcd_save_edit()
+
+    lcd_force_refresh = True
+
+
+def lcd_status_text():
+    return "ARMED" if ARMED else "SAFE"
+
+
+def lcd_battery_short_text():
+    mv = int(BATTERY_MV or 0)
+    return "%d.%02dV" % (mv // 1000, (mv % 1000) // 10)
+
+
+def lcd_home_top_line():
+    left = lcd_battery_short_text()
+    right = "G%04X" % (GROUP_ID & 0xFFFF)
+    gap = LCD_COLS - len(left) - len(right)
+    if gap < 1:
+        gap = 1
+    return left + (" " * gap) + right
+
+
+def lcd_master_link_text():
+    if not last_master_rx_ms:
+        return "M:--"
+
+    age = time.ticks_diff(time.ticks_ms(), last_master_rx_ms)
+    return "M:OK" if age <= MASTER_LINK_TIMEOUT_MS else "M:--"
+
+
+def lcd_home_bottom_line():
+    return "%s %08X" % (lcd_master_link_text(), UNIQUE_ID & 0xFFFFFFFF)
+
+
+def lcd_menu_lines():
+    item = LCD_MENU_ITEMS[lcd_menu_index]
+    next_item = LCD_MENU_ITEMS[(lcd_menu_index + 1) % len(LCD_MENU_ITEMS)]
+    return ">%s" % item, " %s" % next_item
+
+
+def lcd_edit_lines():
+    if lcd_edit_target == "channel":
+        return "Channel", "%03d OK=save" % lcd_edit_value
+    if lcd_edit_target == "network":
+        return "Network ID", "%04X OK=save" % (lcd_edit_value & 0xFFFF)
+    return "Group ID", "%04X OK=save" % (lcd_edit_value & 0xFFFF)
+
+
+def lcd_continuity_lines():
+    open_mask = build_open_mask()
+    if lcd_cont_detail_index < 0:
+        good = CUE_COUNT - count_mask_bits(open_mask)
+        return "Cont %02d/%02d SIM" % (good, CUE_COUNT), "UP/DN Details"
+
+    page_size = max(1, int(LCD_CONTINUITY_PAGE_SIZE or 1))
+    start = lcd_cont_detail_index * page_size + 1
+    end = min(CUE_COUNT, start + page_size - 1)
+
+    parts = []
+    for cue in range(start, end + 1):
+        open_bit = bool(open_mask & (1 << (cue - 1)))
+        parts.append("%02d%s" % (cue, " " if open_bit else chr(255)))
+
+    return (
+        " ".join(parts[:4]),
+        " ".join(parts[4:8]),
+    )
+
+
+def lcd_page_lines():
+    if lcd_mode == "home":
+        return lcd_home_top_line(), lcd_home_bottom_line()
+
+    if lcd_mode == "menu":
+        return lcd_menu_lines()
+
+    if lcd_mode == "edit":
+        return lcd_edit_lines()
+
+    if lcd_active_view == "system":
+        return "FW %s C%02d" % (APP_FIRMWARE_VERSION, CUE_COUNT), "Net%04X Ch%03d" % (NETWORK_ID & 0xFFFF, RADIO_CHANNEL & 0xFF)
+
+    if lcd_active_view == "continuity":
+        return lcd_continuity_lines()
+
+    if lcd_active_view == "script":
+        script_id_text = "----" if script_id_loaded is None else "%04X" % script_id_loaded
+        return "Script %s" % script_id_text, "%s Run%d N%03d" % (lcd_status_text(), 1 if script_running else 0, script_next_index)
+
+    if lcd_active_view == "edit_blocked":
+        return "Disarm first", "BACK=menu"
+
+    return lcd_home_top_line(), lcd_home_bottom_line()
+
+
+def service_lcd_ui():
+    global lcd_display, lcd_last_refresh_ms, lcd_force_refresh
+
+    if lcd_display is None:
+        return
+
+    try:
+        now = time.ticks_ms()
+        for name, button in lcd_buttons:
+            if button.update(now):
+                lcd_button_action(name)
+
+        if lcd_force_refresh or time.ticks_diff(now, lcd_last_refresh_ms) >= LCD_REFRESH_MS:
+            line1, line2 = lcd_page_lines()
+            lcd_display.show_lines(lcd_trim(line1), lcd_trim(line2))
+            lcd_last_refresh_ms = now
+            lcd_force_refresh = False
+    except Exception as e:
+        lcd_display = None
+        print("LCD service failed:", e)
 
 
 def refresh_open_cues():
@@ -217,6 +639,9 @@ def build_open_mask():
 
 
 def handle_discover(pkt):
+    global debug_discover_packets
+
+    debug_discover_packets += 1
     data = pkt.get("data", b"")
     nonce = int.from_bytes(data[:2], "big") if len(data) >= 2 else None
     span = DISCOVER_BACKOFF_MAX_MS - DISCOVER_BACKOFF_MIN_MS + 1
@@ -489,6 +914,7 @@ def run_script_scheduler():
 
 def handle(pkt):
     global ARMED, GROUP_ID, UNIQUE_ID, CONFIG_UNIQUE_ID, NETWORK_ID, RADIO_CHANNEL
+    global script_running, lcd_force_refresh
 
     cmd = pkt.get("cmd")
     data = pkt.get("data", b"")
@@ -507,14 +933,20 @@ def handle(pkt):
             tx_nfcp(nfcp.build_response(UNIQUE_ID, CMD_INFO_RSP, build_info_payload()))
         return
 
+    if cmd == CMD_KEEPALIVE:
+        return
+
     if cmd == CMD_ARM:
         ARMED = True
+        lcd_force_refresh = True
         reply_ack_if_unique(pkt, CMD_ARM)
         print("ARMED")
         return
 
     if cmd == CMD_DISARM:
         ARMED = False
+        script_running = False
+        lcd_force_refresh = True
         reply_ack_if_unique(pkt, CMD_DISARM)
         print("DISARMED")
         return
@@ -605,7 +1037,7 @@ def handle(pkt):
             reply_nack_if_unique(pkt, CMD_SET_RADIO_CHANNEL, NACK_REJECTED_ARMED)
         elif len(data) != 1:
             reply_nack_if_unique(pkt, CMD_SET_RADIO_CHANNEL, NACK_BAD_LENGTH)
-        elif data[0] > 100:
+        elif not valid_radio_channel(data[0]):
             reply_nack_if_unique(pkt, CMD_SET_RADIO_CHANNEL, NACK_INVALID_VALUE)
         else:
             RADIO_CHANNEL = data[0]
@@ -638,6 +1070,9 @@ def handle(pkt):
 
 
 def handle_radio_payload(payload):
+    global debug_radio_payloads, debug_nfcp_packets
+
+    debug_radio_payloads += 1
     if len(payload) < 3:
         return
 
@@ -655,8 +1090,10 @@ def handle_radio_payload(payload):
     for b in payload[nfcp_offset:]:
         pkt = parser.feed(b)
         if pkt and address_matches(pkt):
+            debug_nfcp_packets += 1
             if remember_rx_packet(radio_seq, pkt):
                 return
+            record_master_rx()
             handle(pkt)
 
 
@@ -676,6 +1113,7 @@ def init_radio():
 def main():
     global ARMED, script_running
 
+    init_lcd_ui()
     radio_ready = init_radio()
     print(
         "Nightfire nRF52840 dummy radio node uid=0x%08X group=0x%04X net=0x%04X" %
@@ -695,12 +1133,10 @@ def main():
             payload = nrf_radio.recv(RADIO_RX_TIMEOUT_MS)
             if payload:
                 handle_radio_payload(payload)
+            service_lcd_ui()
         except Exception as e:
             print("Dummy main loop error:", e)
             radio_ready = False
             ARMED = False
             script_running = False
             time.sleep_ms(100)
-
-
-main()

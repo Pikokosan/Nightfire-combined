@@ -36,6 +36,7 @@ CMD_NACK         = 0x51
 
 CMD_INFO_REQ     = 0x52
 CMD_INFO_RSP     = 0x53
+CMD_KEEPALIVE    = 0x54
 
 CMD_OTA_UPDATE_BEGIN  = 0x60
 CMD_OTA_UPDATE_WRITE  = 0x61
@@ -133,10 +134,10 @@ class NFCP:
             raise NFCPError("Mask too large (>64-bit)")
         return mask.to_bytes(nbytes, "big")
 
-    # Broadcast: ONLY ARM/DISARM/DISCOVER
+    # Broadcast commands that do not target a single module.
     def build_broadcast(self, cmd: int, data: bytes = b"") -> bytes:
-        if cmd not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER, CMD_SCRIPT_START, CMD_SCRIPT_STOP, CMD_SCRIPT_HEARTBEAT, CMD_TIME_SYNC):
-            raise NFCPError("Broadcast only allowed for ARM/DISARM/DISCOVER/SCRIPT")
+        if cmd not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER, CMD_KEEPALIVE, CMD_SCRIPT_START, CMD_SCRIPT_STOP, CMD_SCRIPT_HEARTBEAT, CMD_TIME_SYNC):
+            raise NFCPError("Broadcast only allowed for ARM/DISARM/DISCOVER/KEEPALIVE/SCRIPT")
         return self._frame(SOF_BROADCAST, bytes([self.node_id, cmd]) + data)
 
     def build_arm_broadcast(self) -> bytes:
@@ -149,6 +150,11 @@ class NFCP:
         if nonce is None:
             return self.build_broadcast(CMD_DISCOVER)
         return self.build_broadcast(CMD_DISCOVER, (nonce & 0xFFFF).to_bytes(2, "big"))
+
+    def build_keepalive_broadcast(self, master_ticks_ms=None) -> bytes:
+        if master_ticks_ms is None:
+            return self.build_broadcast(CMD_KEEPALIVE)
+        return self.build_broadcast(CMD_KEEPALIVE, (master_ticks_ms & 0xFFFFFFFF).to_bytes(4, "big"))
 
     # FIRE (group/unique only) ? mask is now 1..8 bytes
     def build_group_fire(self, group_addr: int, mask: int) -> bytes:
@@ -574,7 +580,7 @@ class NFCPStreamParser:
             pkt["src"] = payload[0]
             pkt["cmd"] = payload[1]
             pkt["data"] = payload[2:]
-            if pkt["cmd"] not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER, CMD_SCRIPT_START, CMD_SCRIPT_STOP, CMD_SCRIPT_HEARTBEAT, CMD_TIME_SYNC):
+            if pkt["cmd"] not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER, CMD_KEEPALIVE, CMD_SCRIPT_START, CMD_SCRIPT_STOP, CMD_SCRIPT_HEARTBEAT, CMD_TIME_SYNC):
                 return None
 
         elif self.frame_type == SOF_GROUP:

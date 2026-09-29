@@ -38,6 +38,24 @@
             }
         },
         {
+            "label": "LCD UI test: upload",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\scripts\\upload_lcd_ui_test_to_com10.ps1"
+            ],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
             "label": "nRF52840 dummy: upload",
             "type": "shell",
             "command": "powershell",

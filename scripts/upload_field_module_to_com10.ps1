@@ -34,6 +34,7 @@ $UploadArgs = @(
     "--delete", "analog_mux74hc4051.py",
     "--delete", "adc_scaling.py",
     "--delete", "field_measurement.py",
+    "--delete", "lcd1602_i2c.py",
     "--delete", "bridge_radio.py"
 )
 
@@ -48,7 +49,8 @@ $UploadArgs += @(
     ".\main\shift_register74hc595.py:shift_register74hc595.py",
     ".\main\analog_mux74hc4051.py:analog_mux74hc4051.py",
     ".\main\adc_scaling.py:adc_scaling.py",
-    ".\main\field_measurement.py:field_measurement.py"
+    ".\main\field_measurement.py:field_measurement.py",
+    ".\main\lcd1602_i2c.py:lcd1602_i2c.py"
 )
 
 if ($ConfigPath) {

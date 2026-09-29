@@ -20,7 +20,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--master", default="COM13")
     parser.add_argument("--network", default="0x04D2")
-    parser.add_argument("--channel", type=int, default=40)
+    parser.add_argument("--channel", type=int, default=90)
     parser.add_argument("--address", default="0x67676767")
     parser.add_argument("--timeout-ms", type=int, default=4000)
     args = parser.parse_args()

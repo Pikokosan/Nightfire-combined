@@ -229,7 +229,7 @@ else:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--master", default="COM21")
-    parser.add_argument("--current-channel", type=int, default=40)
+    parser.add_argument("--current-channel", type=int, default=90)
     parser.add_argument("--rank", type=int, default=0)
     parser.add_argument("--channel", type=int, default=-1)
     parser.add_argument("--network", default="0x04D2")

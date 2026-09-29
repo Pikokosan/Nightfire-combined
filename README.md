@@ -6,6 +6,9 @@ nRF52840 radio bridge/prototype modules.
 
 ## Project Layout
 
+See `docs/project_layout.md` for the fuller folder map and where new files
+should go.
+
 - `main/master_main.py` - Waveshare ESP32-S3-LCD-4.3 master controller GUI.
 - `main/field_main.py` - nRF52840 field module firmware for the 18-channel 74HC595/74HC4051 prototype.
 - `main/nrf_dummy_main.py` - nRF52840 dummy module firmware.
@@ -15,6 +18,7 @@ nRF52840 radio bridge/prototype modules.
 - `main/module_ota.py` - module-side OTA file receiver.
 - `main/shift_register74hc595.py` - 24-bit output-bank driver for three 74HC595 devices.
 - `main/analog_mux74hc4051.py` - 18-channel scanner for three 74HC4051 analog multiplexers.
+- `main/lcd1602_i2c.py` - optional 2x16 HD44780/PCF8574 I2C LCD driver for field-module status screens.
 - `main/adc_scaling.py` and `main/field_measurement.py` - ADC scaling, battery/channel measurement, calibration, and continuity classification.
 
 ## Default Ports
@@ -29,6 +33,7 @@ Each upload script accepts a `-Port` override.
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\upload_master_to_com7.ps1 -Port COM21
 powershell -ExecutionPolicy Bypass -File .\scripts\upload_field_module_to_com10.ps1 -Port COM10
+powershell -ExecutionPolicy Bypass -File .\scripts\upload_lcd_ui_test_to_com10.ps1 -Port COM10
 powershell -ExecutionPolicy Bypass -File .\scripts\upload_nrf_bridge.ps1 -Port COM15
 powershell -ExecutionPolicy Bypass -File .\scripts\upload_nrf_dummy.ps1 -Port COM16
 ```
@@ -50,6 +55,7 @@ VS Code tasks are provided for the common uploads:
 
 - `Master device: upload`
 - `Field module: upload`
+- `LCD UI test: upload`
 - `nRF52840 dummy: upload`
 - `nRF dummy: USB bootloader`
 
@@ -89,7 +95,7 @@ Default bridge UART settings:
 - nice!nano UART: `UART0`
 - nice!nano TX: `P6`
 - nice!nano RX: `P8`
-- Default radio channel: `40`
+- Default radio channel: `90`
 - Default network ID: `0x04D2`
 
 Wire the bridge UART crossed to the master:
@@ -149,6 +155,47 @@ contents to the master SD card root, then open `Settings > OTA` on the master.
 
 The module must be disarmed and not running a script during update.
 
+## Field Module LCD
+
+The field module can drive an optional 2x16 I2C LCD. If the display is not
+present, the firmware logs that and continues normally.
+
+Default MS88SFA LCD and button mapping:
+
+- LCD SDA: MicroPython pin `26` / nRF `P0.26`
+- LCD SCL: MicroPython pin `27` / nRF `P0.27`
+- Up / pair button: MicroPython pin `45` / nRF `P1.13`
+- Down button: MicroPython pin `47` / nRF `P1.15`
+- OK / forward button: MicroPython pin `15` / nRF `P0.15`
+- Back button: MicroPython pin `20` / nRF `P0.20`
+
+UP and DOWN move between pages, BACK returns to the home page, and OK refreshes
+continuity when viewing continuity pages. The LCD shows field-module system
+status, UID/network/radio channel, battery/firmware information, script state,
+and continuity summary/detail pages.
+
+For LCD and button-only bench testing, upload the standalone UI test app:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\upload_lcd_ui_test_to_com10.ps1 -Port COM10
+```
+
+That app does not use the radio or field outputs. It simulates system,
+network, battery, and continuity pages so the LCD/button flow can be tested
+while a separate dummy module handles any master communication tests.
+
+Standalone nRF52840 Pro Micro LCD test wiring:
+
+- LCD SDA: board `D8` / nRF `P1.04` / MicroPython pin `36`
+- LCD SCL: board `D9` / nRF `P1.06` / MicroPython pin `38`
+- UP button: board `D15` / nRF `P1.13` / MicroPython pin `45`
+- DOWN button: board `D18` / nRF `P1.15` / MicroPython pin `47`
+- OK button: board `D14` / nRF `P1.11` / MicroPython pin `43`
+- BACK button: board `D16` / nRF `P0.10` / MicroPython pin `10`
+
+Buttons are read with internal pull-ups, so wire each button between its GPIO
+pin and `GND`. Use 3.3 V-safe I2C wiring for the LCD.
+
 ## Channel Scan And Pairing
 
 The master Settings screen can scan radio channels, show the best results, and
@@ -159,8 +206,8 @@ For bench testing:
 
 ```powershell
 python .\scripts\test_nrf_channel_scan.py --master COM21
-python .\scripts\test_nrf_channel_apply.py --master COM21 --current-channel 40 --channel 84
-python .\scripts\test_nrf_channel_apply.py --master COM21 --current-channel 84 --channel 40
+python .\scripts\test_nrf_channel_apply.py --master COM21 --current-channel 90 --channel 84
+python .\scripts\test_nrf_channel_apply.py --master COM21 --current-channel 84 --channel 90
 ```
 
 If a migration is interrupted, restore all modules and the bridge to the same

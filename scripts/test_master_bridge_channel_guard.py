@@ -29,7 +29,7 @@ for dev in master.gui.modules:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--master", default="COM21")
-    parser.add_argument("--forced-channel", type=int, default=40)
+    parser.add_argument("--forced-channel", type=int, default=90)
     parser.add_argument("--timeout", type=float, default=80.0)
     args = parser.parse_args()
 

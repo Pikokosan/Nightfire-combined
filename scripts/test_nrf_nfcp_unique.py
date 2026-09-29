@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--target", required=True, help="Target unique id, for example 0x52840015")
     parser.add_argument("--cmd", choices=["ping", "continuity"], default="ping")
     parser.add_argument("--network", default="0x04D2")
-    parser.add_argument("--channel", type=int, default=40)
+    parser.add_argument("--channel", type=int, default=90)
     parser.add_argument("--address", default="0x67676767")
     parser.add_argument("--timeout-ms", type=int, default=2500)
     args = parser.parse_args()

@@ -16,7 +16,7 @@ APP_FIRMWARE_NAME = "nrf-bridge"
 APP_FIRMWARE_VERSION = "0.1.1"
 
 DEFAULT_NETWORK_ID = bridge_radio.DEFAULT_NETWORK_ID
-DEFAULT_RADIO_CHANNEL = 40
+DEFAULT_RADIO_CHANNEL = 90
 DEFAULT_RADIO_ADDRESS = 0x67676767
 DEFAULT_RADIO_TX_POWER = 8
 
@@ -44,6 +44,10 @@ SCAN_BUSY_DBM = -85
 SCAN_SAMPLE_MS = 45
 SCAN_SAMPLE_INTERVAL_MS = 3
 SCAN_CANDIDATE_CHANNELS = (0,) + tuple(range(74, 101))
+
+
+def valid_radio_channel(channel):
+    return channel == 0 or (74 <= channel <= 100)
 
 local_parser = bridge_radio.BridgeFrameParser()
 uart = None
@@ -173,7 +177,7 @@ def set_network(network_id):
 def set_radio_channel(channel):
     global RADIO_CHANNEL
 
-    if channel < 0 or channel > 100:
+    if not valid_radio_channel(channel):
         return False
 
     RADIO_CHANNEL = channel
@@ -390,6 +394,8 @@ def receive_and_forward_radio(timeout_ms):
         if payload:
             handle_radio_packet(payload)
             deadline = time.ticks_add(time.ticks_ms(), 100)
+        if uart is not None and uart.any():
+            return
 
 
 def init_uart():

@@ -27,7 +27,7 @@ MODULE_CONTINUITY_AUTO_CHECK_MS = 4000
 DISCOVER_IDLE_TIMEOUT_MS = 900
 DISCOVER_MIN_SCAN_MS = 1400
 DISCOVER_MAX_SCAN_MS = 10000
-DISCOVER_BROADCAST_REPEAT_MS = 350
+DISCOVER_BROADCAST_REPEAT_MS = 1800
 SPEED_TEST_TIMEOUT_MS = 2000
 RANGE_TEST_INTERVAL_MS = 500
 RANGE_TEST_TIMEOUT_MS = 300
@@ -41,6 +41,7 @@ SCRIPT_START_BROADCAST_REPEATS = 3
 SCRIPT_TIME_SYNC_REPEATS = 3
 SCRIPT_TIME_SYNC_GAP_MS = 20
 SCRIPT_HEARTBEAT_MS = 200
+MASTER_KEEPALIVE_MS = 2500
 SCRIPT_FIRE_MODE_AUTO = "auto"
 SCRIPT_FIRE_MODE_STEP = "step"
 TRELLIS_ENABLED = True
@@ -61,7 +62,9 @@ DEVICE_DB_PATH = "nfcp_devices.json"
 SETTINGS_PATH = "nfcp_settings.json"
 
 RADIO_NETWORK_ID = bridge_radio.DEFAULT_NETWORK_ID
-RADIO_CHANNEL = 40
+RADIO_CHANNEL = 90
+RADIO_MIN_HIGH_CHANNEL = 74
+RADIO_MAX_CHANNEL = 100
 RADIO_APP_BAUD = 256000
 RADIO_BOOT_READY_RETRY_MS = 3000
 RADIO_BOOT_READY_RETRY_GAP_MS = 250
@@ -100,6 +103,19 @@ def load_screen(scr):
         lv.screen_load(scr)
     else:
         lv.scr_load(scr)
+
+
+def valid_radio_channel(channel):
+    try:
+        channel = int(channel)
+    except:
+        return False
+
+    return channel == 0 or (RADIO_MIN_HIGH_CHANNEL <= channel <= RADIO_MAX_CHANNEL)
+
+
+def radio_channel_help_text():
+    return "Use channel 0 or %d-%d" % (RADIO_MIN_HIGH_CHANNEL, RADIO_MAX_CHANNEL)
 
 
 def get_script_clock_font():
@@ -167,8 +183,13 @@ def uart_read_some(max_bytes=256):
 
 
 def drain_uart():
+    global radio_rx, nfcp_rx
+
     while uart.any():
         uart.read()
+
+    radio_rx = bridge_radio.BridgeFrameParser()
+    nfcp_rx = nfcp.NFCPStreamParser()
 
 
 def local_radio_command(cmd, payload=b"", timeout_ms=1000):
@@ -291,8 +312,8 @@ def ensure_local_radio_channel(channel, timeout_ms=1000):
     except:
         return False, "Invalid saved channel"
 
-    if channel < 0 or channel > 100:
-        return False, "Invalid saved channel"
+    if not valid_radio_channel(channel):
+        return False, "Invalid saved channel - " + radio_channel_help_text()
 
     stats = get_local_radio_stats(timeout_ms)
     if stats:
@@ -488,8 +509,13 @@ def load_app_settings(path=SETTINGS_PATH):
     except:
         radio_channel = RADIO_CHANNEL
 
-    if radio_channel < 0 or radio_channel > 100:
+    if not valid_radio_channel(radio_channel):
         radio_channel = RADIO_CHANNEL
+        settings["radio_channel"] = radio_channel
+        try:
+            save_app_settings(settings, path)
+        except:
+            pass
 
     if radio_network_id == 1 and RADIO_NETWORK_ID != 1:
         radio_network_id = RADIO_NETWORK_ID
@@ -1031,6 +1057,10 @@ def disarm():
     radio_write_nfcp(nfcp_tx.build_disarm_broadcast())
 
 
+def keepalive():
+    radio_write_nfcp(nfcp_tx.build_keepalive_broadcast(time.ticks_ms()))
+
+
 def arm_for_uid(uid_int, timeout_ms=SPEED_TEST_TIMEOUT_MS):
     return send_with_ack(uid_int, nfcp.CMD_ARM, lambda: nfcp_tx.build_arm_unique(uid_int), timeout_ms)
 
@@ -1365,6 +1395,7 @@ nfcp.request_info_for_uid = request_info_for_uid
 nfcp.info_scan = info_scan
 nfcp.arm = arm
 nfcp.disarm = disarm
+nfcp.keepalive = keepalive
 nfcp.arm_for_uid = arm_for_uid
 nfcp.disarm_for_uid = disarm_for_uid
 nfcp.fire_unique = fire_unique
@@ -1404,6 +1435,7 @@ class NFCPGui:
         self.current_screen = None
         self.current_view = "main"
         self.discover_busy = False
+        self.last_keepalive_ms = time.ticks_ms()
         self.modules_page = 0
         self.manual_fire_modules = []
         self.manual_fire_index = 0
@@ -4232,9 +4264,9 @@ class NFCPGui:
         else:
             try:
                 self.channel_edit_value = int(self.channel_edit_text)
-                if self.channel_edit_value > 100:
-                    self.channel_edit_value = 100
-                    self.channel_edit_text = "100"
+                if self.channel_edit_value > RADIO_MAX_CHANNEL:
+                    self.channel_edit_value = RADIO_MAX_CHANNEL
+                    self.channel_edit_text = str(RADIO_MAX_CHANNEL)
             except:
                 self.channel_edit_value = 0
                 self.channel_edit_text = ""
@@ -4244,8 +4276,8 @@ class NFCPGui:
             self.channel_edit_label.center()
 
     def save_channel_change(self, event=None):
-        if self.channel_edit_value < 0 or self.channel_edit_value > 100:
-            self.set_status("Invalid channel")
+        if not valid_radio_channel(self.channel_edit_value):
+            self.set_status(radio_channel_help_text())
             return
 
         self.apply_radio_channel(self.channel_edit_value, fail_view="radio_channel")
@@ -4405,8 +4437,8 @@ class NFCPGui:
             self.set_status("Invalid channel")
             return
 
-        if channel < 0 or channel > 100:
-            self.set_status("Invalid channel")
+        if not valid_radio_channel(channel):
+            self.set_status(radio_channel_help_text())
             return
 
         self.load_modules_from_db()
@@ -6296,6 +6328,19 @@ class NFCPGui:
         return True
 
     def update(self):
+        now = time.ticks_ms()
+
+        if (
+            not self.script_fire_timing_active() and
+            not self.discover_busy and
+            time.ticks_diff(now, self.last_keepalive_ms) >= MASTER_KEEPALIVE_MS
+        ):
+            try:
+                nfcp.keepalive()
+            except Exception as e:
+                print("Keepalive failed:", e)
+            self.last_keepalive_ms = now
+
         if self.current_view == "manual_fire":
             self.poll_manual_fire_trellis()
             self.update_manual_fire_last_indicator()
@@ -6314,7 +6359,6 @@ class NFCPGui:
             self.current_view == "module_continuity" and
             self.selected_module
         ):
-            now = time.ticks_ms()
             elapsed = time.ticks_diff(now, self.last_module_continuity_auto_ms)
 
             if elapsed >= MODULE_CONTINUITY_AUTO_CHECK_MS:

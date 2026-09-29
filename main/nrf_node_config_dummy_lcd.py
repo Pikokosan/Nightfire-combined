@@ -1,0 +1,32 @@
+# nRF52840 dummy module with 2x16 I2C LCD and four buttons.
+#
+# MicroPython pin numbering follows the local nRF52840 board convention:
+# P0.nn -> nn, P1.nn -> 32 + nn.
+
+UNIQUE_ID = 0x00000000
+GROUP_ID = 0x0001
+NETWORK_ID = 0x04D2
+RADIO_CHANNEL = 90
+
+BATTERY_PACK_TYPE = "2S"
+BATTERY_MV = 8200
+
+LCD_ENABLED = True
+LCD_I2C_ID = 0
+LCD_SDA_PIN = 36          # Board D8  / nRF P1.04
+LCD_SCL_PIN = 38          # Board D9  / nRF P1.06
+LCD_I2C_FREQ = 100000
+LCD_ADDRESS = 0x3F
+LCD_MAPPING = "upper"
+LCD_COLS = 16
+LCD_ROWS = 2
+LCD_REFRESH_MS = 350
+LCD_BUTTON_DEBOUNCE_MS = 80
+LCD_CONTINUITY_PAGE_SIZE = 8
+MASTER_LINK_TIMEOUT_MS = 15000
+
+UP_BUTTON_PIN = 45        # Board D15 / nRF P1.13
+DOWN_BUTTON_PIN = 47      # Board D18 / nRF P1.15
+OK_FWD_BUTTON_PIN = 43    # Board D14 / nRF P1.11
+OK_BUTTON_PIN = OK_FWD_BUTTON_PIN
+BACK_BUTTON_PIN = 10      # Board D16 / nRF P0.10

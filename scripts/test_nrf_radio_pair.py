@@ -91,7 +91,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--rx", default="COM13")
     parser.add_argument("--tx", default="COM15")
-    parser.add_argument("--channel", type=int, default=40)
+    parser.add_argument("--channel", type=int, default=90)
     parser.add_argument("--address", default="0x67676767")
     parser.add_argument("--message", default="nightfire-test")
     args = parser.parse_args()
