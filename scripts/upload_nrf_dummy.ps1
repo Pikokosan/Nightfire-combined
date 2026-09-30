@@ -50,6 +50,8 @@ $UploadArgs = @(
     "--delete", "nfcp.mpy",
     "--delete", "module_ota.py",
     "--delete", "module_ota.mpy",
+    "--delete", "nrf_module_common.py",
+    "--delete", "nrf_module_common.mpy",
     "--delete", "lcd1602_i2c.py",
     "--delete", "lcd1602_i2c.mpy",
     "--delete", "nrf_dummy_main.py",
@@ -65,6 +67,7 @@ if ($NoMpy) {
         ".\main\nrf_dummy_main.py:main.py",
         ".\main\nfcp.py:nfcp.py",
         ".\main\module_ota.py:module_ota.py",
+        ".\main\nrf_module_common.py:nrf_module_common.py",
         ".\main\lcd1602_i2c.py:lcd1602_i2c.py"
     )
 }
@@ -72,6 +75,7 @@ else {
     $DummyMpy = Compile-Mpy ".\main\nrf_dummy_main.py" "nrf_dummy_main.mpy"
     $NfcpMpy = Compile-Mpy ".\main\nfcp.py" "nfcp.mpy"
     $OtaMpy = Compile-Mpy ".\main\module_ota.py" "module_ota.mpy"
+    $NrfCommonMpy = Compile-Mpy ".\main\nrf_module_common.py" "nrf_module_common.mpy"
     $LcdMpy = Compile-Mpy ".\main\lcd1602_i2c.py" "lcd1602_i2c.mpy"
 
     $UploadArgs += @(
@@ -79,6 +83,7 @@ else {
         "$($DummyMpy):nrf_dummy_main.mpy",
         "$($NfcpMpy):nfcp.mpy",
         "$($OtaMpy):module_ota.mpy",
+        "$($NrfCommonMpy):nrf_module_common.mpy",
         "$($LcdMpy):lcd1602_i2c.mpy"
     )
 }

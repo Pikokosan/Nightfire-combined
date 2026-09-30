@@ -34,7 +34,8 @@ if (-not $Version) {
 $files = @(
     @{ Source = $entry; Target = "/main.py" },
     @{ Source = "nfcp.py"; Target = "/nfcp.py" },
-    @{ Source = "module_ota.py"; Target = "/module_ota.py" }
+    @{ Source = "module_ota.py"; Target = "/module_ota.py" },
+    @{ Source = "nrf_module_common.py"; Target = "/nrf_module_common.py" }
 )
 
 if ($Target -eq "field") {

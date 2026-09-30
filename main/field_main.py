@@ -2,6 +2,7 @@ import time
 
 import machine
 import module_ota
+import nrf_module_common
 import nrf_radio
 from analog_mux74hc4051 import HC4051Scanner
 from field_measurement import (
@@ -41,6 +42,12 @@ RADIO_CHANNEL = getattr(node_config, "RADIO_CHANNEL", 90)
 RADIO_ADDRESS = 0x67676767
 RADIO_TX_POWER = 8
 RADIO_RX_TIMEOUT_MS = getattr(node_config, "RADIO_RX_TIMEOUT_MS", 50)
+RADIO_CCA_ENABLED = getattr(node_config, "RADIO_CCA_ENABLED", True)
+RADIO_CCA_MS = getattr(node_config, "RADIO_CCA_MS", 2)
+RADIO_CCA_BUSY_DBM = getattr(node_config, "RADIO_CCA_BUSY_DBM", -85)
+RADIO_CCA_RETRIES = getattr(node_config, "RADIO_CCA_RETRIES", 4)
+RADIO_CCA_BACKOFF_MIN_MS = getattr(node_config, "RADIO_CCA_BACKOFF_MIN_MS", 2)
+RADIO_CCA_BACKOFF_MAX_MS = getattr(node_config, "RADIO_CCA_BACKOFF_MAX_MS", 10)
 RX_DEDUPE_WINDOW_MS = 1500
 RX_DEDUPE_CACHE_LIMIT = 16
 
@@ -84,8 +91,7 @@ LCD_CONTINUITY_PAGE_SIZE = getattr(node_config, "LCD_CONTINUITY_PAGE_SIZE", 8)
 MASTER_LINK_TIMEOUT_MS = getattr(node_config, "MASTER_LINK_TIMEOUT_MS", 15000)
 
 
-def valid_radio_channel(channel):
-    return channel == 0 or (74 <= channel <= 100)
+valid_radio_channel = nrf_module_common.valid_radio_channel
 
 HC595_DATA_PIN = getattr(node_config, "HC595_DATA_PIN", 6)     # P0.06 / D1
 HC595_CLOCK_PIN = getattr(node_config, "HC595_CLOCK_PIN", 8)   # P0.08 / D0
@@ -146,19 +152,7 @@ CONT_STATUS_ADC_INVALID = 0x02
 CONT_STATUS_FAULT_DETECTED = 0x04
 
 def get_default_unique_id():
-    try:
-        uid = nrf_radio.device_id32()
-        if uid:
-            return int(uid) & 0xFFFFFFFF
-    except Exception:
-        pass
-    try:
-        uid = machine.unique_id()
-        if uid:
-            return int.from_bytes(uid[-4:], "big") & 0xFFFFFFFF
-    except Exception:
-        pass
-    return 0x52840001
+    return nrf_module_common.get_default_unique_id(0x52840001)
 
 
 CONFIG_UNIQUE_ID = getattr(node_config, "UNIQUE_ID", 0)
@@ -812,10 +806,23 @@ def next_tx_seq():
     return seq
 
 
+def tx_radio_payload(payload, use_cca=True):
+    return nrf_module_common.send_with_cca(
+        payload,
+        enabled=use_cca and RADIO_CCA_ENABLED,
+        cca_ms=RADIO_CCA_MS,
+        busy_dbm=RADIO_CCA_BUSY_DBM,
+        retries=RADIO_CCA_RETRIES,
+        backoff_min_ms=RADIO_CCA_BACKOFF_MIN_MS,
+        backoff_max_ms=RADIO_CCA_BACKOFF_MAX_MS,
+        rand_fn=ticks_rand,
+    )
+
+
 def tx_nfcp(frame, repeats=3, gap_ms=20):
     payload = (NETWORK_ID & 0xFFFF).to_bytes(2, "big") + bytes([next_tx_seq()]) + frame
     for i in range(repeats):
-        nrf_radio.send(payload)
+        tx_radio_payload(payload)
         if i + 1 < repeats:
             time.sleep_ms(gap_ms)
 
