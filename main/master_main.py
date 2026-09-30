@@ -68,6 +68,8 @@ RADIO_MAX_CHANNEL = 100
 RADIO_APP_BAUD = 256000
 RADIO_BOOT_READY_RETRY_MS = 3000
 RADIO_BOOT_READY_RETRY_GAP_MS = 250
+BRIDGE_UPDATE_DIR = "/sd/bridge_update"
+BRIDGE_UPDATE_CHUNK_SIZE = 48
 
 UART_ID = 2
 BAUDRATE = RADIO_APP_BAUD
@@ -349,6 +351,89 @@ def reset_local_radio(timeout_ms=1000):
     )
     time.sleep_ms(1200)
     return ok
+
+
+def local_radio_command_ok(cmd, payload=b"", timeout_ms=1000):
+    frame = local_radio_command(cmd, payload, timeout_ms)
+    return bool(frame and frame.cmd == cmd and not (frame.flags & bridge_radio.FLAG_ERROR))
+
+
+def bridge_update_file_crc(path):
+    crc = 0xFFFF
+    size = 0
+
+    with open(path, "rb") as f:
+        while True:
+            data = f.read(128)
+            if not data:
+                break
+            crc = bridge_radio.crc16_ccitt(data, crc)
+            size += len(data)
+
+    return size, crc & 0xFFFF
+
+
+def bridge_update_send_file(local_path, remote_name, status_cb=None):
+    size, crc = bridge_update_file_crc(local_path)
+    name = remote_name.encode()
+    payload = bytes([len(name)]) + name + size.to_bytes(4, "big") + crc.to_bytes(2, "big")
+
+    if status_cb:
+        status_cb("Bridge update: " + remote_name)
+
+    if not local_radio_command_ok(bridge_radio.CMD_FILE_BEGIN, payload, 1500):
+        return False, "begin failed: " + remote_name
+
+    offset = 0
+    with open(local_path, "rb") as f:
+        while True:
+            data = f.read(BRIDGE_UPDATE_CHUNK_SIZE)
+            if not data:
+                break
+            payload = offset.to_bytes(4, "big") + data
+            if not local_radio_command_ok(bridge_radio.CMD_FILE_WRITE, payload, 1500):
+                return False, "write failed: " + remote_name
+            offset += len(data)
+            if status_cb:
+                status_cb("%s %d/%d" % (remote_name, offset, size))
+
+    if not local_radio_command_ok(bridge_radio.CMD_FILE_END, b"", 2000):
+        return False, "end failed: " + remote_name
+
+    return True, "updated: " + remote_name
+
+
+def bridge_update_from_sd(status_cb=None):
+    files = (
+        ("main.py", True),
+        ("bridge_radio.py", True),
+        ("nrf_bridge_config.py", False),
+    )
+    updated = 0
+
+    for name, required in files:
+        path = BRIDGE_UPDATE_DIR + "/" + name
+        try:
+            os.stat(path)
+        except Exception:
+            if required:
+                return False, "missing " + path
+            continue
+
+        ok, message = bridge_update_send_file(path, name, status_cb)
+        if not ok:
+            return False, message
+        updated += 1
+
+    if updated < 2:
+        return False, "no bridge update files"
+
+    if status_cb:
+        status_cb("Resetting bridge...")
+
+    reset_local_radio(500)
+    time.sleep_ms(1500)
+    return True, "Bridge update complete"
 
 
 def get_local_radio_info(timeout_ms=1000):
@@ -3583,7 +3668,54 @@ class NFCPGui:
             self.show_range_test
         )
 
+        self.make_button(
+            scr,
+            "BRIDGE UPD",
+            690,
+            360,
+            90,
+            50,
+            self.update_bridge_from_sd
+        )
+
         self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_main_menu)
+
+    def mount_sd_card(self):
+        if sdcard_driver is None:
+            return False, "SD driver not loaded"
+
+        if not hasattr(sdcard_driver, "sd") or sdcard_driver.sd is None:
+            return False, "SD card not detected"
+
+        try:
+            os.mount(sdcard_driver.sd, "/sd")
+        except OSError:
+            pass
+        except Exception as e:
+            return False, "SD mount failed: " + str(e)
+
+        return True, None
+
+    def update_bridge_from_sd(self, event=None):
+        ok, message = self.mount_sd_card()
+        if not ok:
+            self.set_status(message)
+            return
+
+        self.show_loading_screen("Updating bridge...\nDo not power off.")
+
+        def status_cb(text):
+            self.set_status(text)
+            self.flush_ui()
+
+        try:
+            ok, message = bridge_update_from_sd(status_cb)
+        except Exception as e:
+            ok = False
+            message = "Bridge update failed: " + str(e)
+
+        self.show_settings()
+        self.set_status(message if message else ("Bridge update complete" if ok else "Bridge update failed"))
 
     def reset_range_test_stats(self):
         self.range_test_active = False

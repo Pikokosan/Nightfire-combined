@@ -1,4 +1,5 @@
 import time
+import os
 
 from machine import Pin, UART
 
@@ -13,7 +14,7 @@ except Exception:
 
 
 APP_FIRMWARE_NAME = "nrf-bridge"
-APP_FIRMWARE_VERSION = "0.1.1"
+APP_FIRMWARE_VERSION = "0.1.2"
 
 DEFAULT_NETWORK_ID = bridge_radio.DEFAULT_NETWORK_ID
 DEFAULT_RADIO_CHANNEL = 90
@@ -54,6 +55,7 @@ uart = None
 rx_seen = []
 stat_rx_duplicate = 0
 stat_rx_wrong_network = 0
+file_update = None
 
 
 def int_to_be_signed(value, size):
@@ -70,6 +72,30 @@ def encode_text_field(text):
     if len(data) > 63:
         data = data[:63]
     return bytes([len(data)]) + data
+
+
+def safe_update_name(name):
+    allowed = (
+        "main.py",
+        "bridge_radio.py",
+        "nrf_bridge_config.py",
+    )
+    return name in allowed
+
+
+def remove_if_exists(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def rename_if_exists(src, dst):
+    try:
+        os.rename(src, dst)
+        return True
+    except OSError:
+        return False
 
 
 def get_node_id():
@@ -265,6 +291,133 @@ def build_scan_payload():
     return bytes(payload)
 
 
+def begin_file_update(seq, payload):
+    global file_update
+
+    if len(payload) < 7:
+        write_error(seq, bridge_radio.CMD_FILE_BEGIN, 2)
+        return
+
+    name_len = payload[0]
+    if name_len < 1 or len(payload) != 1 + name_len + 6:
+        write_error(seq, bridge_radio.CMD_FILE_BEGIN, 2)
+        return
+
+    try:
+        name = bytes(payload[1:1 + name_len]).decode()
+    except Exception:
+        write_error(seq, bridge_radio.CMD_FILE_BEGIN, 2)
+        return
+
+    if not safe_update_name(name):
+        write_error(seq, bridge_radio.CMD_FILE_BEGIN, 3)
+        return
+
+    index = 1 + name_len
+    total_size = bridge_radio.int_from_be(payload[index:index + 4])
+    expected_crc = bridge_radio.int_from_be(payload[index + 4:index + 6])
+    tmp_name = name + ".tmp"
+
+    if total_size < 0:
+        write_error(seq, bridge_radio.CMD_FILE_BEGIN, 3)
+        return
+
+    try:
+        if file_update and file_update.get("file", None):
+            try:
+                file_update["file"].close()
+            except Exception:
+                pass
+
+        remove_if_exists(tmp_name)
+        f = open(tmp_name, "wb")
+        file_update = {
+            "name": name,
+            "tmp_name": tmp_name,
+            "total_size": total_size,
+            "expected_crc": expected_crc,
+            "written": 0,
+            "crc": 0xFFFF,
+            "file": f,
+        }
+        write_local(seq, bridge_radio.CMD_FILE_BEGIN)
+    except Exception:
+        file_update = None
+        write_error(seq, bridge_radio.CMD_FILE_BEGIN, 4)
+
+
+def write_file_update(seq, payload):
+    global file_update
+
+    if file_update is None or file_update.get("file", None) is None:
+        write_error(seq, bridge_radio.CMD_FILE_WRITE, 5)
+        return
+
+    if len(payload) < 4:
+        write_error(seq, bridge_radio.CMD_FILE_WRITE, 2)
+        return
+
+    offset = bridge_radio.int_from_be(payload[:4])
+    data = payload[4:]
+
+    if offset != file_update["written"]:
+        write_error(seq, bridge_radio.CMD_FILE_WRITE, 3)
+        return
+
+    if file_update["written"] + len(data) > file_update["total_size"]:
+        write_error(seq, bridge_radio.CMD_FILE_WRITE, 3)
+        return
+
+    try:
+        file_update["file"].write(data)
+        file_update["written"] += len(data)
+        file_update["crc"] = bridge_radio.crc16_ccitt(data, file_update["crc"])
+        write_local(seq, bridge_radio.CMD_FILE_WRITE)
+    except Exception:
+        write_error(seq, bridge_radio.CMD_FILE_WRITE, 4)
+
+
+def end_file_update(seq):
+    global file_update
+
+    if file_update is None or file_update.get("file", None) is None:
+        write_error(seq, bridge_radio.CMD_FILE_END, 5)
+        return
+
+    name = file_update["name"]
+    tmp_name = file_update["tmp_name"]
+    backup_name = name + ".bak"
+
+    try:
+        file_update["file"].close()
+        file_update["file"] = None
+
+        if file_update["written"] != file_update["total_size"]:
+            remove_if_exists(tmp_name)
+            file_update = None
+            write_error(seq, bridge_radio.CMD_FILE_END, 3)
+            return
+
+        if (file_update["crc"] & 0xFFFF) != (file_update["expected_crc"] & 0xFFFF):
+            remove_if_exists(tmp_name)
+            file_update = None
+            write_error(seq, bridge_radio.CMD_FILE_END, 6)
+            return
+
+        remove_if_exists(backup_name)
+        rename_if_exists(name, backup_name)
+        os.rename(tmp_name, name)
+        file_update = None
+        write_local(seq, bridge_radio.CMD_FILE_END)
+    except Exception:
+        try:
+            remove_if_exists(tmp_name)
+        except Exception:
+            pass
+        file_update = None
+        write_error(seq, bridge_radio.CMD_FILE_END, 4)
+
+
 def handle_local_frame(frame):
     global stat_rx_duplicate, stat_rx_wrong_network
 
@@ -314,6 +467,18 @@ def handle_local_frame(frame):
             write_local(frame.seq, bridge_radio.CMD_SCAN_CHANNELS, build_scan_payload())
         except Exception:
             write_error(frame.seq, bridge_radio.CMD_SCAN_CHANNELS, 4)
+        return
+
+    if frame.cmd == bridge_radio.CMD_FILE_BEGIN:
+        begin_file_update(frame.seq, frame.payload)
+        return
+
+    if frame.cmd == bridge_radio.CMD_FILE_WRITE:
+        write_file_update(frame.seq, frame.payload)
+        return
+
+    if frame.cmd == bridge_radio.CMD_FILE_END:
+        end_file_update(frame.seq)
         return
 
     if frame.cmd == bridge_radio.CMD_SEND_NFCP:

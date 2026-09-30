@@ -20,6 +20,9 @@ CMD_GET_STATS = 0x15
 CMD_CLEAR_STATS = 0x16
 CMD_BOOTLOADER = 0x30
 CMD_RESET = 0x31
+CMD_FILE_BEGIN = 0x32
+CMD_FILE_WRITE = 0x33
+CMD_FILE_END = 0x34
 CMD_ERROR = 0x40
 
 DEFAULT_NETWORK_ID = 0x04D2
@@ -48,8 +51,7 @@ def int_from_be(data, signed=False):
     return value
 
 
-def crc16_ccitt(data):
-    crc = 0xFFFF
+def crc16_ccitt(data, crc=0xFFFF):
     for b in data:
         if not isinstance(b, int):
             b = ord(b)

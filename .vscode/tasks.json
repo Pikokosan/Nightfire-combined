@@ -92,6 +92,24 @@
             }
         },
         {
+            "label": "Bridge update package: build",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\scripts\\build_bridge_update_package.ps1"
+            ],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
             "label": "nRF dummy: USB bootloader",
             "type": "shell",
             "command": "python",

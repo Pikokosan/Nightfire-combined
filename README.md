@@ -155,6 +155,29 @@ contents to the master SD card root, then open `Settings > OTA` on the master.
 
 The module must be disarmed and not running a script during update.
 
+## Bridge Updates From The Master
+
+The master can update its attached nRF bridge over the internal UART. This avoids
+opening the master enclosure for normal bridge firmware updates.
+
+Build the SD-card bridge update folder with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_bridge_update_package.ps1
+```
+
+Copy the generated `dist\bridge_update` folder to the SD card root so the master
+sees:
+
+```text
+/sd/bridge_update/main.py
+/sd/bridge_update/bridge_radio.py
+/sd/bridge_update/nrf_bridge_config.py
+```
+
+On the master, open `Settings` and press `BRIDGE UPD`. The master copies the
+files to the bridge, verifies each file, and resets the bridge.
+
 ## Field Module LCD
 
 The field module can drive an optional 2x16 I2C LCD. If the display is not

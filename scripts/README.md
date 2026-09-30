@@ -14,6 +14,7 @@ Run scripts from the repository root unless the script says otherwise.
 ## Build And Flash
 
 - `build_module_ota_package.ps1` - Build SD-card/module OTA packages.
+- `build_bridge_update_package.ps1` - Build the SD-card folder used by the master to update its attached bridge.
 - `build_nrf52840_micropython.ps1` - Build the custom nRF52840 MicroPython image.
 - `flash_nrf52840_uf2.ps1` - Copy a UF2 image to a mounted bootloader drive.
 
