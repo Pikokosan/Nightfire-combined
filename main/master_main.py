@@ -35,7 +35,8 @@ RANGE_TEST_HISTORY_LEN = 32
 ACK_RETRY_ATTEMPTS = 2
 ACK_RETRY_DELAY_MS = 100
 OTA_UPDATE_CHUNK_SIZE = 160
-SCRIPT_LOAD_CHUNK_ENTRIES = 4
+SCRIPT_LOAD_CHUNK_ENTRIES = 3
+SCRIPT_LOAD_TIMEOUT_MS = 3000
 SCRIPT_START_DELAY_MS = 2000
 SCRIPT_START_BROADCAST_REPEATS = 3
 SCRIPT_TIME_SYNC_REPEATS = 3
@@ -1367,12 +1368,12 @@ def script_clear_for_uid(uid_int, script_id, timeout_ms=SPEED_TEST_TIMEOUT_MS):
     return ok
 
 
-def script_load_for_uid(uid_int, script_id, entries, timeout_ms=SPEED_TEST_TIMEOUT_MS):
+def script_load_for_uid(uid_int, script_id, entries, timeout_ms=SCRIPT_LOAD_TIMEOUT_MS):
     ok, _code = script_load_status_for_uid(uid_int, script_id, entries, timeout_ms)
     return ok
 
 
-def script_load_status_for_uid(uid_int, script_id, entries, timeout_ms=SPEED_TEST_TIMEOUT_MS):
+def script_load_status_for_uid(uid_int, script_id, entries, timeout_ms=SCRIPT_LOAD_TIMEOUT_MS):
     chunk_index = 0
     offset = 0
 
@@ -1758,6 +1759,31 @@ class NFCPGui:
 
         return label
 
+    def bound_label(self, label, w, h=None, text_align=None):
+        try:
+            if h is None:
+                label.set_width(w)
+            else:
+                label.set_size(w, h)
+        except Exception:
+            pass
+
+        try:
+            label.set_long_mode(lv.label.LONG_MODE.CLIP)
+        except Exception:
+            try:
+                label.set_long_mode(lv.LABEL_LONG.CLIP)
+            except Exception:
+                pass
+
+        if text_align is not None:
+            try:
+                label.set_style_text_align(text_align, 0)
+            except Exception:
+                pass
+
+        return label
+
     def set_control_enabled(self, obj, enabled):
         try:
             if enabled:
@@ -1936,6 +1962,20 @@ class NFCPGui:
         except:
             return "RSSI: --"
 
+    def format_rssi_value(self, module):
+        try:
+            rssi = module.get("radio_rssi", None)
+        except:
+            rssi = None
+
+        if rssi is None:
+            return "--"
+
+        try:
+            return "%ddBm" % int(rssi)
+        except:
+            return "--"
+
     def format_snr(self, module):
         try:
             snr = module.get("radio_snr", None)
@@ -1980,6 +2020,104 @@ class NFCPGui:
             return "%s %s" % (text, pack_type)
 
         return text
+
+    def get_battery_cell_count(self, module):
+        pack_type = str(module.get("battery_pack_type", "") or "").strip().upper()
+
+        if pack_type.endswith("S"):
+            try:
+                cells = int(pack_type[:-1])
+                if cells > 0:
+                    return cells
+            except:
+                pass
+
+        return None
+
+    def get_battery_percent(self, module):
+        try:
+            mv = int(module.get("battery_mv", 0))
+        except:
+            return None
+
+        cells = self.get_battery_cell_count(module)
+        if not cells or mv <= 0:
+            return None
+
+        cell_mv = mv // cells
+        points = (
+            (4200, 100),
+            (4100, 90),
+            (4000, 80),
+            (3920, 70),
+            (3850, 60),
+            (3800, 50),
+            (3750, 40),
+            (3700, 30),
+            (3600, 20),
+            (3500, 10),
+            (3300, 0),
+        )
+
+        if cell_mv >= points[0][0]:
+            return 100
+
+        for i in range(len(points) - 1):
+            high_mv, high_pct = points[i]
+            low_mv, low_pct = points[i + 1]
+
+            if cell_mv >= low_mv:
+                span_mv = high_mv - low_mv
+                span_pct = high_pct - low_pct
+                return low_pct + ((cell_mv - low_mv) * span_pct) // span_mv
+
+        return 0
+
+    def get_battery_color(self, percent):
+        if percent is None:
+            return lv.color_hex(0x606060)
+        if percent <= 20:
+            return lv.color_hex(0xB02020)
+        if percent <= 50:
+            return lv.color_hex(0xC6A000)
+        return lv.color_hex(0x1F9A45)
+
+    def make_battery_icon(self, parent, module, x, y):
+        percent = self.get_battery_percent(module)
+
+        shell = lv.obj(parent)
+        shell.set_pos(x, y)
+        shell.set_size(30, 14)
+        shell.set_style_bg_color(lv.color_hex(0x101010), 0)
+        shell.set_style_border_color(lv.color_hex(0xFFFFFF), 0)
+        shell.set_style_border_width(1, 0)
+        shell.set_style_radius(2, 0)
+        shell.set_style_pad_all(0, 0)
+
+        cap = lv.obj(parent)
+        cap.set_pos(x + 30, y + 4)
+        cap.set_size(4, 6)
+        cap.set_style_bg_color(lv.color_hex(0xFFFFFF), 0)
+        cap.set_style_border_width(0, 0)
+        cap.set_style_radius(1, 0)
+        cap.set_style_pad_all(0, 0)
+
+        if percent is None:
+            return shell
+
+        fill_w = (26 * max(0, min(100, percent))) // 100
+        if fill_w <= 0:
+            return shell
+
+        fill = lv.obj(shell)
+        fill.set_pos(2, 2)
+        fill.set_size(fill_w, 10)
+        fill.set_style_bg_color(self.get_battery_color(percent), 0)
+        fill.set_style_border_width(0, 0)
+        fill.set_style_radius(1, 0)
+        fill.set_style_pad_all(0, 0)
+
+        return shell
 
     def format_selected_battery(self):
         if not self.selected_module:
@@ -2032,20 +2170,20 @@ class NFCPGui:
 
     def format_module_continuity_summary(self, module):
         cue_count = self.get_module_cue_count(module)
-        continuity = module.get("continuity", None)
 
-        if not continuity:
-            return "--/%d" % cue_count
+        if not self.module_has_continuity_data(module):
+            return str(cue_count)
 
         try:
             good = 0
-            for cue_info in continuity.get("cues", []):
-                if bool(cue_info.get("ok")):
+            continuity = self.get_module_continuity_list(module)
+            for cue_ok in continuity:
+                if bool(cue_ok):
                     good += 1
 
             return "%d/%d" % (good, cue_count)
         except:
-            return "--/%d" % cue_count
+            return str(cue_count)
 
     def set_modules_page_for_uid(self, uid_text):
         if not uid_text:
@@ -2821,7 +2959,12 @@ class NFCPGui:
                 self.set_status("Script upload clear failed: " + reason)
                 continue
 
-            load_ok, load_code = nfcp.script_load_status_for_uid(uid, script_id, entries)
+            load_ok, load_code = nfcp.script_load_status_for_uid(
+                uid,
+                script_id,
+                entries,
+                SCRIPT_LOAD_TIMEOUT_MS
+            )
             if not load_ok:
                 reason = ack_code_text(load_code)
                 self.add_script_fire_upload_result(
@@ -5390,15 +5533,8 @@ class NFCPGui:
             y = y0 + row * (h + gap_y)
 
             channel_text = self.group_to_int_display(module.get("group_id", "--"))
-            cue_count = module.get("cue_count", 16)
+            cue_text = self.format_module_continuity_summary(module)
             status_text = " LOST" if self.module_is_lost(module) else ""
-
-            text = "Ch %s  Cues:%s%s\nUID:%s" % (
-                channel_text,
-                cue_count,
-                status_text,
-                self.format_uid(uid_text)
-            )
 
             btn = lv.button(module_area)
             btn.set_pos(x, y)
@@ -5409,14 +5545,27 @@ class NFCPGui:
                 0
             )
 
-            lbl = self.make_label(btn, text)
-            lbl.align(lv.ALIGN.TOP_LEFT, 8, 8)
+            self.make_battery_icon(btn, module, w - 42, 8)
 
-            rssi_lbl = self.make_label(btn, self.format_rssi(module))
+            group_lbl = self.make_label(
+                btn,
+                "Group %s%s" % (channel_text, status_text),
+                8,
+                7
+            )
+            self.bound_label(group_lbl, w - 58, 18)
+
+            cue_lbl = self.make_label(btn, "Cues:%s" % cue_text, 8, h - 20)
+            self.bound_label(cue_lbl, 96, 18)
+
+            rssi_lbl = self.make_label(btn, self.format_rssi_value(module))
+            rssi_align = None
+            try:
+                rssi_align = lv.TEXT_ALIGN.RIGHT
+            except Exception:
+                pass
+            self.bound_label(rssi_lbl, 88, 18, rssi_align)
             rssi_lbl.align(lv.ALIGN.BOTTOM_RIGHT, -8, -6)
-
-            batt_lbl = self.make_label(btn, self.format_battery_value(module))
-            batt_lbl.align(lv.ALIGN.BOTTOM_LEFT, 8, -6)
 
             btn.add_event_cb(
                 self.make_module_cb(module),
@@ -5618,7 +5767,7 @@ class NFCPGui:
 
         self.make_button(
             scr,
-            "CHANNEL",
+            "GROUP",
             160,
             410,
             120,
@@ -5652,7 +5801,7 @@ class NFCPGui:
 
         self.module_label = self.make_label(
             scr,
-            "UID: %s   Channel: %s   Cues: %s" % (
+            "UID: %s   Group: %s   Cues: %s" % (
                 self.format_uid(uid_text),
                 channel_id,
                 cue_count
@@ -6054,7 +6203,7 @@ class NFCPGui:
         self.set_status("Continuity updated")
 
     # -------------------------
-    # Change Channel
+    # Change Group
     # -------------------------
 
     def show_change_group(self, event=None):
@@ -6062,7 +6211,7 @@ class NFCPGui:
             self.set_status("No module selected")
             return
 
-        scr = self.new_screen("Change Channel", "change_channel")
+        scr = self.new_screen("Change Group", "change_group")
 
         group_text = self.selected_module.get("group_id", "0x0001")
 
@@ -6075,7 +6224,7 @@ class NFCPGui:
         self.make_button(scr, "SAVE", 650, 400, 120, 55, self.save_group_change)
 
         channel_title = lv.label(scr)
-        channel_title.set_text("Channel")
+        channel_title.set_text("Group")
         channel_title.align(lv.ALIGN.TOP_MID, 0, 70)
 
         self.group_edit_box = lv.obj(scr)
@@ -6181,7 +6330,7 @@ class NFCPGui:
             return
 
         if self.group_edit_value < 0 or self.group_edit_value > 0xFFFF:
-            self.set_status("Invalid channel")
+            self.set_status("Invalid group")
             return
 
         uid_text = self.selected_module.get("unique_id", "0x00000000")
@@ -6197,8 +6346,8 @@ class NFCPGui:
         try:
             nfcp.set_group(uid, new_group)
         except Exception as e:
-            print("Set channel failed:", e)
-            self.set_status("Set channel failed")
+            print("Set group failed:", e)
+            self.set_status("Set group failed")
             return
 
         new_group_text = "0x%04X" % new_group
@@ -6230,9 +6379,9 @@ class NFCPGui:
             self.update_extra_connected_cues()
 
         except Exception as e:
-            print("DB update after set channel failed:", e)
+            print("DB update after set group failed:", e)
 
-        self.set_status("Channel changed to %d" % new_group)
+        self.set_status("Group changed to %d" % new_group)
 
         self.show_module_continuity()
 
