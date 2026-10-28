@@ -24,6 +24,10 @@ except Exception as e:
 DEFAULT_CUE_COUNT = 16
 MAX_CUE_COUNT = 64
 MODULE_CONTINUITY_AUTO_CHECK_MS = 4000
+CONTINUITY_TIMEOUT_MS = 2000
+RESISTANCE_SHORT_MAX_DECI_OHM = 5
+CALIBRATION_BANK_SIZE = 8
+CALIBRATION_TESTER_DECI_OHMS = (20, 47, 27, 9, 24, 102, 0, None)
 DISCOVER_IDLE_TIMEOUT_MS = 900
 DISCOVER_MIN_SCAN_MS = 1400
 DISCOVER_MAX_SCAN_MS = 10000
@@ -37,6 +41,7 @@ ACK_RETRY_DELAY_MS = 100
 OTA_UPDATE_CHUNK_SIZE = 160
 SCRIPT_LOAD_CHUNK_ENTRIES = 3
 SCRIPT_LOAD_TIMEOUT_MS = 3000
+SCRIPT_LOAD_ATTEMPTS = 2
 SCRIPT_START_DELAY_MS = 2000
 SCRIPT_START_BROADCAST_REPEATS = 3
 SCRIPT_TIME_SYNC_REPEATS = 3
@@ -150,16 +155,6 @@ def get_script_clock_font():
         print("Script timer font load failed:", e)
 
     return script_clock_font
-
-
-def delete_device_db_on_startup():
-    try:
-        os.remove("nfcp_devices.json")
-        print("Deleted nfcp_devices.json on startup")
-    except OSError:
-        print("No nfcp_devices.json to delete")
-    except Exception as e:
-        print("Failed to delete nfcp_devices.json:", e)
 
 
 def next_radio_seq():
@@ -698,6 +693,59 @@ def parse_continuity_rsp(data, cue_count):
     return [False] * cue_count
 
 
+def parse_resistance_rsp(data, cue_count_hint=0):
+    if len(data) < 4 or data[0] != nfcp.RESISTANCE_PAYLOAD_VERSION:
+        return None
+
+    unit_code = data[1]
+    cue_count = int(data[2])
+    status = int(data[3])
+    if cue_count < 1 or cue_count > MAX_CUE_COUNT:
+        return None
+    if cue_count_hint and cue_count != int(cue_count_hint):
+        return None
+    if len(data) != 4 + cue_count * 2:
+        return None
+
+    if unit_code == nfcp.RESISTANCE_UNIT_DECI_OHM:
+        unit = "deci_ohm"
+    elif unit_code == nfcp.RESISTANCE_UNIT_ADC_MV:
+        unit = "adc_mv"
+    else:
+        return None
+
+    values = []
+    for index in range(cue_count):
+        offset = 4 + index * 2
+        raw = int.from_bytes(data[offset:offset + 2], "big")
+        if raw in (nfcp.RESISTANCE_VALUE_OPEN, nfcp.RESISTANCE_VALUE_INVALID):
+            values.append(None)
+        else:
+            values.append(raw)
+
+    return {
+        "version": int(data[0]),
+        "unit": unit,
+        "status": status,
+        "values": values,
+    }
+
+
+def continuity_from_resistance(result, cue_count):
+    values = (result or {}).get("values", []) or []
+    calibrated = (result or {}).get("unit", "") == "deci_ohm"
+    continuity = []
+
+    for index in range(int(cue_count)):
+        value = values[index] if index < len(values) else None
+        connected = value is not None
+        if connected and calibrated:
+            connected = int(value) > RESISTANCE_SHORT_MAX_DECI_OHM
+        continuity.append(bool(connected))
+
+    return continuity
+
+
 def read_text_field(data, index):
     if index >= len(data):
         return "", index
@@ -942,24 +990,38 @@ def get_last_discovery_info_count():
     return _last_discovery_info_count
 
 
-def request_continuity_for_uid(uid_int, cue_count_hint=16, timeout_ms=300):
+def request_resistance_for_uid(
+    uid_int,
+    cue_count_hint=0,
+    timeout_ms=CONTINUITY_TIMEOUT_MS,
+    raw_adc=False,
+):
     drain_uart()
-    radio_write_nfcp(nfcp_tx.build_continuity_request(uid_int))
+    radio_write_nfcp(nfcp_tx.build_resistance_request(uid_int, raw_adc))
 
     deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
     while time.ticks_diff(deadline, time.ticks_ms()) > 0:
         packets = poll_responses()
         for pkt in packets:
-            if pkt["cmd"] != nfcp.CMD_CONTINUITY_RSP:
+            if pkt["cmd"] != nfcp.CMD_RESISTANCE_RSP:
                 continue
             if (pkt["src_unique"] & 0xFFFFFFFF) != (uid_int & 0xFFFFFFFF):
                 continue
             update_radio_link_from_packet(pkt)
-            return parse_continuity_rsp(pkt["data"], cue_count_hint)
+            return parse_resistance_rsp(pkt["data"], cue_count_hint)
 
         time.sleep_ms(2)
 
     return None
+
+
+def request_set_resistance_calibration(uid_int, bank_index, points, timeout_ms=1600):
+    return send_with_ack(
+        uid_int,
+        nfcp.CMD_SET_RESISTANCE_CAL,
+        lambda: nfcp_tx.build_set_resistance_calibration(uid_int, bank_index, points),
+        timeout_ms,
+    )
 
 
 def request_ping_for_uid(uid_int, timeout_ms=SPEED_TEST_TIMEOUT_MS):
@@ -1046,7 +1108,7 @@ def info_scan(timeout_ms=1000):
     return results
 
 
-def continuity_scan(timeout_ms=300):
+def continuity_scan(timeout_ms=CONTINUITY_TIMEOUT_MS):
     db = load_device_db()
     changed = False
     results = []
@@ -1063,16 +1125,19 @@ def continuity_scan(timeout_ms=300):
         except:
             cue_count = DEFAULT_CUE_COUNT
 
-        ok = request_continuity_for_uid(uid, cue_count, timeout_ms)
-        if ok is None:
+        resistance = request_resistance_for_uid(uid, cue_count, timeout_ms)
+        if resistance is None:
             module_mark_lost(dev)
             results.append({
                 "unique_id": uid_text,
                 "cue_count": cue_count,
-                "continuity": None
+                "continuity": None,
+                "resistance": None,
             })
             changed = True
             continue
+
+        ok = continuity_from_resistance(resistance, cue_count)
 
         cues = []
         for i in range(cue_count):
@@ -1083,13 +1148,16 @@ def continuity_scan(timeout_ms=300):
 
         dev["continuity"] = {"cues": cues}
         dev["continuity_last_epoch"] = time.time()
+        dev["resistance"] = resistance
+        dev["resistance_last_epoch"] = time.time()
         module_mark_online(dev)
         module_apply_radio_link(dev, uid_text)
 
         results.append({
             "unique_id": uid_text,
             "cue_count": cue_count,
-            "continuity": ok
+            "continuity": ok,
+            "resistance": resistance,
         })
         changed = True
 
@@ -1141,6 +1209,12 @@ def arm():
 
 def disarm():
     radio_write_nfcp(nfcp_tx.build_disarm_broadcast())
+
+
+def disarm_repeated(repeats=3, gap_ms=40):
+    for _ in range(repeats):
+        disarm()
+        time.sleep_ms(gap_ms)
 
 
 def keepalive():
@@ -1468,12 +1542,14 @@ nfcp.clear_device_db = clear_device_db
 nfcp.index_db_by_unique = index_db_by_unique
 nfcp.parse_discover_rsp = parse_discover_rsp
 nfcp.parse_continuity_rsp = parse_continuity_rsp
+nfcp.parse_resistance_rsp = parse_resistance_rsp
 nfcp.poll_responses = poll_responses
 nfcp.get_last_packets = get_last_packets
 nfcp.get_last_radio_link = get_last_radio_link
 nfcp.discover = discover
 nfcp.get_last_discovery_info_count = get_last_discovery_info_count
-nfcp.request_continuity_for_uid = request_continuity_for_uid
+nfcp.request_resistance_for_uid = request_resistance_for_uid
+nfcp.request_set_resistance_calibration = request_set_resistance_calibration
 nfcp.continuity_scan = continuity_scan
 nfcp.request_ping_for_uid = request_ping_for_uid
 nfcp.speed_test_scan = speed_test_scan
@@ -1481,6 +1557,7 @@ nfcp.request_info_for_uid = request_info_for_uid
 nfcp.info_scan = info_scan
 nfcp.arm = arm
 nfcp.disarm = disarm
+nfcp.disarm_repeated = disarm_repeated
 nfcp.keepalive = keepalive
 nfcp.arm_for_uid = arm_for_uid
 nfcp.disarm_for_uid = disarm_for_uid
@@ -1517,6 +1594,7 @@ class NFCPGui:
         self.clear_loaded_script()
 
         self.continuity = [False] * DEFAULT_CUE_COUNT
+        self.show_resistance_values = False
         self.armed = False
         self.current_screen = None
         self.current_view = "main"
@@ -1569,6 +1647,8 @@ class NFCPGui:
         self.group_edit_text = ""
         self.channel_edit_value = self.radio_channel
         self.channel_edit_text = str(self.radio_channel)
+        self.calibration_bank_index = 0
+        self.calibration_review_result = None
 
         self.trellis, self.trellis_error = init_trellis_boot_check()
         if self.trellis_error:
@@ -1581,6 +1661,12 @@ class NFCPGui:
             print(self.radio_error)
             self.show_radio_error()
             return
+
+        try:
+            nfcp.disarm_repeated()
+            print("Boot disarm broadcast sent")
+        except Exception as e:
+            print("Boot disarm broadcast failed:", e)
 
         self.load_modules_from_db()
         self.show_main_menu()
@@ -2087,7 +2173,7 @@ class NFCPGui:
 
         shell = lv.obj(parent)
         shell.set_pos(x, y)
-        shell.set_size(30, 14)
+        shell.set_size(26, 13)
         shell.set_style_bg_color(lv.color_hex(0x101010), 0)
         shell.set_style_border_color(lv.color_hex(0xFFFFFF), 0)
         shell.set_style_border_width(1, 0)
@@ -2095,8 +2181,8 @@ class NFCPGui:
         shell.set_style_pad_all(0, 0)
 
         cap = lv.obj(parent)
-        cap.set_pos(x + 30, y + 4)
-        cap.set_size(4, 6)
+        cap.set_pos(x + 26, y + 4)
+        cap.set_size(3, 5)
         cap.set_style_bg_color(lv.color_hex(0xFFFFFF), 0)
         cap.set_style_border_width(0, 0)
         cap.set_style_radius(1, 0)
@@ -2105,13 +2191,13 @@ class NFCPGui:
         if percent is None:
             return shell
 
-        fill_w = (26 * max(0, min(100, percent))) // 100
+        fill_w = (22 * max(0, min(100, percent))) // 100
         if fill_w <= 0:
             return shell
 
         fill = lv.obj(shell)
         fill.set_pos(2, 2)
-        fill.set_size(fill_w, 10)
+        fill.set_size(fill_w, 9)
         fill.set_style_bg_color(self.get_battery_color(percent), 0)
         fill.set_style_border_width(0, 0)
         fill.set_style_radius(1, 0)
@@ -2121,9 +2207,16 @@ class NFCPGui:
 
     def format_selected_battery(self):
         if not self.selected_module:
-            return "Batt: --"
+            return "Battery: --"
 
-        return self.format_battery(self.selected_module)
+        try:
+            battery_mv = int(self.selected_module.get("battery_mv", 0))
+            if battery_mv > 0:
+                return "Battery: %.2fV" % (battery_mv / 1000.0)
+        except:
+            pass
+
+        return "Battery: --"
 
     def format_selected_versions(self):
         if not self.selected_module:
@@ -2499,6 +2592,13 @@ class NFCPGui:
         self.script_clock_label.align(lv.ALIGN.CENTER, -70, -40)
 
     def set_script_fire_status_label(self, text):
+        if hasattr(self, "loading_label") and self.current_view == "loading":
+            try:
+                self.loading_label.set_text(text)
+                self.loading_label.align(lv.ALIGN.CENTER, 0, -20)
+            except Exception:
+                pass
+
         if not hasattr(self, "script_status_label"):
             return
 
@@ -2565,12 +2665,13 @@ class NFCPGui:
         except:
             return str(uid)
 
-    def add_script_fire_upload_result(self, uid, entries, ok, reason):
+    def add_script_fire_upload_result(self, uid, entries, ok, reason, attempts=1):
         self.script_fire_upload_results.append({
             "uid": uid,
             "entries": len(entries),
             "ok": bool(ok),
-            "reason": reason
+            "reason": reason,
+            "attempts": attempts
         })
 
     def format_script_upload_summary(self):
@@ -2580,6 +2681,7 @@ class NFCPGui:
         ok_count = 0
         fail_count = 0
         fail_uid = None
+        fail_reason = ""
 
         for item in self.script_fire_upload_results:
             if item.get("ok", False):
@@ -2588,12 +2690,14 @@ class NFCPGui:
                 fail_count += 1
                 if fail_uid is None:
                     fail_uid = item.get("uid", 0)
+                    fail_reason = str(item.get("reason", ""))
 
         if fail_count:
-            return "Upload: %d loaded, %d failed   First: %08X" % (
+            return "Upload: %d loaded, %d failed   First: %08X %s" % (
                 ok_count,
                 fail_count,
-                fail_uid & 0xFFFFFFFF
+                fail_uid & 0xFFFFFFFF,
+                fail_reason[:12]
             )
 
         return "Upload: %d module(s) loaded" % ok_count
@@ -2896,6 +3000,96 @@ class NFCPGui:
 
         return False
 
+    def get_script_upload_counts(self):
+        loaded = 0
+        failed = 0
+
+        for item in self.script_fire_upload_results:
+            if item.get("ok", False):
+                loaded += 1
+            else:
+                failed += 1
+
+        return loaded, failed
+
+    def format_script_upload_progress(self, header):
+        loaded, failed = self.get_script_upload_counts()
+        return "%s\nLoaded:%d  Failed:%d" % (header, loaded, failed)
+
+    def set_script_upload_progress(self, header):
+        text = self.format_script_upload_progress(header)
+        self.set_script_fire_status_label(text)
+        self.set_status(header.replace("\n", " "))
+        self.flush_ui()
+
+    def upload_script_to_module_once(self, uid, script_id, entries, attempt, total_attempts):
+        uid_text = self.format_uid_text(uid)
+
+        if total_attempts > 1:
+            attempt_text = " try %d/%d" % (attempt, total_attempts)
+        else:
+            attempt_text = ""
+
+        self.set_script_upload_progress(
+            "Loading %s%s\nentries=%d" %
+            (
+                uid_text,
+                attempt_text,
+                len(entries)
+            )
+        )
+
+        clear_ok, clear_code = nfcp.script_clear_status_for_uid(
+            uid,
+            script_id,
+            SCRIPT_LOAD_TIMEOUT_MS
+        )
+        if not clear_ok:
+            return False, "clear " + ack_code_text(clear_code)
+
+        load_ok, load_code = nfcp.script_load_status_for_uid(
+            uid,
+            script_id,
+            entries,
+            SCRIPT_LOAD_TIMEOUT_MS
+        )
+        if not load_ok:
+            return False, "load " + ack_code_text(load_code)
+
+        if attempt > 1:
+            return True, "loaded retry %d" % attempt
+
+        return True, "loaded"
+
+    def upload_script_to_module_with_retry(self, uid, script_id, entries):
+        last_reason = "not tried"
+
+        for attempt in range(1, SCRIPT_LOAD_ATTEMPTS + 1):
+            ok, reason = self.upload_script_to_module_once(
+                uid,
+                script_id,
+                entries,
+                attempt,
+                SCRIPT_LOAD_ATTEMPTS
+            )
+
+            if ok:
+                return True, reason, attempt
+
+            last_reason = reason
+
+            if attempt < SCRIPT_LOAD_ATTEMPTS:
+                self.set_script_upload_progress(
+                    "Retrying %s\n%s" %
+                    (
+                        self.format_uid_text(uid),
+                        reason
+                    )
+                )
+                time.sleep_ms(150)
+
+        return False, last_reason, SCRIPT_LOAD_ATTEMPTS
+
     def upload_script_to_modules(self):
         uid_entries = self.build_module_script_entries()
         self.script_fire_upload_results = []
@@ -2930,60 +3124,43 @@ class NFCPGui:
         for uid, entries in uid_entries.items():
             loaded += 1
             uid_text = self.format_uid_text(uid)
-            upload_text = "Upload %d/%d %s entries=%d" % (
+            upload_text = "Module %d/%d %s" % (
                 loaded,
                 total_modules,
-                uid_text,
-                len(entries)
+                uid_text
             )
-            self.set_script_fire_status_label(upload_text)
-            self.set_status(upload_text)
-            self.flush_ui()
 
-            clear_ok, clear_code = nfcp.script_clear_status_for_uid(uid, script_id)
-            if not clear_ok:
-                reason = ack_code_text(clear_code)
-                self.add_script_fire_upload_result(
-                    uid,
-                    entries,
-                    False,
-                    "clear " + reason
-                )
-                self.set_script_fire_status_label(
-                    "Upload clear failed %s: %s" %
-                    (
-                        uid_text,
-                        reason
-                    )
-                )
-                self.set_status("Script upload clear failed: " + reason)
-                continue
-
-            load_ok, load_code = nfcp.script_load_status_for_uid(
+            ok, reason, attempts = self.upload_script_to_module_with_retry(
                 uid,
                 script_id,
-                entries,
-                SCRIPT_LOAD_TIMEOUT_MS
+                entries
             )
-            if not load_ok:
-                reason = ack_code_text(load_code)
-                self.add_script_fire_upload_result(
-                    uid,
-                    entries,
-                    False,
-                    "load " + reason
-                )
-                self.set_script_fire_status_label(
-                    "Upload failed %s: %s" %
+
+            self.add_script_fire_upload_result(
+                uid,
+                entries,
+                ok,
+                reason,
+                attempts
+            )
+
+            if not ok:
+                self.set_script_upload_progress(
+                    "%s failed\n%s" %
                     (
-                        uid_text,
+                        upload_text,
                         reason
                     )
                 )
-                self.set_status("Script upload failed: " + reason)
                 continue
 
-            self.add_script_fire_upload_result(uid, entries, True, "loaded")
+            self.set_script_upload_progress(
+                "%s loaded\nentries=%d" %
+                (
+                    upload_text,
+                    len(entries)
+                )
+            )
 
         self.script_fire_uploaded_id = script_id
         self.script_fire_uploaded_uids = [
@@ -3416,6 +3593,8 @@ class NFCPGui:
 
         self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_main_menu)
         self.make_button(scr, "REFRESH", 180, 400, 160, 55, self.show_load_script)
+        unload_btn = self.make_button(scr, "UNLOAD SCRIPT", 360, 400, 210, 55, self.unload_script)
+        self.set_control_enabled(unload_btn, bool(self.selected_script))
 
         title = lv.label(scr)
         title.set_text("Scripts on SD Card")
@@ -3510,6 +3689,36 @@ class NFCPGui:
         print("Selected script:", filename)
         self.update_script_fire_button()
         self.show_view_script()
+
+    def unload_script(self, event=None):
+        script_id = self.script_fire_uploaded_id
+        uploaded_uids = list(self.script_fire_uploaded_uids)
+
+        try:
+            self.stop_module_auto_script("Script unload stop failed")
+        except Exception as e:
+            print("Script unload stop failed:", e)
+
+        if script_id is not None and uploaded_uids:
+            self.set_status("Unloading script from modules...")
+            self.flush_ui()
+
+            for uid in uploaded_uids:
+                try:
+                    nfcp.script_clear_status_for_uid(
+                        uid,
+                        script_id,
+                        SCRIPT_LOAD_TIMEOUT_MS
+                    )
+                except Exception as e:
+                    print("Script unload clear failed:", e)
+
+        self.selected_script = None
+        self.stop_script_fire_timer()
+        self.clear_loaded_script()
+        self.update_script_fire_button()
+        self.show_load_script()
+        self.set_status("Script unloaded")
 
     def is_cobra_script_file(self, filename):
         path = "/sd/" + filename
@@ -5539,13 +5748,18 @@ class NFCPGui:
             btn = lv.button(module_area)
             btn.set_pos(x, y)
             btn.set_size(w, h)
+            btn.set_style_pad_all(0, 0)
+            try:
+                btn.set_style_pad_gap(0, 0)
+            except Exception:
+                pass
 
             btn.set_style_bg_color(
                 self.get_module_button_color(module),
                 0
             )
 
-            self.make_battery_icon(btn, module, w - 42, 8)
+            self.make_battery_icon(btn, module, w - 40, 8)
 
             group_lbl = self.make_label(
                 btn,
@@ -5553,19 +5767,18 @@ class NFCPGui:
                 8,
                 7
             )
-            self.bound_label(group_lbl, w - 58, 18)
+            self.bound_label(group_lbl, w - 54, 18)
 
-            cue_lbl = self.make_label(btn, "Cues:%s" % cue_text, 8, h - 20)
+            cue_lbl = self.make_label(btn, "Cues:%s" % cue_text, 8, h - 27)
             self.bound_label(cue_lbl, 96, 18)
 
-            rssi_lbl = self.make_label(btn, self.format_rssi_value(module))
+            rssi_lbl = self.make_label(btn, self.format_rssi_value(module), w - 96, h - 27)
             rssi_align = None
             try:
                 rssi_align = lv.TEXT_ALIGN.RIGHT
             except Exception:
                 pass
             self.bound_label(rssi_lbl, 88, 18, rssi_align)
-            rssi_lbl.align(lv.ALIGN.BOTTOM_RIGHT, -8, -6)
 
             btn.add_event_cb(
                 self.make_module_cb(module),
@@ -5610,7 +5823,7 @@ class NFCPGui:
             pass
 
     def refresh_modules_with_continuity(self, event=None):
-        self.show_loading_screen("Refreshing modules...\nChecking continuity...")
+        self.show_loading_screen("Refreshing modules...\nReading cue resistance...")
 
         if not self.ensure_bridge_channel():
             self.show_modules_menu()
@@ -5622,11 +5835,11 @@ class NFCPGui:
             if not results and self.modules:
                 self.show_loading_screen("Refreshing modules...\nResetting bridge...")
                 if self.recover_bridge_radio():
-                    self.show_loading_screen("Refreshing modules...\nChecking continuity...")
+                    self.show_loading_screen("Refreshing modules...\nReading cue resistance...")
                     results = nfcp.continuity_scan()
         except Exception as e:
-            print("Continuity scan failed:", e)
-            self.set_status("Continuity scan failed")
+            print("Resistance scan failed:", e)
+            self.set_status("Resistance scan failed")
             results = []
 
         try:
@@ -5653,7 +5866,7 @@ class NFCPGui:
         count = len(results) if results else 0
         speed_count = len(speed_results) if speed_results else 0
         info_count = len(info_results) if info_results else 0
-        print("Continuity checked:", count)
+        print("Resistance checked:", count)
         print("Speed tested:", speed_count)
         print("Versions checked:", info_count)
 
@@ -5707,7 +5920,7 @@ class NFCPGui:
                         self.modules = nfcp.discover()
                         self.load_modules_from_db()
 
-                self.show_loading_screen("Discovering modules...\nChecking continuity...")
+                self.show_loading_screen("Discovering modules...\nReading cue resistance...")
                 cont_results = nfcp.continuity_scan()
                 cont_count = len(cont_results) if cont_results else 0
 
@@ -5750,6 +5963,7 @@ class NFCPGui:
     def select_module(self, module):
         self.selected_module = module
         self.last_selected_module_uid = module.get("unique_id", None)
+        self.show_resistance_values = False
 
         self.continuity = self.get_module_saved_continuity(module)
         self.last_module_continuity_auto_ms = time.ticks_ms()
@@ -5778,21 +5992,21 @@ class NFCPGui:
         self.make_button(
             scr,
             "CHECK",
-            600,
+            440,
             410,
-            150,
+            310,
             50,
             self.request_selected_continuity
         )
 
         self.make_button(
             scr,
-            "UID AUTO",
+            "ABOUT",
             300,
             410,
             120,
             50,
-            self.reset_selected_uid_to_auto
+            self.show_module_about
         )
 
         uid_text = self.selected_module.get("unique_id", "0x00000000")
@@ -5817,21 +6031,255 @@ class NFCPGui:
             55
         )
 
-        self.speed_label = self.make_label(scr, self.format_selected_speed_test(), 300, 82)
-
         self.radio_link_label = self.make_label(scr, self.format_selected_radio_link(), 25, 82)
 
-        self.battery_label = self.make_label(scr, self.format_selected_battery(), 430, 82)
-
-        self.version_label = self.make_label(scr, self.format_selected_versions(), 25, 102)
-
-        self.identity_label = self.make_label(scr, self.format_selected_identity(), 430, 102)
+        self.battery_label = self.make_label(scr, self.format_selected_battery(), 315, 82)
 
         self.build_fixed_cue_grid(scr)
 
-        self.summary = self.make_label(scr, "Continuity: 0 / %d" % cue_count, 600, 385)
+        self.summary = self.make_label(scr, "Continuity: 0/%d" % cue_count, 625, 82)
 
         self.refresh_cues()
+
+    def show_module_about(self, event=None):
+        if not self.selected_module:
+            self.set_status("No module selected")
+            return
+
+        scr = self.new_screen("Module About", "module_about")
+        self.make_button(scr, "BACK", 20, 400, 140, 55, self.show_module_continuity)
+        self.make_button(scr, "UID AUTO", 180, 400, 160, 55, self.reset_selected_uid_to_auto)
+        self.make_button(scr, "CALIBRATE", 360, 400, 180, 55, self.show_calibration_confirm)
+
+        module = self.selected_module
+        uid_text = module.get("unique_id", "0x00000000")
+        hardware_uid = module.get("hardware_unique_id", "") or "--"
+        configured_uid = module.get("configured_unique_id", "") or "--"
+        if configured_uid in ("0x00000000", "0"):
+            configured_uid = "auto"
+
+        app_name = module.get("app_name", "") or "--"
+        app_version = module.get("app_version", "") or "--"
+        radio_version = module.get("radio_firmware_version", "") or "--"
+        script_status = module.get("script_status", "") or "--"
+        pack_type = module.get("battery_pack_type", "") or "--"
+        device_type = module.get("device_type", "--")
+        proto_ver = module.get("proto_ver", "--")
+
+        self.make_label(scr, "DEVICE", 40, 65)
+        self.make_label(scr, "UID: %s" % self.format_uid(uid_text), 40, 92)
+        self.make_label(scr, "Hardware UID: %s" % hardware_uid, 40, 122)
+        self.make_label(scr, "Configured UID: %s" % configured_uid, 40, 152)
+        self.make_label(
+            scr,
+            "Group: %s   Cues: %d" % (
+                self.group_to_int_display(module.get("group_id", "--")),
+                self.get_selected_module_cue_count()
+            ),
+            40,
+            182
+        )
+        self.make_label(scr, "%s   Pack: %s" % (self.format_selected_battery(), pack_type), 40, 212)
+        self.make_label(scr, "Type: %s   Protocol: %s" % (device_type, proto_ver), 40, 242)
+
+        self.make_label(scr, "SOFTWARE / RADIO", 410, 65)
+        self.make_label(scr, "Firmware: %s %s" % (app_name, app_version), 410, 92)
+        self.make_label(scr, "Radio firmware: %s" % radio_version, 410, 122)
+        self.make_label(scr, "Script: %s" % script_status, 410, 152)
+        self.make_label(scr, self.format_selected_speed_test(), 410, 182)
+        self.make_label(scr, self.format_selected_radio_link(), 410, 212)
+        self.make_label(scr, "Network: 0x%04X" % (RADIO_NETWORK_ID & 0xFFFF), 410, 242)
+        self.make_label(scr, "Radio channel: %d" % RADIO_CHANNEL, 410, 272)
+
+    def calibration_bank_count(self):
+        cue_count = self.get_selected_module_cue_count()
+        return (cue_count + CALIBRATION_BANK_SIZE - 1) // CALIBRATION_BANK_SIZE
+
+    def calibration_cue_range(self):
+        first = self.calibration_bank_index * CALIBRATION_BANK_SIZE + 1
+        last = min(first + CALIBRATION_BANK_SIZE - 1, self.get_selected_module_cue_count())
+        return first, last
+
+    def format_calibration_value(self, value):
+        if value is None:
+            return "OPEN"
+        return "%d.%d ohm" % (int(value) // 10, int(value) % 10)
+
+    def show_calibration_confirm(self, event=None):
+        if self.armed:
+            self.set_status("Disarm before calibration")
+            return
+
+        scr = self.new_screen("Confirm Calibration", "module_calibration_confirm")
+        self.make_label(scr, "This replaces the saved resistance calibration.", 170, 85)
+        self.make_label(scr, "Use only the known 8-cue calibration tester.", 180, 125)
+        self.make_label(scr, "The module must remain disarmed for every bank.", 165, 165)
+        self.make_label(
+            scr,
+            "%d cues: %d banks will be calibrated." % (
+                self.get_selected_module_cue_count(),
+                self.calibration_bank_count(),
+            ),
+            220,
+            220,
+        )
+        self.make_button(scr, "CANCEL", 120, 340, 220, 70, self.show_module_about)
+        self.make_button(scr, "YES, START", 460, 340, 220, 70, self.start_module_calibration)
+
+    def start_module_calibration(self, event=None):
+        self.calibration_bank_index = 0
+        self.calibration_review_result = None
+        self.show_calibration_bank_prompt()
+
+    def show_calibration_bank_prompt(self, event=None):
+        first, last = self.calibration_cue_range()
+        bank_number = self.calibration_bank_index + 1
+        bank_count = self.calibration_bank_count()
+        scr = self.new_screen("Calibration %d/%d" % (bank_number, bank_count), "module_calibration_prompt")
+        self.make_label(scr, "Insert the tester into cues %d-%d." % (first, last), 205, 90)
+        self.make_label(scr, "Confirm it is fully seated before continuing.", 170, 135)
+        self.make_label(scr, "The first seven positions are known loads; position 8 is open.", 95, 190)
+        self.make_button(scr, "CANCEL", 120, 340, 220, 70, self.show_module_about)
+        self.make_button(scr, "READY", 460, 340, 220, 70, self.read_calibration_bank)
+
+    def read_calibration_bank(self, event=None):
+        uid = self.get_selected_module_uid_int()
+        if uid is None:
+            return
+
+        self.show_loading_screen("Reading calibration tester...\nBank %d of %d" % (
+            self.calibration_bank_index + 1,
+            self.calibration_bank_count(),
+        ))
+        result = self.request_calibration_resistance(uid, False)
+        if result is None:
+            self.show_calibration_bank_prompt()
+            self.set_status("Calibration read timeout")
+            return
+
+        self.calibration_review_result = result
+        self.show_calibration_review()
+
+    def request_calibration_resistance(self, uid, raw_adc):
+        cue_count = self.get_selected_module_cue_count()
+        for attempt in range(2):
+            result = nfcp.request_resistance_for_uid(
+                uid,
+                cue_count,
+                CONTINUITY_TIMEOUT_MS,
+                raw_adc,
+            )
+            if result is not None:
+                return result
+            if attempt == 0:
+                time.sleep_ms(200)
+        return None
+
+    def show_calibration_review(self, event=None):
+        first, _last = self.calibration_cue_range()
+        result = self.calibration_review_result or {}
+        values = result.get("values", []) or []
+        unit = result.get("unit", "")
+        scr = self.new_screen(
+            "Verify Bank %d" % (self.calibration_bank_index + 1),
+            "module_calibration_review",
+        )
+        self.make_label(scr, "Expected", 115, 55)
+        self.make_label(scr, "Measured", 265, 55)
+        self.make_label(scr, "Expected", 500, 55)
+        self.make_label(scr, "Measured", 650, 55)
+
+        for position in range(CALIBRATION_BANK_SIZE):
+            cue = first + position
+            expected = CALIBRATION_TESTER_DECI_OHMS[position]
+            measured = values[cue - 1] if cue - 1 < len(values) else None
+            if unit == "deci_ohm":
+                measured_text = self.format_calibration_value(measured)
+            elif measured is None:
+                measured_text = "OPEN"
+            else:
+                measured_text = "%dmV" % int(measured)
+
+            col = 0 if position < 4 else 1
+            row = position if position < 4 else position - 4
+            x = 35 + col * 385
+            y = 90 + row * 52
+            self.make_label(scr, "Cue %02d" % cue, x, y)
+            self.make_label(scr, self.format_calibration_value(expected), x + 80, y)
+            self.make_label(scr, measured_text, x + 230, y)
+
+        self.make_label(scr, "If anything is wrong, adjust the tester and retry.", 170, 305)
+        self.make_button(scr, "CANCEL", 20, 400, 140, 55, self.show_module_about)
+        self.make_button(scr, "ADJUST / RETRY", 180, 400, 240, 55, self.show_calibration_bank_prompt)
+        self.make_button(scr, "VALUES OK", 460, 400, 240, 55, self.calibrate_current_bank)
+
+    def calibration_error(self, message):
+        scr = self.new_screen("Calibration Error", "module_calibration_error")
+        label = self.make_label(scr, message)
+        label.align(lv.ALIGN.CENTER, 0, -25)
+        self.make_button(scr, "RETRY BANK", 280, 340, 240, 65, self.show_calibration_bank_prompt)
+
+    def calibrate_current_bank(self, event=None):
+        uid = self.get_selected_module_uid_int()
+        if uid is None:
+            return
+
+        cue_count = self.get_selected_module_cue_count()
+        first, _last = self.calibration_cue_range()
+        self.show_loading_screen("Calibrating bank %d...\nReading raw ADC values" % (
+            self.calibration_bank_index + 1,
+        ))
+        result = self.request_calibration_resistance(uid, True)
+        if not result or result.get("unit") != "adc_mv":
+            self.calibration_error("Raw calibration read failed.")
+            return
+
+        values = result.get("values", []) or []
+        points = []
+        for position, expected in enumerate(CALIBRATION_TESTER_DECI_OHMS):
+            cue_index = first - 1 + position
+            measured = values[cue_index] if cue_index < len(values) else None
+            if expected is None:
+                if measured is not None:
+                    self.calibration_error("Position 8 must be OPEN. Adjust the tester.")
+                    return
+                continue
+            if measured is None:
+                self.calibration_error("A known load reads OPEN. Adjust the tester.")
+                return
+            points.append((int(measured), int(expected)))
+
+        points.sort(key=lambda point: point[0])
+        previous_adc = -1
+        previous_ohms = -1
+        for adc_mv, deci_ohms in points:
+            if adc_mv <= previous_adc or deci_ohms < previous_ohms:
+                self.calibration_error("Tester values are not monotonic. Check all connections.")
+                return
+            previous_adc = adc_mv
+            previous_ohms = deci_ohms
+
+        if not nfcp.request_set_resistance_calibration(
+            uid,
+            self.calibration_bank_index,
+            points,
+        ):
+            self.calibration_error("Module rejected the calibration data.")
+            return
+
+        time.sleep_ms(250)
+
+        self.calibration_bank_index += 1
+        self.calibration_review_result = None
+        if self.calibration_bank_index < self.calibration_bank_count():
+            self.show_calibration_bank_prompt()
+            self.set_status("Bank saved - move tester to next bank")
+            return
+
+        scr = self.new_screen("Calibration Complete", "module_calibration_complete")
+        self.make_label(scr, "All %d banks were saved successfully." % self.calibration_bank_count(), 205, 135)
+        self.make_label(scr, "Remove the tester before returning to operation.", 165, 185)
+        self.make_button(scr, "DONE", 280, 330, 240, 70, self.show_module_continuity)
 
     def build_fixed_cue_grid(self, parent):
         self.cue_buttons = []
@@ -5839,7 +6287,7 @@ class NFCPGui:
 
         cue_count = self.get_selected_module_cue_count()
 
-        self.grid_box = self.make_plain_box(parent, 20, 120, 760, 270, 0x181818)
+        self.grid_box = self.make_plain_box(parent, 20, 110, 760, 285, 0x181818)
 
         self.grid_box.set_scroll_dir(lv.DIR.VER)
         self.grid_box.set_scrollbar_mode(lv.SCROLLBAR_MODE.AUTO)
@@ -5880,29 +6328,31 @@ class NFCPGui:
             return
 
         cue_count = self.get_selected_module_cue_count()
+        self.show_resistance_values = True
 
         try:
-            self.set_status("Running speed test...")
-            ping_ms = nfcp.request_ping_for_uid(uid)
-            self.save_selected_module_speed_test(ping_ms)
-            self.refresh_selected_module_detail_labels(speed=True)
-
-            self.set_status("Checking continuity...")
-            ok = nfcp.request_continuity_for_uid(uid, cue_count)
-            if ok is None:
+            self.set_status("Reading cue resistance...")
+            result = nfcp.request_resistance_for_uid(uid, cue_count)
+            if result is None:
                 self.save_selected_module_online(False)
                 self.refresh_selected_module_detail_labels(radio=True)
-                self.set_status("Continuity timeout")
+                self.set_status("Resistance read timeout")
                 return
 
+            ok = continuity_from_resistance(result, cue_count)
+            self.save_selected_module_resistance(result)
             self.set_continuity(ok)
             self.save_selected_module_continuity(ok)
             self.update_open_script_cues()
             self.update_extra_connected_cues()
             self.refresh_selected_module_detail_labels(radio=True)
+            if result.get("unit") == "deci_ohm":
+                self.set_status("Resistance updated")
+            else:
+                self.set_status("Resistance calibration needed - showing ADC mV")
         except Exception as e:
-            print("Continuity failed:", e)
-            self.set_status("Continuity failed")
+            print("Resistance read failed:", e)
+            self.set_status("Resistance read failed")
 
     def request_selected_speed_test(self):
         uid = self.get_selected_module_uid_int()
@@ -6126,6 +6576,19 @@ class NFCPGui:
 
         self.update_selected_module_record("Continuity", updater)
 
+    def save_selected_module_resistance(self, result):
+        def updater(dev, uid_text):
+            dev["resistance"] = {
+                "version": int(result.get("version", 0)),
+                "unit": result.get("unit", ""),
+                "status": int(result.get("status", 0)),
+                "values": list(result.get("values", [])),
+            }
+            dev["resistance_last_epoch"] = time.time()
+            module_mark_online(dev)
+
+        self.update_selected_module_record("Resistance", updater)
+
     def set_continuity(self, continuity):
         cue_count = self.get_selected_module_cue_count()
 
@@ -6168,19 +6631,54 @@ class NFCPGui:
 
         cue_count = self.get_selected_module_cue_count()
         good = 0
+        resistance = {}
+        resistance_values = []
+        resistance_unit = ""
+        if self.show_resistance_values and self.selected_module:
+            resistance = self.selected_module.get("resistance", {}) or {}
+            resistance_values = resistance.get("values", []) or []
+            resistance_unit = resistance.get("unit", "")
 
         for i in range(cue_count):
             cue_number = i + 1
             has_cont = self.continuity[i] if i < len(self.continuity) else False
             cue_in_script = self.selected_cue_is_in_script(cue_number)
+            resistance_value = None
+            if i < len(resistance_values):
+                resistance_value = resistance_values[i]
 
-            if has_cont:
-                good += 1
+            is_short = bool(
+                self.show_resistance_values and
+                resistance_unit == "deci_ohm" and
+                resistance_value is not None and
+                int(resistance_value) <= RESISTANCE_SHORT_MAX_DECI_OHM
+            )
 
-                if cue_in_script:
+            if is_short:
+                text = "Cue %02d: SHORT" % cue_number
+                color = lv.color_hex(0x7A1F1F)
+            elif has_cont:
+                if self.show_resistance_values and resistance_value is not None:
+                    good += 1
+                    if resistance_unit == "deci_ohm":
+                        text = "Cue %02d: %d.%d ohm" % (
+                            cue_number,
+                            int(resistance_value) // 10,
+                            int(resistance_value) % 10,
+                        )
+                    else:
+                        text = "Cue %02d: %dmV" % (cue_number, int(resistance_value))
+                    color = lv.color_hex(0x1F7A1F)
+                elif self.show_resistance_values:
+                    good += 1
+                    text = "Cue %02d: --" % cue_number
+                    color = lv.color_hex(0x1F7A1F)
+                elif cue_in_script:
+                    good += 1
                     text = "Cue %02d: GOOD" % cue_number
                     color = lv.color_hex(0x1F7A1F)
                 else:
+                    good += 1
                     text = "Cue %02d: EXTRA" % cue_number
                     color = lv.color_hex(0xC46A00)
 
@@ -6496,7 +6994,6 @@ class NFCPGui:
             return
 
         db_changed = False
-        new_module_added = False
 
         try:
             db = nfcp.load_device_db()
@@ -6541,7 +7038,6 @@ class NFCPGui:
                     db_changed = True
 
                     if was_new:
-                        new_module_added = True
                         self.set_status("Added module %s" % uid)
                     else:
                         self.set_status("Updated module %s" % uid)
@@ -6549,7 +7045,79 @@ class NFCPGui:
                     print("Added/updated module:", info)
 
             elif cmd == nfcp.CMD_CONTINUITY_RSP:
-                self.set_status("Continuity response from 0x%08X" % src)
+                uid_text = "0x%08X" % (src & 0xFFFFFFFF)
+                dev = idx.get(uid_text)
+
+                if dev:
+                    cue_count = self.get_module_cue_count(dev)
+                    ok = nfcp.parse_continuity_rsp(data, cue_count)
+                    cues = []
+                    for i in range(cue_count):
+                        cues.append({
+                            "cue": i + 1,
+                            "ok": bool(ok[i]) if i < len(ok) else False,
+                        })
+
+                    dev["continuity"] = {"cues": cues}
+                    dev["continuity_last_epoch"] = time.time()
+                    module_mark_online(dev)
+                    module_apply_radio_link(dev, uid_text)
+                    idx[uid_text] = dev
+                    db_changed = True
+
+                    selected_uid = None
+                    if self.selected_module:
+                        try:
+                            selected_uid = int(
+                                self.selected_module.get("unique_id", "0"),
+                                16,
+                            ) & 0xFFFFFFFF
+                        except Exception:
+                            pass
+                    if selected_uid == (src & 0xFFFFFFFF):
+                        self.selected_module = dev
+                        self.set_continuity(ok)
+                        self.refresh_selected_module_detail_labels(radio=True)
+                else:
+                    self.set_status("Continuity response from 0x%08X" % src)
+
+            elif cmd == nfcp.CMD_RESISTANCE_RSP:
+                uid_text = "0x%08X" % (src & 0xFFFFFFFF)
+                dev = idx.get(uid_text)
+                if not dev:
+                    continue
+
+                result = nfcp.parse_resistance_rsp(
+                    data,
+                    self.get_module_cue_count(dev),
+                )
+                if not result:
+                    continue
+
+                cue_count = self.get_module_cue_count(dev)
+                ok = continuity_from_resistance(result, cue_count)
+                cues = []
+                for i in range(cue_count):
+                    cues.append({
+                        "cue": i + 1,
+                        "ok": bool(ok[i]) if i < len(ok) else False,
+                    })
+
+                dev["resistance"] = result
+                dev["resistance_last_epoch"] = time.time()
+                dev["continuity"] = {"cues": cues}
+                dev["continuity_last_epoch"] = time.time()
+                module_mark_online(dev)
+                module_apply_radio_link(dev, uid_text)
+                idx[uid_text] = dev
+                db_changed = True
+
+                if self.selected_module:
+                    selected_uid_text = self.selected_module.get("unique_id", "")
+                    if selected_uid_text == uid_text:
+                        self.selected_module = dev
+                        self.show_resistance_values = True
+                        self.set_continuity(ok)
 
         if db_changed:
             db["devices"] = sorted(
@@ -6567,8 +7135,9 @@ class NFCPGui:
                 self.update_extra_connected_cues()
                 self.update_arm_button()
 
-                if new_module_added and self.current_view == "modules":
-                    self.show_modules_menu()
+                # Late continuity replies must refresh existing module buttons too.
+                if self.current_view == "modules":
+                    self.show_modules_menu(restore_selected_page=False)
 
             except Exception as e:
                 print("DB save failed:", e)
@@ -6645,8 +7214,6 @@ class NFCPGui:
             if elapsed >= MODULE_CONTINUITY_AUTO_CHECK_MS:
                 self.request_selected_continuity()
 
-
-delete_device_db_on_startup()
 
 gui = NFCPGui()
 

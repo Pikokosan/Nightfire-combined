@@ -1,6 +1,8 @@
 param(
     [string]$Port = "COM10",
     [int]$Baud = 115200,
+    [ValidateSet("existing", "promicro", "ms88sfa")]
+    [string]$Pinout = "existing",
     [string]$ConfigPath = ""
 )
 
@@ -10,6 +12,18 @@ $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $PreferredPython = "C:\Users\hog28\.micropython-studio\.venv\Scripts\python.exe"
 $Python = "python"
 $Uploader = Join-Path $Root "scripts\raw_micropython_upload.py"
+
+if ($ConfigPath -and $Pinout -ne "existing") {
+    throw "Use either -ConfigPath or -Pinout, not both."
+}
+
+if (-not $ConfigPath) {
+    $ConfigPath = switch ($Pinout) {
+        "promicro" { ".\main\nrf_node_config_promicro_field.py" }
+        "ms88sfa" { ".\main\nrf_node_config_ms88sfa_field.py" }
+        default { "" }
+    }
+}
 
 if (Test-Path -LiteralPath $PreferredPython) {
     try {

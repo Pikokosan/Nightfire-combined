@@ -7,6 +7,65 @@ STATE_NORMAL = "normal"
 STATE_OPEN = "open"
 
 
+class ResistanceCalibration:
+    """Piecewise-linear ADC millivolt to deci-ohm calibration."""
+
+    def __init__(self, points=None):
+        self.points = []
+        for point in points or ():
+            if len(point) < 2:
+                continue
+            self.points.append((int(point[0]), int(point[1])))
+        self.points.sort(key=lambda point: point[0])
+
+    def is_valid(self):
+        if len(self.points) < 2:
+            return False
+        previous_adc = None
+        previous_ohms = None
+        for adc_mv, deci_ohms in self.points:
+            if previous_adc is not None:
+                if adc_mv <= previous_adc or deci_ohms < previous_ohms:
+                    return False
+            previous_adc = adc_mv
+            previous_ohms = deci_ohms
+        return True
+
+    def deci_ohms_from_adc_mv(self, adc_mv):
+        if adc_mv is None or not self.is_valid():
+            return None
+
+        adc_mv = int(adc_mv)
+        left = self.points[0]
+        right = self.points[1]
+
+        if adc_mv >= self.points[-1][0]:
+            left = self.points[-2]
+            right = self.points[-1]
+        else:
+            for index in range(1, len(self.points)):
+                if adc_mv <= self.points[index][0]:
+                    left = self.points[index - 1]
+                    right = self.points[index]
+                    break
+
+        adc_span = right[0] - left[0]
+        if adc_span <= 0:
+            return None
+
+        scaled = (adc_mv - left[0]) * (right[1] - left[1])
+        if scaled >= 0:
+            scaled += adc_span // 2
+        else:
+            scaled -= adc_span // 2
+        value = left[1] + scaled // adc_span
+        if value < 0:
+            value = 0
+        if value > 0xFFFD:
+            value = 0xFFFD
+        return int(value)
+
+
 class BatteryVoltageSensor:
     def __init__(
         self,
@@ -197,10 +256,14 @@ class ChannelClassifier:
         open_max_fraction=0.05,
         short_min_fraction=0.80,
         invalid_is_open=True,
+        open_min_fraction=None,
     ):
         self.open_max_fraction = float(open_max_fraction)
         self.short_min_fraction = float(short_min_fraction)
         self.invalid_is_open = bool(invalid_is_open)
+        self.open_min_fraction = (
+            None if open_min_fraction is None else float(open_min_fraction)
+        )
 
     def classify(self, reading):
         if not reading or not reading.get("valid"):
@@ -209,6 +272,13 @@ class ChannelClassifier:
         fraction = reading.get("battery_fraction")
         if fraction is None:
             return STATE_INVALID
+
+        # Some low-current test circuits pull the sense line low through a
+        # connected cue and leave it high when the cue is open.
+        if self.open_min_fraction is not None:
+            if fraction >= self.open_min_fraction:
+                return STATE_OPEN
+            return STATE_NORMAL
 
         if fraction <= self.open_max_fraction:
             return STATE_OPEN

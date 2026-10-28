@@ -5,11 +5,11 @@ Run scripts from the repository root unless the script says otherwise.
 ## Upload
 
 - `upload_master_to_com7.ps1` - Upload master firmware. Accepts `-Port`.
-- `upload_field_module_to_com10.ps1` - Upload field module firmware. Accepts `-Port`.
+- `upload_field_module_to_com10.ps1` - Upload field module firmware. Accepts `-Port`, `-Pinout promicro|ms88sfa`, or a custom `-ConfigPath`.
 - `upload_nrf_dummy.ps1` - Upload nRF dummy firmware. Accepts `-Port` and `-ConfigPath`.
 - `upload_nrf_bridge.ps1` - Upload nRF bridge firmware. Accepts `-Port`.
 - `upload_lcd_ui_test_to_com10.ps1` - Upload the standalone LCD/button UI test.
-- `upload_field_hardware_test_to_com10.ps1` - Upload the standalone field hardware test.
+- `upload_field_hardware_test_to_com10.ps1` - Upload the standalone field hardware test; accepts the same field-module pinout selection.
 
 ## Build And Flash
 
@@ -29,6 +29,7 @@ Run scripts from the repository root unless the script says otherwise.
 ## Tests
 
 - `test_master_*.py` - Master-side radio, module, range, and script tests.
+- `test_master_script_timed_stress.py` - Upload a tight timed script to discovered modules, start it from the master, maintain heartbeat, and report module script status.
 - `test_nrf_*.py` - nRF bridge/module radio tests.
 - `test_nfcp_*.py` - Shared NFCP protocol tests.
 

@@ -3,6 +3,48 @@
 This document tracks the nRF52840 field-module pinouts used by the active
 Nightfire firmware. The current firmware entrypoint is `main/field_main.py`.
 
+## nRF52840 Pro Micro Test Pinout
+
+Use `main/nrf_node_config_promicro_field.py` when testing the production-style
+field-module circuit with an nRF52840 Pro Micro or nice!nano-compatible board.
+This profile uses the same 24-cue, no-4051 continuity method as the MS88SFA
+profile. MicroPython pin numbers are the native nRF GPIO numbers.
+
+| Signal | Board Label | nRF GPIO | MicroPython Pin |
+| --- | --- | --- | --- |
+| `HC595_DATA` | `D1` | `P0.06` | `6` |
+| `HC595_CLOCK` | `D0` | `P0.08` | `8` |
+| `HC595_LATCH` | `D2` | `P0.17` | `17` |
+| `HC595_OE` | `D3` | `P0.20` | `20` |
+| `HC595_SRCLR` | `D4` | `P0.22` | `22` |
+| `HC595_Q7S` | `D6` | `P1.00` | `32` |
+| `PRE_TEST` | `D19` | `P0.02` | `2` |
+| `ARM_CONTROL` | `D10` | `P0.09` | `9` |
+| `SAFE_LED` | `D7` | `P0.11` | `11` |
+| `ARM_LED` | `D5` | `P0.24` | `24` |
+| `UP_BTN` / `PAIR_BTN` | `D15` | `P1.13` | `45` |
+| `DWN_BTN` | `D18` | `P1.15` | `47` |
+| `OK_FWD_BTN` | `D14` | `P1.11` | `43` |
+| `BACK_BTN` | `D16` | `P0.10` | `10` |
+| `BATT_CHECK` | `D20` | `P0.29` / `AIN5` | `29` |
+| `SHORT_CHECK` | `D21` | `P0.31` / `AIN7` | `31` |
+| `LCD_SDA` | `D8` | `P1.04` | `36` |
+| `LCD_SCL` | `D9` | `P1.06` | `38` |
+
+This mapping only uses the exposed side pins; none of the small bottom pads are
+required. `P0.09` and `P0.10` are NFC-capable pins, used here as ordinary GPIO
+for `ARM_CONTROL` and `BACK_BTN`. If a clone leaves NFC enabled, its firmware
+must configure `UICR.NFCPINS` for GPIO before these two assignments will work.
+The unassigned bottom pads are `P1.01`, `P1.02`, and `P1.07`.
+
+Upload the field firmware with this pinout using:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\upload_field_module_to_com10.ps1 -Port COM10 -Pinout promicro
+```
+
+To return to the production module pinout, use `-Pinout ms88sfa`.
+
 ## MS88SFA nRF52840 Field Module Pinout
 
 This is the proposed production field-module mapping for the Minewsemi
@@ -108,7 +150,7 @@ spares for future measurement/debug and avoids the NFC-adjacent pins.
 Use external pull-ups on the LCD board or add board-level pull-ups to 3.3 V if
 the display does not include them.
 
-### 18-Channel Prototype Output Interface
+### 24-Channel Output Interface
 
 | Signal | Module Pin | nRF Pin | MicroPython Pin | Use |
 | --- | --- | --- | --- | --- |
@@ -119,8 +161,8 @@ the display does not include them.
 | `HC595_OE` | 35 | `P0.24` | `24` | 74HC595 active-low output enable; hardware pull-up required |
 | `HC595_SRCLR` | 36 | `P1.00` | `32` | 74HC595 active-low clear |
 
-Firmware shifts and latches all zeros before pulling `HC595_OE` low. Outputs
-1-18 are used from the 24 available 74HC595 outputs.
+Firmware shifts and latches all zeros before pulling `HC595_OE` low. All 24
+outputs from the three 74HC595 devices are used as cues 1-24.
 
 When requested, firmware can run a 74HC595 chain-detect diagnostic by clocking a
 single marker bit through the daisy chain and reading it back on `HC595_Q7S`.
@@ -149,13 +191,16 @@ external multi-channel ADC. Cue measurement uses the low-current pre-test path:
 
 `SHORT_CHECK` is the single ADC observation point for all cues. The selected
 cue is determined by the 74HC595 output bit that is temporarily enabled during
-the low-current test window. The resistance equation and classification
-thresholds must be calibrated from the actual `PRE_TEST` current path; do not
-reuse the older raw-channel divider equation for this schematic.
+the low-current test window. Resistance is calculated with board-specific,
+piecewise-linear ADC calibration points. The current Pro Micro field fixture
+uses approximately `26 mV = 0.0 ohm`, `158 mV = 2.0 ohm`,
+`442 mV = 4.7 ohm`, and `1228 mV = 22 ohm`; a true open measures about
+`2509 mV`. Uncalibrated board profiles report the measured ADC millivolts
+instead of presenting an inaccurate resistance value.
 
-The output-stage sheet currently shows 24 cue MOSFET outputs from three
-74HC595 devices. Firmware can keep `CUE_COUNT = 18` for the prototype or raise
-it to 24 after the rest of the system is ready for the larger output count.
+The output-stage sheet has 24 cue MOSFET outputs from three 74HC595 devices.
+Firmware uses `CUE_COUNT = 24` for both the Pro Micro test fixture and the
+MS88SFA production field module.
 
 ### Optional Spare GPIO
 
@@ -271,16 +316,21 @@ variant because clone boards can move bottom-pad signals.
 
 ## Firmware Note
 
-The nRF field-module firmware entrypoint is `main/field_main.py`. It uses the
-18-channel output and measurement pinout from the active `nrf_node_config.py`.
-Use `main/nrf_node_config_current_bench.py` for the SuperMini bench fixture and
-`main/nrf_node_config_ms88sfa_field.py` for the proposed MS88SFA field-module
-mapping. The SuperMini bench fixture still uses 74HC4051 muxes; the proposed
-MS88SFA field-module mapping does not. All continuity development/testing is
+The nRF field-module firmware entrypoint is `main/field_main.py`. It supports
+24 cues with the active Pro Micro and MS88SFA field-module profiles.
+Use `main/nrf_node_config_promicro_field.py` for the Pro Micro test fixture,
+`main/nrf_node_config_current_bench.py` for the older SuperMini mux fixture,
+and `main/nrf_node_config_ms88sfa_field.py` for the proposed MS88SFA
+field-module mapping. The older SuperMini bench fixture remains an 18-channel
+74HC4051 test setup; the Pro Micro and MS88SFA mappings do not use those muxes.
+All continuity testing is
 treated as inert dummy-load testing. The current bench channel divider is `100k`
 high-side and `22k` low-side, but the MS88SFA schematic no longer measures each
 channel through that raw-sense divider. The MS88SFA measurement is a controlled
 low-current pre-test sequence: enable `PRE_TEST`, select exactly one cue through
 the 74HC595 output bank, read `SHORT_CHECK`, then immediately clear the output
 bank and disable `PRE_TEST`. The resistance calculation should be added only
-after the exact pre-test current path is measured and calibrated.
+after the exact pre-test current path is measured and calibrated. The Pro Micro
+field fixture has that calibration in `main/nrf_node_config_promicro_field.py`;
+production board profiles intentionally fall back to ADC millivolts until
+their own hardware is characterized.

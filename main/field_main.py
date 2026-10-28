@@ -11,6 +11,7 @@ from field_measurement import (
     ChannelClassifier,
     ChannelSenseSensor,
     PretestCueSenseSensor,
+    ResistanceCalibration,
     STATE_FAULT,
     STATE_NORMAL,
     STATE_OPEN,
@@ -30,15 +31,100 @@ except Exception:
     node_config = None
 
 
+RUNTIME_CONFIG_PATH = "field_runtime.bin"
+RUNTIME_CONFIG_MAGIC = b"NFRT\x01"
+RESISTANCE_CALIBRATION_PATH = "field_resistance_cal.bin"
+RESISTANCE_CALIBRATION_MAGIC = b"NFRC\x01"
+RESISTANCE_CALIBRATION_BANK_SIZE = 8
+
+
+def load_crc_payload(path, magic):
+    try:
+        with open(path, "rb") as data_file:
+            data = data_file.read()
+        if len(data) < len(magic) + 2 or data[:len(magic)] != magic:
+            return None
+        if crc16_ccitt(data[:-2]) != int.from_bytes(data[-2:], "big"):
+            return None
+        return data[:-2]
+    except Exception:
+        return None
+
+
+def save_crc_payload(path, payload):
+    data = bytearray(payload)
+    data += crc16_ccitt(data).to_bytes(2, "big")
+    with open(path, "wb") as data_file:
+        data_file.write(data)
+
+
+def load_runtime_config():
+    payload = load_crc_payload(RUNTIME_CONFIG_PATH, RUNTIME_CONFIG_MAGIC)
+    if payload is None or len(payload) != 14:
+        return None
+    return (
+        int.from_bytes(payload[5:9], "big"),
+        int.from_bytes(payload[9:11], "big"),
+        int.from_bytes(payload[11:13], "big"),
+        payload[13],
+    )
+
+
+RUNTIME_CONFIG = load_runtime_config()
+
+
+def load_resistance_calibration_banks(default=()):
+    data = load_crc_payload(RESISTANCE_CALIBRATION_PATH, RESISTANCE_CALIBRATION_MAGIC)
+    if data is None or len(data) < 6:
+        return tuple(default or ())
+    try:
+        bank_count = int(data[5])
+        index = 6
+        banks = []
+        for _ in range(bank_count):
+            if index >= len(data):
+                return tuple(default or ())
+            point_count = int(data[index])
+            index += 1
+            points = []
+            for _point in range(point_count):
+                if index + 4 > len(data):
+                    return tuple(default or ())
+                adc_mv = int.from_bytes(data[index:index + 2], "big")
+                deci_ohms = int.from_bytes(data[index + 2:index + 4], "big")
+                points.append((adc_mv, deci_ohms))
+                index += 4
+            if points and not ResistanceCalibration(points).is_valid():
+                return tuple(default or ())
+            banks.append(tuple(points))
+        if index != len(data):
+            return tuple(default or ())
+        return tuple(banks)
+    except Exception:
+        return tuple(default or ())
+
+
+def save_resistance_calibration_banks(banks):
+    payload = bytearray(RESISTANCE_CALIBRATION_MAGIC)
+    payload.append(len(banks) & 0xFF)
+    for bank in banks:
+        points = tuple(bank or ())
+        payload.append(len(points) & 0xFF)
+        for adc_mv, deci_ohms in points:
+            payload += (int(adc_mv) & 0xFFFF).to_bytes(2, "big")
+            payload += (int(deci_ohms) & 0xFFFF).to_bytes(2, "big")
+    save_crc_payload(RESISTANCE_CALIBRATION_PATH, payload)
+
+
 APP_FIRMWARE_NAME = "field-module"
 APP_FIRMWARE_VERSION = "0.2.0"
 
 DEFAULT_NETWORK_ID = 0x04D2
 DEFAULT_GROUP_ID = 0x0001
-DEFAULT_CUE_COUNT = 18
+DEFAULT_CUE_COUNT = 24
 DEFAULT_DEVICE_TYPE = 0x20
 
-RADIO_CHANNEL = getattr(node_config, "RADIO_CHANNEL", 90)
+RADIO_CHANNEL = RUNTIME_CONFIG[3] if RUNTIME_CONFIG else getattr(node_config, "RADIO_CHANNEL", 90)
 RADIO_ADDRESS = 0x67676767
 RADIO_TX_POWER = 8
 RADIO_RX_TIMEOUT_MS = getattr(node_config, "RADIO_RX_TIMEOUT_MS", 50)
@@ -61,14 +147,17 @@ SCRIPT_TIME_SYNC_VALID_MS = 10000
 BATTERY_PACK_TYPE = getattr(node_config, "BATTERY_PACK_TYPE", "2S")
 BATTERY_MV = getattr(node_config, "BATTERY_MV", 0)
 
-# SuperMini NRF52840 field-module pinout. The local MicroPython build addresses
-# nRF pins as integers: P0.nn is nn, and P1.nn is 32 + nn.
+# Board-specific assignments come from nrf_node_config.py. The local
+# MicroPython build addresses P0.nn as nn and P1.nn as 32 + nn.
+BOARD_PINOUT = getattr(node_config, "BOARD_PINOUT", "legacy")
 EXTERNAL_VCC_CONTROL_ENABLED = getattr(node_config, "EXTERNAL_VCC_CONTROL_ENABLED", True)
 EXTERNAL_VCC_CONTROL_PIN = getattr(node_config, "EXTERNAL_VCC_CONTROL_PIN", 13)  # P0.13 board VCC control
 EXTERNAL_VCC_ENABLE_VALUE = getattr(node_config, "EXTERNAL_VCC_ENABLE_VALUE", 1)
 EXTERNAL_VCC_SETTLE_MS = getattr(node_config, "EXTERNAL_VCC_SETTLE_MS", 50)
 
 PRE_TEST_PIN = getattr(node_config, "PRE_TEST_PIN", 9)
+ARM_CONTROL_PIN = getattr(node_config, "ARM_CONTROL_PIN", None)
+ARM_CONTROL_ACTIVE_VALUE = 1 if getattr(node_config, "ARM_CONTROL_ACTIVE_VALUE", 1) else 0
 SAFE_LED_PIN = getattr(node_config, "SAFE_LED_PIN", 10)
 ARM_LED_PIN = getattr(node_config, "ARM_LED_PIN", 11)
 UP_BUTTON_PIN = getattr(node_config, "UP_BUTTON_PIN", 33)      # P1.01 bottom pad
@@ -120,7 +209,6 @@ PRETEST_ADC_SAMPLES = getattr(node_config, "PRETEST_ADC_SAMPLES", 8)
 PRETEST_ADC_SAMPLE_DELAY_US = getattr(node_config, "PRETEST_ADC_SAMPLE_DELAY_US", 150)
 
 FIRE_PULSE_MS = getattr(node_config, "FIRE_PULSE_MS", 5)
-CONT_MIN_INTERVAL_MS = 100
 LOG_FIRE_EVENTS = getattr(node_config, "LOG_FIRE_EVENTS", False)
 LOG_SCRIPT_EVENTS = getattr(node_config, "LOG_SCRIPT_EVENTS", False)
 BATTERY_ADC_ENABLED = getattr(node_config, "BATTERY_ADC_ENABLED", True)
@@ -145,6 +233,9 @@ CHANNEL_SHORT_MIN_FRACTION = getattr(
     getattr(node_config, "CHANNEL_NORMAL_MIN_FRACTION", getattr(node_config, "CHANNEL_OPEN_MIN_FRACTION", 0.80)),
 )
 CHANNEL_INVALID_IS_OPEN = getattr(node_config, "CHANNEL_INVALID_IS_OPEN", True)
+CHANNEL_OPEN_MIN_FRACTION = getattr(node_config, "CHANNEL_OPEN_MIN_FRACTION", None)
+RESISTANCE_CALIBRATION_POINTS = getattr(node_config, "RESISTANCE_CALIBRATION_POINTS", ())
+RESISTANCE_CALIBRATION_BANKS = load_resistance_calibration_banks()
 
 CONT_STATUS_OK = 0x00
 CONT_STATUS_BATTERY_INVALID = 0x01
@@ -155,8 +246,8 @@ def get_default_unique_id():
     return nrf_module_common.get_default_unique_id(0x52840001)
 
 
-CONFIG_UNIQUE_ID = getattr(node_config, "UNIQUE_ID", 0)
-GROUP_ID = getattr(node_config, "GROUP_ID", DEFAULT_GROUP_ID)
+CONFIG_UNIQUE_ID = RUNTIME_CONFIG[0] if RUNTIME_CONFIG else getattr(node_config, "UNIQUE_ID", 0)
+GROUP_ID = RUNTIME_CONFIG[1] if RUNTIME_CONFIG else getattr(node_config, "GROUP_ID", DEFAULT_GROUP_ID)
 UNIQUE_ID = (CONFIG_UNIQUE_ID & 0xFFFFFFFF) or get_default_unique_id()
 CUE_COUNT = int(getattr(node_config, "CUE_COUNT", DEFAULT_CUE_COUNT))
 if CUE_COUNT < 1:
@@ -164,7 +255,7 @@ if CUE_COUNT < 1:
 if CUE_COUNT > DEFAULT_CUE_COUNT:
     CUE_COUNT = DEFAULT_CUE_COUNT
 DEVICE_TYPE = DEFAULT_DEVICE_TYPE
-NETWORK_ID = getattr(node_config, "NETWORK_ID", DEFAULT_NETWORK_ID)
+NETWORK_ID = RUNTIME_CONFIG[2] if RUNTIME_CONFIG else getattr(node_config, "NETWORK_ID", DEFAULT_NETWORK_ID)
 ARMED = False
 STARTUP_FAULT = False
 STARTUP_FAULT_REASON = ""
@@ -184,7 +275,6 @@ parser = NFCPStreamParser()
 nfcp = NFCP(node_id=0x01)
 tx_seq = 1
 rx_seen = []
-_last_cont_ms = 0
 fire_out_mask = 0
 fire_deadlines = [0] * CUE_COUNT
 last_cont_status = CONT_STATUS_OK
@@ -276,6 +366,15 @@ def make_pin(pin_id, mode, pull=None, value=None, name="pin"):
 safe_led = make_pin(SAFE_LED_PIN, Pin.OUT, value=1, name="safe led")
 arm_led = make_pin(ARM_LED_PIN, Pin.OUT, value=0, name="arm led")
 pre_test = make_pin(PRE_TEST_PIN, Pin.OUT, value=0, name="pre-test")
+arm_control = (
+    make_pin(
+        ARM_CONTROL_PIN,
+        Pin.OUT,
+        value=1 - ARM_CONTROL_ACTIVE_VALUE,
+        name="arm control",
+    )
+    if ARM_CONTROL_PIN is not None else None
+)
 up_button = make_pin(UP_BUTTON_PIN, Pin.IN, Pin.PULL_UP, name="up button")
 down_button = make_pin(DOWN_BUTTON_PIN, Pin.IN, Pin.PULL_UP, name="down button")
 ok_fwd_button = make_pin(OK_FWD_BUTTON_PIN, Pin.IN, Pin.PULL_UP, name="ok/fwd button") if OK_FWD_BUTTON_PIN is not None else None
@@ -298,11 +397,27 @@ except Exception as e:
     print("LCD I2C init skipped:", e)
 
 
+class ReconfiguringADC:
+    """Reselect an nRF SAADC input before every sample.
+
+    The nRF MicroPython port shares SAADC configuration between ADC objects.
+    Without reselection, alternating battery and continuity reads can return
+    the value from whichever input was configured most recently.
+    """
+
+    def __init__(self, pin):
+        self.pin = pin
+
+    def read_u16(self):
+        try:
+            adc = machine.ADC(Pin(self.pin))
+        except Exception:
+            adc = machine.ADC(self.pin)
+        return adc.read_u16()
+
+
 def make_adc(pin):
-    try:
-        return machine.ADC(Pin(pin))
-    except Exception:
-        return machine.ADC(pin)
+    return ReconfiguringADC(pin)
 
 
 try:
@@ -400,6 +515,7 @@ channel_classifier = ChannelClassifier(
     open_max_fraction=CHANNEL_OPEN_MAX_FRACTION,
     short_min_fraction=CHANNEL_SHORT_MIN_FRACTION,
     invalid_is_open=CHANNEL_INVALID_IS_OPEN,
+    open_min_fraction=CHANNEL_OPEN_MIN_FRACTION,
 )
 
 
@@ -460,6 +576,24 @@ def record_master_rx():
 
     last_master_rx_ms = time.ticks_ms()
     lcd_force_refresh = True
+
+
+def check_master_link_failsafe():
+    global ARMED, script_running, lcd_force_refresh
+
+    if not ARMED:
+        return
+    if not last_master_rx_ms:
+        return
+    if time.ticks_diff(time.ticks_ms(), last_master_rx_ms) <= MASTER_LINK_TIMEOUT_MS:
+        return
+
+    ARMED = False
+    script_running = False
+    clear_fire_outputs()
+    set_armed_outputs(False)
+    lcd_force_refresh = True
+    print("DISARMED - master link timeout")
 
 
 def init_lcd_ui():
@@ -550,6 +684,7 @@ def lcd_save_edit():
         lcd_active_view = "edit_blocked"
         return
 
+    previous = runtime_config_values()
     if lcd_edit_target == "group":
         GROUP_ID = lcd_edit_value & 0xFFFF
     elif lcd_edit_target == "network":
@@ -561,7 +696,10 @@ def lcd_save_edit():
             return
         RADIO_CHANNEL = lcd_edit_value % 101
 
-    save_runtime_config()
+    if not persist_runtime_change(previous):
+        lcd_mode = "view"
+        lcd_active_view = "edit_blocked"
+        return
 
     if lcd_edit_target == "channel":
         try:
@@ -759,9 +897,15 @@ def run_lcd_continuity_scan():
             pass
 
     try:
-        status, open_mask = read_open_mask()
+        unit, status, values = read_resistance_values()
+        open_mask = 0
+        for index, value in enumerate(values):
+            if value in (RESISTANCE_VALUE_OPEN, RESISTANCE_VALUE_INVALID):
+                open_mask |= 1 << index
+            elif unit == RESISTANCE_UNIT_DECI_OHM and int(value) <= 5:
+                open_mask |= 1 << index
         set_last_continuity(status, open_mask)
-        print("LCD CONT status=0x%02X open_mask=0x%06X" % (status, open_mask))
+        print("LCD RES status=0x%02X open_mask=0x%06X" % (status, open_mask))
     except Exception as e:
         print("LCD continuity scan failed:", e)
 
@@ -938,70 +1082,30 @@ def build_script_status_text():
 
 def save_runtime_config():
     try:
-        with open("nrf_node_config.py", "w") as f:
-            f.write("# Auto-saved field module config.\n")
-            f.write("UNIQUE_ID = 0x%08X\n" % (CONFIG_UNIQUE_ID & 0xFFFFFFFF))
-            f.write("GROUP_ID = 0x%04X\n" % (GROUP_ID & 0xFFFF))
-            f.write("NETWORK_ID = 0x%04X\n" % (NETWORK_ID & 0xFFFF))
-            f.write("RADIO_CHANNEL = %d\n" % (RADIO_CHANNEL & 0xFF))
-            f.write("CUE_COUNT = %d\n" % CUE_COUNT)
-            f.write("BATTERY_PACK_TYPE = \"%s\"\n" % BATTERY_PACK_TYPE)
-            f.write("BATTERY_ADC_ENABLED = %s\n" % ("True" if BATTERY_ADC_ENABLED else "False"))
-            f.write("LCD_ENABLED = %s\n" % ("True" if LCD_ENABLED else "False"))
-            f.write("LCD_I2C_ID = %d\n" % LCD_I2C_ID)
-            f.write("LCD_SDA_PIN = %d\n" % LCD_SDA_PIN)
-            f.write("LCD_SCL_PIN = %d\n" % LCD_SCL_PIN)
-            f.write("LCD_I2C_FREQ = %d\n" % LCD_I2C_FREQ)
-            if LCD_ADDRESS is None:
-                f.write("LCD_ADDRESS = None\n")
-            else:
-                f.write("LCD_ADDRESS = 0x%02X\n" % LCD_ADDRESS)
-            f.write("LCD_MAPPING = \"%s\"\n" % LCD_MAPPING)
-            f.write("LCD_COLS = %d\n" % LCD_COLS)
-            f.write("LCD_ROWS = %d\n" % LCD_ROWS)
-            f.write("LCD_REFRESH_MS = %d\n" % LCD_REFRESH_MS)
-            f.write("LCD_BUTTON_DEBOUNCE_MS = %d\n" % LCD_BUTTON_DEBOUNCE_MS)
-            f.write("LCD_CONTINUITY_PAGE_SIZE = %d\n" % LCD_CONTINUITY_PAGE_SIZE)
-            f.write("MASTER_LINK_TIMEOUT_MS = %d\n" % MASTER_LINK_TIMEOUT_MS)
-            f.write("PRE_TEST_PIN = %d\n" % PRE_TEST_PIN)
-            f.write("SAFE_LED_PIN = %d\n" % SAFE_LED_PIN)
-            f.write("ARM_LED_PIN = %d\n" % ARM_LED_PIN)
-            f.write("UP_BUTTON_PIN = %d\n" % UP_BUTTON_PIN)
-            f.write("DOWN_BUTTON_PIN = %d\n" % DOWN_BUTTON_PIN)
-            if OK_FWD_BUTTON_PIN is None:
-                f.write("OK_FWD_BUTTON_PIN = None\n")
-            else:
-                f.write("OK_FWD_BUTTON_PIN = %d\n" % OK_FWD_BUTTON_PIN)
-            f.write("OK_BUTTON_PIN = OK_FWD_BUTTON_PIN\n")
-            if BACK_BUTTON_PIN is None:
-                f.write("BACK_BUTTON_PIN = None\n")
-            else:
-                f.write("BACK_BUTTON_PIN = %d\n" % BACK_BUTTON_PIN)
-            f.write("BATT_CHECK_PIN = %d\n" % BATT_CHECK_PIN)
-            f.write("SHORT_CHECK_PIN = %d\n" % SHORT_CHECK_PIN)
-            f.write("SENSE_SELECTED_ADC_PIN = %d\n" % SENSE_SELECTED_ADC_PIN)
-            f.write("HC595_DATA_PIN = %d\n" % HC595_DATA_PIN)
-            f.write("HC595_CLOCK_PIN = %d\n" % HC595_CLOCK_PIN)
-            f.write("HC595_LATCH_PIN = %d\n" % HC595_LATCH_PIN)
-            if HC595_Q7S_PIN is None:
-                f.write("HC595_Q7S_PIN = None\n")
-            else:
-                f.write("HC595_Q7S_PIN = %d\n" % HC595_Q7S_PIN)
-            f.write("HC595_OE_PIN = %d\n" % HC595_OE_PIN)
-            f.write("HC595_SRCLR_PIN = %d\n" % HC595_SRCLR_PIN)
-            f.write("HC595_CLOCK_DELAY_US = %d\n" % HC595_CLOCK_DELAY_US)
-            f.write("STARTUP_595_CHAIN_TEST_ENABLED = %s\n" % ("True" if STARTUP_595_CHAIN_TEST_ENABLED else "False"))
-            f.write("HC595_EXPECTED_CHAIN_BITS = %d\n" % HC595_EXPECTED_CHAIN_BITS)
-            f.write("HC595_CHAIN_TEST_MAX_BITS = %d\n" % HC595_CHAIN_TEST_MAX_BITS)
-            f.write("MEASUREMENT_METHOD = \"%s\"\n" % MEASUREMENT_METHOD)
-            f.write("PRETEST_SETTLE_MS = %d\n" % PRETEST_SETTLE_MS)
-            f.write("PRETEST_OUTPUT_SETTLE_US = %d\n" % PRETEST_OUTPUT_SETTLE_US)
-            f.write("PRETEST_ADC_SAMPLES = %d\n" % PRETEST_ADC_SAMPLES)
-            f.write("PRETEST_ADC_SAMPLE_DELAY_US = %d\n" % PRETEST_ADC_SAMPLE_DELAY_US)
-            f.write("CHANNEL_SENSE_DIVIDER_RATIO = %.8f\n" % CHANNEL_SENSE_DIVIDER_RATIO)
-            f.write("EXTERNAL_VCC_CONTROL_ENABLED = %s\n" % ("True" if EXTERNAL_VCC_CONTROL_ENABLED else "False"))
+        payload = bytearray(RUNTIME_CONFIG_MAGIC)
+        payload += (CONFIG_UNIQUE_ID & 0xFFFFFFFF).to_bytes(4, "big")
+        payload += (GROUP_ID & 0xFFFF).to_bytes(2, "big")
+        payload += (NETWORK_ID & 0xFFFF).to_bytes(2, "big")
+        payload.append(RADIO_CHANNEL & 0xFF)
+        save_crc_payload(RUNTIME_CONFIG_PATH, payload)
+        return True
     except Exception as e:
-        print("Config save failed:", e)
+        print("Runtime config save failed:", e)
+        return False
+
+
+def runtime_config_values():
+    return CONFIG_UNIQUE_ID, GROUP_ID, NETWORK_ID, RADIO_CHANNEL
+
+
+def persist_runtime_change(previous):
+    global CONFIG_UNIQUE_ID, UNIQUE_ID, GROUP_ID, NETWORK_ID, RADIO_CHANNEL
+
+    if save_runtime_config():
+        return True
+    CONFIG_UNIQUE_ID, GROUP_ID, NETWORK_ID, RADIO_CHANNEL = previous
+    UNIQUE_ID = CONFIG_UNIQUE_ID or get_default_unique_id()
+    return False
 
 
 def set_armed_outputs(armed):
@@ -1012,6 +1116,8 @@ def set_armed_outputs(armed):
     lcd_force_refresh = True
     safe_led.value(0 if armed else 1)
     arm_led.value(1 if armed else 0)
+    if arm_control is not None:
+        arm_control.value(ARM_CONTROL_ACTIVE_VALUE if armed else 1 - ARM_CONTROL_ACTIVE_VALUE)
     if armed:
         outputs.clear()
         outputs.set_enabled(True)
@@ -1109,21 +1215,19 @@ def poll_fire_outputs():
         outputs.digitalWriteMask(fire_out_mask)
 
 
-def open_cue_list(open_mask):
-    out = []
-    for cue in range(1, CUE_COUNT + 1):
-        if open_mask & (1 << (cue - 1)):
-            out.append(cue)
-    return out
+def build_resistance_payload(unit, status, values):
+    payload = bytearray((
+        RESISTANCE_PAYLOAD_VERSION,
+        int(unit) & 0xFF,
+        CUE_COUNT & 0xFF,
+        int(status) & 0xFF,
+    ))
+    for value in values:
+        payload += (int(value) & 0xFFFF).to_bytes(2, "big")
+    return bytes(payload)
 
 
-def build_continuity_payload(open_mask):
-    nbytes = (CUE_COUNT + 7) // 8
-    open_mask &= (1 << (nbytes * 8)) - 1
-    return open_mask.to_bytes(nbytes, "big")
-
-
-def read_open_mask():
+def read_resistance_values(force_raw_adc=False):
     if STARTUP_FAULT:
         raise RuntimeError("startup fault: " + STARTUP_FAULT_REASON)
 
@@ -1134,29 +1238,48 @@ def read_open_mask():
         status |= CONT_STATUS_BATTERY_INVALID
         battery_mv = int(BATTERY_MV or 0)
 
-    open_mask = 0
-    normal_count = 0
-    fault_count = 0
+    default_calibration = ResistanceCalibration(RESISTANCE_CALIBRATION_POINTS or ())
+    calibrated = default_calibration.is_valid() and not force_raw_adc
+    unit = RESISTANCE_UNIT_DECI_OHM if calibrated else RESISTANCE_UNIT_ADC_MV
+    bank_calibrations = []
+    if calibrated:
+        for points in RESISTANCE_CALIBRATION_BANKS:
+            calibration = ResistanceCalibration(points)
+            bank_calibrations.append(
+                calibration if calibration.is_valid() else default_calibration
+            )
 
-    for cue in range(1, CUE_COUNT + 1):
-        reading = channel_sensor.read_channel(cue, battery_mv)
-        state = channel_classifier.classify(reading)
+    values = []
+    try:
+        for cue_index in range(CUE_COUNT):
+            reading = channel_sensor.read_channel(cue_index + 1, battery_mv)
+            state = channel_classifier.classify(reading)
+            if not reading.get("valid"):
+                status |= CONT_STATUS_ADC_INVALID
+                values.append(RESISTANCE_VALUE_INVALID)
+                continue
+            if state == STATE_OPEN:
+                values.append(RESISTANCE_VALUE_OPEN)
+                continue
 
-        if not reading.get("valid") or state not in (STATE_NORMAL, STATE_OPEN, STATE_FAULT):
-            status |= CONT_STATUS_ADC_INVALID
+            value = reading.get("adc_mv")
+            if calibrated:
+                bank_index = cue_index // RESISTANCE_CALIBRATION_BANK_SIZE
+                calibration = (
+                    bank_calibrations[bank_index]
+                    if bank_index < len(bank_calibrations)
+                    else default_calibration
+                )
+                value = calibration.deci_ohms_from_adc_mv(value)
 
-        if state == STATE_NORMAL:
-            normal_count += 1
-        else:
-            open_mask |= 1 << (cue - 1)
-            if state == STATE_FAULT:
-                status |= CONT_STATUS_FAULT_DETECTED
-                fault_count += 1
+            if value is None:
+                values.append(RESISTANCE_VALUE_INVALID)
+            else:
+                values.append(max(0, min(0xFFFD, int(value))))
+    finally:
+        disable_measurement_frontend()
 
-    disable_measurement_frontend()
-    if fault_count:
-        print("CONT faults=%d normal=%d" % (fault_count, normal_count))
-    return status, open_mask
+    return unit, status, values
 
 
 def handle_discover(pkt):
@@ -1180,31 +1303,80 @@ def handle_discover(pkt):
     )
 
 
-def handle_continuity(pkt):
-    global _last_cont_ms
-
+def handle_resistance(pkt):
     if STARTUP_FAULT:
-        print("CONT rejected - startup fault:", STARTUP_FAULT_REASON)
-        reply_nack_if_unique(pkt, CMD_CONTINUITY_REQ, NACK_INTERNAL_ERROR)
+        reply_nack_if_unique(pkt, CMD_RESISTANCE_REQ, NACK_INTERNAL_ERROR)
         return
-
-    now = time.ticks_ms()
-    if time.ticks_diff(now, _last_cont_ms) < CONT_MIN_INTERVAL_MS:
-        return
-    _last_cont_ms = now
 
     try:
-        status, open_mask = read_open_mask()
-        set_last_continuity(status, open_mask)
-        tx_nfcp(nfcp.build_response(UNIQUE_ID, CMD_CONTINUITY_RSP, build_continuity_payload(open_mask)))
-        print("CONT status=0x%02X open_mask=0x%06X open_cues=%s" % (
-            status,
-            open_mask,
-            str(open_cue_list(open_mask)),
-        ))
+        data = pkt.get("data", b"")
+        if len(data) > 1:
+            reply_nack_if_unique(pkt, CMD_RESISTANCE_REQ, NACK_BAD_LENGTH)
+            return
+        force_raw_adc = bool(data and data[0] == RESISTANCE_REQUEST_RAW_ADC)
+        unit, status, values = read_resistance_values(force_raw_adc)
+        payload = build_resistance_payload(unit, status, values)
+        tx_nfcp(nfcp.build_response(UNIQUE_ID, CMD_RESISTANCE_RSP, payload))
+        print("RES unit=%d status=0x%02X values=%s" % (unit, status, str(values)))
     except Exception as e:
-        print("CONT error:", e)
-        reply_nack_if_unique(pkt, CMD_CONTINUITY_REQ, NACK_INTERNAL_ERROR)
+        print("RES error:", e)
+        reply_nack_if_unique(pkt, CMD_RESISTANCE_REQ, NACK_INTERNAL_ERROR)
+
+
+def handle_set_resistance_calibration(pkt):
+    global RESISTANCE_CALIBRATION_BANKS
+
+    data = pkt.get("data", b"")
+    if ARMED:
+        reply_nack_if_unique(pkt, CMD_SET_RESISTANCE_CAL, NACK_REJECTED_ARMED)
+        return
+    if len(data) < 3 or data[0] != RESISTANCE_CALIBRATION_VERSION:
+        reply_nack_if_unique(pkt, CMD_SET_RESISTANCE_CAL, NACK_BAD_LENGTH)
+        return
+
+    bank_index = int(data[1])
+    point_count = int(data[2])
+    bank_count = (
+        CUE_COUNT + RESISTANCE_CALIBRATION_BANK_SIZE - 1
+    ) // RESISTANCE_CALIBRATION_BANK_SIZE
+    if (
+        bank_index >= bank_count or
+        point_count < 2 or
+        point_count > RESISTANCE_CALIBRATION_BANK_SIZE
+    ):
+        reply_nack_if_unique(pkt, CMD_SET_RESISTANCE_CAL, NACK_INVALID_VALUE)
+        return
+    if len(data) != 3 + point_count * 4:
+        reply_nack_if_unique(pkt, CMD_SET_RESISTANCE_CAL, NACK_BAD_LENGTH)
+        return
+
+    points = []
+    offset = 3
+    for _ in range(point_count):
+        adc_mv = int.from_bytes(data[offset:offset + 2], "big")
+        deci_ohms = int.from_bytes(data[offset + 2:offset + 4], "big")
+        points.append((adc_mv, deci_ohms))
+        offset += 4
+
+    points.sort(key=lambda point: point[0])
+    if not ResistanceCalibration(points).is_valid():
+        reply_nack_if_unique(pkt, CMD_SET_RESISTANCE_CAL, NACK_INVALID_VALUE)
+        return
+
+    banks = list(RESISTANCE_CALIBRATION_BANKS or ())
+    while len(banks) < bank_count:
+        banks.append(())
+    banks[bank_index] = tuple(points)
+    updated_banks = tuple(banks)
+    try:
+        save_resistance_calibration_banks(updated_banks)
+    except Exception as e:
+        print("Resistance calibration save failed:", e)
+        reply_nack_if_unique(pkt, CMD_SET_RESISTANCE_CAL, NACK_INTERNAL_ERROR)
+        return
+    RESISTANCE_CALIBRATION_BANKS = updated_banks
+    reply_ack_if_unique(pkt, CMD_SET_RESISTANCE_CAL)
+    print("RES CAL bank=%d points=%s" % (bank_index + 1, str(points)))
 
 
 def fire_mask(mask):
@@ -1597,9 +1769,14 @@ def handle(pkt):
             machine.reset()
         return
 
-    if cmd == CMD_CONTINUITY_REQ:
+    if cmd == CMD_RESISTANCE_REQ:
         if pkt.get("frame_type") == SOF_UNIQUE and pkt.get("target") == UNIQUE_ID:
-            handle_continuity(pkt)
+            handle_resistance(pkt)
+        return
+
+    if cmd == CMD_SET_RESISTANCE_CAL:
+        if pkt.get("frame_type") == SOF_UNIQUE and pkt.get("target") == UNIQUE_ID:
+            handle_set_resistance_calibration(pkt)
         return
 
     if cmd == CMD_SET_GROUP:
@@ -1608,9 +1785,12 @@ def handle(pkt):
         elif len(data) != 2:
             reply_nack_if_unique(pkt, CMD_SET_GROUP, NACK_BAD_LENGTH)
         else:
+            previous = runtime_config_values()
             GROUP_ID = int.from_bytes(data, "big") & 0xFFFF
-            save_runtime_config()
-            reply_ack_if_unique(pkt, CMD_SET_GROUP)
+            if persist_runtime_change(previous):
+                reply_ack_if_unique(pkt, CMD_SET_GROUP)
+            else:
+                reply_nack_if_unique(pkt, CMD_SET_GROUP, NACK_INTERNAL_ERROR)
         return
 
     if cmd == CMD_SET_NETWORK:
@@ -1619,9 +1799,12 @@ def handle(pkt):
         elif len(data) != 2:
             reply_nack_if_unique(pkt, CMD_SET_NETWORK, NACK_BAD_LENGTH)
         else:
+            previous = runtime_config_values()
             NETWORK_ID = int.from_bytes(data, "big") & 0xFFFF
-            save_runtime_config()
-            reply_ack_if_unique(pkt, CMD_SET_NETWORK)
+            if persist_runtime_change(previous):
+                reply_ack_if_unique(pkt, CMD_SET_NETWORK)
+            else:
+                reply_nack_if_unique(pkt, CMD_SET_NETWORK, NACK_INTERNAL_ERROR)
         return
 
     if cmd == CMD_SET_RADIO_CHANNEL:
@@ -1632,15 +1815,18 @@ def handle(pkt):
         elif not valid_radio_channel(data[0]):
             reply_nack_if_unique(pkt, CMD_SET_RADIO_CHANNEL, NACK_INVALID_VALUE)
         else:
+            previous = runtime_config_values()
             RADIO_CHANNEL = data[0]
-            save_runtime_config()
-            reply_ack_if_unique(pkt, CMD_SET_RADIO_CHANNEL)
-            time.sleep_ms(80)
-            nrf_radio.init(
-                channel=RADIO_CHANNEL,
-                tx_power=RADIO_TX_POWER,
-                address=RADIO_ADDRESS,
-            )
+            if persist_runtime_change(previous):
+                reply_ack_if_unique(pkt, CMD_SET_RADIO_CHANNEL)
+                time.sleep_ms(80)
+                nrf_radio.init(
+                    channel=RADIO_CHANNEL,
+                    tx_power=RADIO_TX_POWER,
+                    address=RADIO_ADDRESS,
+                )
+            else:
+                reply_nack_if_unique(pkt, CMD_SET_RADIO_CHANNEL, NACK_INTERNAL_ERROR)
         return
 
     if cmd == CMD_SET_UNIQUE:
@@ -1652,12 +1838,16 @@ def handle(pkt):
             if pkt.get("frame_type") == SOF_UNIQUE:
                 tx_nfcp(nfcp.build_nack(old_unique, CMD_SET_UNIQUE, NACK_BAD_LENGTH))
         else:
+            previous = runtime_config_values()
             CONFIG_UNIQUE_ID = int.from_bytes(data, "big") & 0xFFFFFFFF
             UNIQUE_ID = CONFIG_UNIQUE_ID or get_default_unique_id()
-            save_runtime_config()
-            if pkt.get("frame_type") == SOF_UNIQUE:
+            saved = persist_runtime_change(previous)
+            if saved and pkt.get("frame_type") == SOF_UNIQUE:
                 tx_nfcp(nfcp.build_ack(old_unique, CMD_SET_UNIQUE, ACK_OK))
-            print("NEW UNIQUE_ID = 0x%08X" % UNIQUE_ID)
+            elif not saved and pkt.get("frame_type") == SOF_UNIQUE:
+                tx_nfcp(nfcp.build_nack(old_unique, CMD_SET_UNIQUE, NACK_INTERNAL_ERROR))
+            if saved:
+                print("NEW UNIQUE_ID = 0x%08X" % UNIQUE_ID)
         return
 
 
@@ -1706,8 +1896,8 @@ def main():
     run_startup_self_tests()
     radio_ready = init_radio()
     print(
-        "Nightfire nRF52840 field module uid=0x%08X group=0x%04X net=0x%04X channel=%d" %
-        (UNIQUE_ID, GROUP_ID, NETWORK_ID, RADIO_CHANNEL)
+        "Nightfire nRF52840 field module board=%s uid=0x%08X group=0x%04X net=0x%04X channel=%d" %
+        (BOARD_PINOUT, UNIQUE_ID, GROUP_ID, NETWORK_ID, RADIO_CHANNEL)
     )
     if STARTUP_FAULT:
         print("Startup status: FAULT %s" % STARTUP_FAULT_REASON)
@@ -1730,6 +1920,8 @@ def main():
             "External VCC control P%d value=%d settle=%dms" %
             (EXTERNAL_VCC_CONTROL_PIN, EXTERNAL_VCC_ENABLE_VALUE, EXTERNAL_VCC_SETTLE_MS)
         )
+    if ARM_CONTROL_PIN is not None:
+        print("Arm control P%d active=%d" % (ARM_CONTROL_PIN, ARM_CONTROL_ACTIVE_VALUE))
     if MEASUREMENT_METHOD == "pretest_selected_cue_short_check":
         print(
             "Pre-test measurement PRE_TEST=P%d SHORT_CHECK=P%d settle=%dms output_settle=%dus" %
@@ -1766,6 +1958,7 @@ def main():
             module_ota.poll_timeout()
             poll_fire_outputs()
             run_script_scheduler()
+            check_master_link_failsafe()
 
             if not radio_ready:
                 time.sleep_ms(250)

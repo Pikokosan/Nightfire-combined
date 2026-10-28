@@ -15,6 +15,12 @@ def main():
     parser.add_argument("--port", required=True)
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--timeout", type=float, default=10.0)
+    parser.add_argument(
+        "--startup-delay",
+        type=float,
+        default=0.0,
+        help="Seconds to wait after opening a port that resets the device.",
+    )
     parser.add_argument("code_file")
     args = parser.parse_args()
 
@@ -22,6 +28,17 @@ def main():
         code = f.read()
 
     with serial.Serial(args.port, args.baud, timeout=0.05, write_timeout=2) as port:
+        try:
+            port.dtr = False
+            port.rts = False
+            time.sleep(0.2)
+        except Exception:
+            pass
+
+        port.reset_input_buffer()
+        if args.startup_delay > 0:
+            time.sleep(args.startup_delay)
+            port.reset_input_buffer()
         raw.stop_running_program(port)
         raw.enter_raw_repl(port)
         try:

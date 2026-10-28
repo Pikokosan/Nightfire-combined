@@ -64,6 +64,18 @@ PING_REPLY_BYTE  = 0xAA   # Used when CMD_PING payload is empty
 # continuity
 CMD_CONTINUITY_REQ = 0x22   # Unique-only request
 CMD_CONTINUITY_RSP = 0x23   # Response-only
+CMD_RESISTANCE_REQ = 0x24   # Unique-only resistance scan request
+CMD_RESISTANCE_RSP = 0x25   # Response-only resistance scan result
+CMD_SET_RESISTANCE_CAL = 0x26  # Unique-only bank calibration update
+
+RESISTANCE_PAYLOAD_VERSION = 0x01
+RESISTANCE_UNIT_DECI_OHM = 0x01
+RESISTANCE_UNIT_ADC_MV = 0x02
+RESISTANCE_VALUE_INVALID = 0xFFFE
+RESISTANCE_VALUE_OPEN = 0xFFFF
+RESISTANCE_REQUEST_CALIBRATED = 0x00
+RESISTANCE_REQUEST_RAW_ADC = 0x01
+RESISTANCE_CALIBRATION_VERSION = 0x01
 
 ACK_OK              = 0x00
 NACK_REJECTED_ARMED = 0x01
@@ -235,6 +247,32 @@ class NFCP:
             bytes([self.node_id]) +
             (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
             bytes([CMD_CONTINUITY_REQ])
+        )
+        return self._frame(SOF_UNIQUE, payload)
+
+    def build_resistance_request(self, target_unique: int, raw_adc: bool = False) -> bytes:
+        payload = (
+            bytes([self.node_id]) +
+            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes([CMD_RESISTANCE_REQ]) +
+            (bytes([RESISTANCE_REQUEST_RAW_ADC]) if raw_adc else b"")
+        )
+        return self._frame(SOF_UNIQUE, payload)
+
+    def build_set_resistance_calibration(self, target_unique: int, bank_index: int, points) -> bytes:
+        data = bytearray((
+            RESISTANCE_CALIBRATION_VERSION,
+            int(bank_index) & 0xFF,
+            len(points) & 0xFF,
+        ))
+        for adc_mv, deci_ohms in points:
+            data += (int(adc_mv) & 0xFFFF).to_bytes(2, "big")
+            data += (int(deci_ohms) & 0xFFFF).to_bytes(2, "big")
+        payload = (
+            bytes([self.node_id]) +
+            (target_unique & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes([CMD_SET_RESISTANCE_CAL]) +
+            bytes(data)
         )
         return self._frame(SOF_UNIQUE, payload)
 
@@ -596,6 +634,8 @@ class NFCPStreamParser:
                 CMD_SET_NETWORK,
                 CMD_SET_RADIO_CHANNEL,
                 CMD_CONTINUITY_REQ,
+                CMD_RESISTANCE_REQ,
+                CMD_SET_RESISTANCE_CAL,
                 CMD_INFO_REQ,
                 CMD_OTA_UPDATE_BEGIN,
                 CMD_OTA_UPDATE_WRITE,
@@ -631,6 +671,8 @@ class NFCPStreamParser:
             CMD_SET_NETWORK,
             CMD_SET_RADIO_CHANNEL,
             CMD_CONTINUITY_REQ,
+            CMD_RESISTANCE_REQ,
+            CMD_SET_RESISTANCE_CAL,
             CMD_INFO_REQ,
             CMD_OTA_UPDATE_BEGIN,
             CMD_OTA_UPDATE_WRITE,

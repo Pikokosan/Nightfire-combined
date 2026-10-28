@@ -226,12 +226,32 @@ def encode_text_field(text):
     return bytes([len(data)]) + data
 
 
+def build_script_status_text():
+    if script_id_loaded is None:
+        script_id_text = "--"
+    else:
+        script_id_text = "%04X" % script_id_loaded
+
+    hb_age = -1
+    if script_last_heartbeat_ms:
+        hb_age = time.ticks_diff(time.ticks_ms(), script_last_heartbeat_ms)
+
+    return "id=%s entries=%d run=%d next=%d hb=%d %s" % (
+        script_id_text,
+        len(script_entries),
+        1 if script_running else 0,
+        script_next_index,
+        hb_age,
+        script_last_event,
+    )
+
+
 def build_info_payload():
     return (
         encode_text_field(APP_FIRMWARE_NAME) +
         encode_text_field(APP_FIRMWARE_VERSION) +
         encode_text_field("nrf-radio-native") +
-        encode_text_field("") +
+        encode_text_field(build_script_status_text()) +
         encode_text_field("0x%08X" % (get_default_unique_id() & 0xFFFFFFFF)) +
         encode_text_field("0x%08X" % (CONFIG_UNIQUE_ID & 0xFFFFFFFF)) +
         encode_text_field(str(int(BATTERY_MV))) +
@@ -335,6 +355,22 @@ def record_master_rx():
 
     last_master_rx_ms = time.ticks_ms()
     lcd_force_refresh = True
+
+
+def check_master_link_failsafe():
+    global ARMED, script_running, lcd_force_refresh
+
+    if not ARMED:
+        return
+    if not last_master_rx_ms:
+        return
+    if time.ticks_diff(time.ticks_ms(), last_master_rx_ms) <= MASTER_LINK_TIMEOUT_MS:
+        return
+
+    ARMED = False
+    script_running = False
+    lcd_force_refresh = True
+    print("DISARMED - master link timeout")
 
 
 def init_lcd_ui():
@@ -1131,6 +1167,7 @@ def main():
         try:
             module_ota.poll_timeout()
             run_script_scheduler()
+            check_master_link_failsafe()
 
             if not radio_ready:
                 time.sleep_ms(250)

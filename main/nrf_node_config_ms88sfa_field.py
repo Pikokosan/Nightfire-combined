@@ -3,9 +3,12 @@
 # MicroPython pin numbering follows the local nRF52840 board convention:
 # P0.nn -> nn, P1.nn -> 32 + nn.
 
+BOARD_PINOUT = "ms88sfa"
+
 # Control, status, buttons, and ADC.
 PRE_TEST_PIN = 46           # Module pin 9,  P1.14
 ARM_CONTROL_PIN = 13        # Module pin 30, P0.13
+ARM_CONTROL_ACTIVE_VALUE = 1
 SAFE_LED_PIN = 42           # Module pin 7,  P1.10
 ARM_LED_PIN = 44            # Module pin 8,  P1.12
 UP_BUTTON_PIN = 45          # Module pin 2,  P1.13
@@ -44,10 +47,12 @@ PRETEST_SETTLE_MS = 5
 PRETEST_OUTPUT_SETTLE_US = 750
 PRETEST_ADC_SAMPLES = 16
 PRETEST_ADC_SAMPLE_DELAY_US = 150
+# The low-current pre-test path is active-low at SHORT_CHECK: connected cues
+# pull the ADC low, while open cues remain high.
+CHANNEL_OPEN_MIN_FRACTION = 0.15
 
-# Keep the prototype at 18 used outputs even though the schematic has 24 output
-# footprints from three 74HC595 devices.
-CUE_COUNT = 18
+# All outputs from the three 74HC595 devices are field-module cues.
+CUE_COUNT = 24
 
 # Legacy direct channel-sense divider value. The MS88SFA no-4051 schematic uses
 # SHORT_CHECK through the pre-test path instead; keep this only for shared code

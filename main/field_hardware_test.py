@@ -32,11 +32,11 @@ ENABLE_595_CHAIN_TEST = getattr(
 HC595_EXPECTED_CHAIN_BITS = getattr(node_config, "HC595_EXPECTED_CHAIN_BITS", 0)
 HC595_CHAIN_TEST_MAX_BITS = getattr(node_config, "HC595_CHAIN_TEST_MAX_BITS", 64)
 
-CHANNEL_COUNT = int(getattr(node_config, "CUE_COUNT", 18))
+CHANNEL_COUNT = int(getattr(node_config, "CUE_COUNT", 24))
 if CHANNEL_COUNT < 1:
     CHANNEL_COUNT = 1
-if CHANNEL_COUNT > 18:
-    CHANNEL_COUNT = 18
+if CHANNEL_COUNT > 24:
+    CHANNEL_COUNT = 24
 
 BATTERY_MV_FALLBACK = getattr(node_config, "BATTERY_MV", 0)
 

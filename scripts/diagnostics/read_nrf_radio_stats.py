@@ -12,14 +12,11 @@ CODE = r'''
 import nrf_radio
 print("RADIO_STATS", nrf_radio.stats())
 try:
-    import sys
-    app = sys.modules.get("nrf_dummy_main") or sys.modules.get("field_main")
-    if app:
-        print("APP", getattr(app, "APP_FIRMWARE_NAME", "?"), getattr(app, "APP_FIRMWARE_VERSION", "?"))
-        print("UID", "0x%08X" % (getattr(app, "UNIQUE_ID", 0) & 0xFFFFFFFF))
-        print("NET", "0x%04X" % (getattr(app, "NETWORK_ID", 0) & 0xFFFF), "CH", getattr(app, "RADIO_CHANNEL", "?"))
+    import nrf_node_config as config
+    print("NET", "0x%04X" % (getattr(config, "NETWORK_ID", 0x04D2) & 0xFFFF))
+    print("CH", getattr(config, "RADIO_CHANNEL", 90))
 except Exception as e:
-    print("APP_STATS_ERROR", e)
+    print("CONFIG_STATS_ERROR", e)
 '''
 
 

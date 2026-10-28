@@ -19,6 +19,7 @@ env/
 .env
 *.log
 .codex/
+.codex-remote-attachments/
 
 # OS noise
 Thumbs.db

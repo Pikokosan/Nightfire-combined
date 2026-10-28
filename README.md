@@ -32,7 +32,7 @@ Each upload script accepts a `-Port` override.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\upload_master_to_com7.ps1 -Port COM21
-powershell -ExecutionPolicy Bypass -File .\scripts\upload_field_module_to_com10.ps1 -Port COM10
+powershell -ExecutionPolicy Bypass -File .\scripts\upload_field_module_to_com10.ps1 -Port COM10 -Pinout promicro
 powershell -ExecutionPolicy Bypass -File .\scripts\upload_lcd_ui_test_to_com10.ps1 -Port COM10
 powershell -ExecutionPolicy Bypass -File .\scripts\upload_nrf_bridge.ps1 -Port COM15
 powershell -ExecutionPolicy Bypass -File .\scripts\upload_nrf_dummy.ps1 -Port COM16
@@ -44,12 +44,13 @@ To replace the field firmware with the standalone 18-channel hardware test app:
 powershell -ExecutionPolicy Bypass -File .\scripts\upload_field_hardware_test_to_com10.ps1 -Port COM10
 ```
 
-The hardware test app targets the SuperMini NRF52840 pinout in
-`docs/field_module_pinout.md`, runs no Nightfire radio/protocol code, keeps
-74HC595 `/OE` disabled by default, drives `P0.13` high to power the 74HC4051s
-from the board `VCC` pin, repeatedly scans all 18 muxed ADC channels, and only
+The field and hardware-test upload scripts accept `-Pinout promicro` for the
+nRF52840 Pro Micro test fixture or `-Pinout ms88sfa` for the production module
+mapping documented in `docs/field_module_pinout.md`. The hardware test runs no
+Nightfire radio/protocol code, keeps 74HC595 `/OE` disabled by default, and only
 walks the outputs if `ENABLE_OUTPUT_WALK = True` is supplied in
-`nrf_node_config.py`.
+`nrf_node_config.py`. Omit `-Pinout` to retain the configuration already stored
+on a board.
 
 VS Code tasks are provided for the common uploads:
 
@@ -191,6 +192,12 @@ Default MS88SFA LCD and button mapping:
 - Down button: MicroPython pin `47` / nRF `P1.15`
 - OK / forward button: MicroPython pin `15` / nRF `P0.15`
 - Back button: MicroPython pin `20` / nRF `P0.20`
+
+For the complete Pro Micro field-module mapping, including the 74HC595,
+pre-test, ADC, LEDs, and hardware ARM output, use
+`main/nrf_node_config_promicro_field.py` and the `-Pinout promicro` upload
+option. The production mapping remains in
+`main/nrf_node_config_ms88sfa_field.py`.
 
 UP and DOWN move between pages, BACK returns to the home page, and OK refreshes
 continuity when viewing continuity pages. The LCD shows field-module system

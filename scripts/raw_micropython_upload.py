@@ -103,7 +103,10 @@ def exec_raw(port, code, timeout=10):
     port.write(code)
     port.write(CTRL_D)
 
-    response = wait_for(port, b"\x04\x04>", timeout=timeout)
+    # Raw REPL always ends stderr with EOT followed by the prompt. When a
+    # command raises, stdout EOT and stderr EOT are separated by traceback
+    # text, so waiting for two adjacent EOT bytes hides the real exception.
+    response = wait_for(port, b"\x04>", timeout=timeout)
     ok_at = response.find(b"OK")
 
     if ok_at < 0:
@@ -170,7 +173,7 @@ def main():
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--chunk-size", type=int, default=256)
     parser.add_argument("--delete", action="append", default=[], help="Remote file to remove before uploading")
-    parser.add_argument("copies", nargs="+", help="Pairs of local_path:remote_path")
+    parser.add_argument("copies", nargs="*", help="Pairs of local_path:remote_path")
     args = parser.parse_args()
 
     with serial.Serial(args.port, args.baud, timeout=0.05, write_timeout=2) as port:
