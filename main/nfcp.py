@@ -67,6 +67,8 @@ CMD_CONTINUITY_RSP = 0x23   # Response-only
 CMD_RESISTANCE_REQ = 0x24   # Unique-only resistance scan request
 CMD_RESISTANCE_RSP = 0x25   # Response-only resistance scan result
 CMD_SET_RESISTANCE_CAL = 0x26  # Unique-only bank calibration update
+CMD_OUTPUT_STATUS_REQ = 0x27   # Unique-only physical output state request
+CMD_OUTPUT_STATUS_RSP = 0x28   # Response-only physical output state
 
 RESISTANCE_PAYLOAD_VERSION = 0x01
 RESISTANCE_UNIT_DECI_OHM = 0x01
@@ -258,6 +260,9 @@ class NFCP:
             (bytes([RESISTANCE_REQUEST_RAW_ADC]) if raw_adc else b"")
         )
         return self._frame(SOF_UNIQUE, payload)
+
+    def build_output_status_request(self, target_unique: int) -> bytes:
+        return self.build_unique_command(target_unique, CMD_OUTPUT_STATUS_REQ)
 
     def build_set_resistance_calibration(self, target_unique: int, bank_index: int, points) -> bytes:
         data = bytearray((
@@ -636,6 +641,7 @@ class NFCPStreamParser:
                 CMD_CONTINUITY_REQ,
                 CMD_RESISTANCE_REQ,
                 CMD_SET_RESISTANCE_CAL,
+                CMD_OUTPUT_STATUS_REQ,
                 CMD_INFO_REQ,
                 CMD_OTA_UPDATE_BEGIN,
                 CMD_OTA_UPDATE_WRITE,
@@ -673,6 +679,7 @@ class NFCPStreamParser:
             CMD_CONTINUITY_REQ,
             CMD_RESISTANCE_REQ,
             CMD_SET_RESISTANCE_CAL,
+            CMD_OUTPUT_STATUS_REQ,
             CMD_INFO_REQ,
             CMD_OTA_UPDATE_BEGIN,
             CMD_OTA_UPDATE_WRITE,
