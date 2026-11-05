@@ -50,7 +50,7 @@ class _ManualFirePanelState extends State<ManualFirePanel> {
         child: Padding(
           padding: EdgeInsets.all(16),
           child: Text(
-            'Manual fire requires a connected radio running usb-master-0.4.0 bridge firmware.',
+            'Manual fire requires a connected radio running usb-master-0.4 bridge firmware.',
           ),
         ),
       );

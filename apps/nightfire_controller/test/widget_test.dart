@@ -164,6 +164,7 @@ void main() {
                 const Text('Script workspace'),
                 const Text('Radio settings'),
                 const Text('Interface settings'),
+                const Text('Firmware updates'),
               ],
             ),
           ),

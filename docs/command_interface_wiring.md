@@ -43,17 +43,19 @@ References:
 - https://nicekeyboards.com/docs/nice-nano/
 - https://www.ti.com/lit/ds/symlink/sn74ahct125.pdf
 
-## Four proposed status pixels
+## Four status pixels
 
-| Pixel | Purpose | Prepared behavior |
+| Pixel | Purpose | Behavior |
 | --- | --- | --- |
-| 1 | APP session | Blue during valid host heartbeat; off without a current session |
-| 2 | Radio receive activity | Green for a recent NFCP response; amber otherwise |
-| 3 | Remote ARM state | Amber: remote arm confirmation is not implemented in this stage |
-| 4 | Fault | Flashing red for session expiry, radio failure or interface faults |
+| 1 | ARM switch | Green = SAFE; red = ARM; flashing amber = switch fault or unsettled reading; off = no switch configured |
+| 2 | Field module arm state | Green = nothing armed through this bridge, or every armed module ACKed a unique DISARM; red = a module may be armed; amber = DISARM sent without per-module confirmation (STOP broadcast), or the bridge is holding the RF keepalive so modules can self-disarm after host loss; amber without master firmware |
+| 3 | Heartbeats | Steady blue while the app's host heartbeat is current; brief green blink on each RF keepalive sent to the field (every 2.5 s); off without an app session |
+| 4 | Fault | Flashing red for session expiry, radio failure, RF keepalive failure or interface faults |
 
-Radio activity is not proof that every module is reachable. Extra configured
-pixels are kept off. Brightness is limited in firmware; do not use this software
+Pixel 2 reflects what the bridge sent and what modules acknowledged; it is not a
+live readback of each module. A green pixel 2 after host loss means the field's
+self-disarm window has passed, not that each module reported DISARM. Extra
+configured pixels are kept off. Brightness is limited in firmware; do not use this software
 limit to determine the power supply's required capacity.
 
 ## Firmware setup after wiring

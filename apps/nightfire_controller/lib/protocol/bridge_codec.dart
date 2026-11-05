@@ -160,3 +160,25 @@ Map<String, String> bridgeStats(List<int> bytes) {
         : '${rawRssi >= 32768 ? rawRssi - 65536 : rawRssi} dBm (last sample)',
   };
 }
+
+/// Any 0.4.x USB master build; 0.4.1 added firmware updates with rollback.
+bool isMasterFirmware(String? firmware) =>
+    firmware != null && RegExp(r'^usb-master-0\.4\.\d+$').hasMatch(firmware);
+
+/// Bridge files the firmware page may replace. The radio config is left out
+/// so an update keeps its network, channel and LED settings.
+const bridgeFirmwareFiles = [
+  'usb_master_bundle.mpy',
+  'bridge_radio.py',
+  'usb_master_control.py',
+  'usb_master_maintenance.py',
+  'usb_bridge_transport.py',
+  'usb_monitor_nfcp.py',
+  'command_interface.py',
+  'main.py', // Last: the boot entry only changes once everything else is in.
+];
+
+/// The version string compiled into a bridge image, if it has one.
+String? embeddedBridgeVersion(List<int> bytes) => RegExp(
+  r'usb-master-\d+\.\d+\.\d+',
+).firstMatch(latin1.decode(bytes))?.group(0);

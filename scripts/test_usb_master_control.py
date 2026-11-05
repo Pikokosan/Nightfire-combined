@@ -135,6 +135,42 @@ class MasterTests(unittest.TestCase):
         self.master.poll(False, True)
         self.assertTrue(self.master.needs_rearm)
 
+    def disarm_ack(self, uid):
+        payload = (uid & 0xFFFFFFFF).to_bytes(4, 'big') + bytes([0x50, 0x11, 0])
+        body = bytes([len(payload)]) + payload
+        body += bridge_radio.int_to_be(bridge_radio.crc16_ccitt(body), 2)
+        frame = bytearray(b'\xff\xfa')
+        for value in body:
+            frame.append(value)
+            if value == 255:
+                frame.append(254)
+        self.master.observe_reply(bytes(frame))
+
+    def test_arm_state_safe_armed_then_confirmed_safe(self):
+        self.assertEqual(self.master.arm_state(), MasterControl.ARM_SAFE)
+        self.master.permit(self.p.build_arm_unique(self.uid), True)
+        self.assertEqual(self.master.arm_state(), MasterControl.ARM_ARMED)
+        self.disarm_ack(self.uid)
+        self.assertEqual(self.master.arm_state(), MasterControl.ARM_SAFE)
+
+    def test_broadcast_disarm_is_unconfirmed_until_acked(self):
+        self.master.permit(self.p.build_arm_unique(self.uid), True)
+        self.master.permit(self.p.build_disarm_broadcast(), True)
+        self.assertEqual(self.master.arm_state(), MasterControl.ARM_UNCONFIRMED)
+        self.disarm_ack(self.uid)
+        self.assertEqual(self.master.arm_state(), MasterControl.ARM_SAFE)
+
+    def test_host_loss_is_unconfirmed_through_the_self_disarm_window(self):
+        self.master.permit(self.p.build_arm_unique(self.uid), True)
+        self.master.poll(False, True)
+        self.assertEqual(self.master.arm_state(), MasterControl.ARM_UNCONFIRMED)
+        self.now += 40
+        self.drain_stop()
+        self.assertEqual(self.master.arm_state(), MasterControl.ARM_UNCONFIRMED)
+        self.now = KEEPALIVE_HOLD_MS
+        self.master.poll(True, True)
+        self.assertEqual(self.master.arm_state(), MasterControl.ARM_SAFE)
+
     def test_rf_failure_keeps_stop_pending(self):
         self.master.permit(self.p.build_arm_unique(self.uid), True)
         self.success = False
@@ -216,6 +252,131 @@ class MaintenanceTests(unittest.TestCase):
         self.assertIn('ARM_SWITCH_PIN = 9', content)
         self.assertIn('MASTER_ENABLED = True', content)
         self.assertEqual(Path('nrf_bridge_config.py.bak').read_text(), 'original')
+
+    def install(self, name, data):
+        encoded = name.encode()
+        self.maintenance.file_command(0x32, bytes([len(encoded)]) + encoded +
+            len(data).to_bytes(4, 'big') + bridge_radio.crc16_ccitt(data).to_bytes(2, 'big'))
+        self.maintenance.file_command(0x33, b'\0' * 4 + data)
+        self.maintenance.file_command(0x34, b'')
+
+    def test_bundle_update_is_marked_for_trial_and_confirmed(self):
+        Path('usb_master_bundle.mpy').write_bytes(b'old')
+        Path('usb_master_bundle.mpy.bak').write_bytes(b'older')
+        self.install('usb_master_bundle.mpy', b'new')
+        self.assertEqual(Path('usb_master_bundle.mpy').read_bytes(), b'new')
+        self.assertEqual(Path('usb_master_bundle.mpy.bak').read_bytes(), b'old')
+        self.assertTrue(Path('update_pending').exists())
+        Path('update_pending').rename('update_trial')  # what main.py does at boot
+        self.assertTrue(self.maintenance.confirm_trial())
+        self.assertFalse(Path('update_trial').exists())
+        self.assertFalse(self.maintenance.confirm_trial())
+
+    def test_resent_chunk_is_acknowledged_without_writing_twice(self):
+        Path('main.py').write_bytes(b'original')
+        self.begin(b'abcdef')
+        self.maintenance.file_command(0x33, b'\0' * 4 + b'abc')
+        self.maintenance.file_command(0x33, b'\0' * 4 + b'abc')  # lost reply
+        self.maintenance.file_command(0x33, b'\0\0\0\3' + b'def')
+        self.maintenance.file_command(0x34, b'')
+        self.assertEqual(Path('main.py').read_bytes(), b'abcdef')
+
+    def test_other_files_do_not_start_a_trial(self):
+        self.install('main.py', b'entry')
+        self.assertFalse(Path('update_pending').exists())
+
+    def test_storage_is_checked_before_writing(self):
+        with patch('usb_master_maintenance._free_bytes', return_value=1000):
+            with self.assertRaises(ValueError):
+                self.install('usb_master_bundle.mpy', b'x' * 2000)
+        self.assertFalse(Path('usb_master_bundle.mpy.tmp').exists())
+
+    def test_failed_write_removes_partial_copy(self):
+        Path('main.py').write_bytes(b'original')
+        self.begin(b'abcdef')
+
+        class FullFile:
+            def write(self, data):
+                raise OSError(28)
+
+            def close(self):
+                pass
+
+        self.maintenance.transfer['file'].close()
+        self.maintenance.transfer['file'] = FullFile()
+        with self.assertRaises(OSError):
+            self.maintenance.file_command(0x33, b'\0' * 4 + b'abc')
+        self.assertIsNone(self.maintenance.transfer)
+        self.assertFalse(Path('main.py.tmp').exists())
+        self.assertEqual(Path('main.py').read_bytes(), b'original')
+
+    def test_zero_statvfs_means_unknown_not_full(self):
+        import usb_master_maintenance
+        with patch('os.statvfs', create=True, return_value=(0,) * 9 + (512,)):
+            self.assertGreater(usb_master_maintenance._free_bytes(), 256 * 1024)
+        with patch('os.statvfs', create=True, return_value=(4096, 4096, 16, 2, 2, 0, 0, 0, 0, 255)):
+            self.assertEqual(usb_master_maintenance._free_bytes(), 8192)
+
+
+class BootEntryTests(unittest.TestCase):
+    """Runs the generated main.py against a temporary filesystem."""
+
+    def setUp(self):
+        import os
+        self.temp = tempfile.TemporaryDirectory()
+        self.previous = Path.cwd()
+        os.chdir(self.temp.name)
+        self.resets = []
+        sys.modules['machine'] = SimpleNamespace(reset=lambda: self.resets.append(1))
+        sys.path.insert(0, self.temp.name)
+
+    def tearDown(self):
+        import os
+        sys.path.remove(self.temp.name)
+        sys.modules.pop('machine', None)
+        sys.modules.pop('usb_master_bundle', None)
+        os.chdir(self.previous)
+        self.temp.cleanup()
+
+    def boot(self, bundle_source):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from build_usb_master_bundle import ENTRY
+        sys.modules.pop('usb_master_bundle', None)
+        # A .py stands in for the .mpy; the entry only renames the .mpy names.
+        Path('usb_master_bundle.py').write_text(bundle_source)
+        exec(compile(ENTRY, 'main.py', 'exec'), {'__name__': '__main__'})
+
+    def test_pending_bundle_boots_on_trial(self):
+        Path('update_pending').write_text('1')
+        self.boot('started = True\n')
+        self.assertTrue(Path('update_trial').exists())
+        self.assertFalse(self.resets)
+
+    def test_unconfirmed_trial_is_rolled_back_at_next_boot(self):
+        Path('usb_master_bundle.mpy').write_bytes(b'new')
+        Path('usb_master_bundle.mpy.bak').write_bytes(b'old')
+        Path('update_trial').write_text('1')
+        self.boot('started = True\n')
+        self.assertEqual(Path('usb_master_bundle.mpy').read_bytes(), b'old')
+        self.assertFalse(Path('usb_master_bundle.mpy.bak').exists())
+        self.assertFalse(Path('update_trial').exists())
+
+    def test_trial_that_fails_to_import_rolls_back_and_resets(self):
+        Path('usb_master_bundle.mpy').write_bytes(b'new')
+        Path('usb_master_bundle.mpy.bak').write_bytes(b'old')
+        Path('update_pending').write_text('1')
+        with self.assertRaises(ValueError):
+            self.boot('raise ValueError("incompatible .mpy file")\n')
+        self.assertEqual(Path('usb_master_bundle.mpy').read_bytes(), b'old')
+        self.assertEqual(self.resets, [1])
+
+    def test_confirmed_bundle_failure_is_not_rolled_back(self):
+        Path('usb_master_bundle.mpy').write_bytes(b'current')
+        Path('usb_master_bundle.mpy.bak').write_bytes(b'old')
+        with self.assertRaises(ValueError):
+            self.boot('raise ValueError("config error")\n')
+        self.assertEqual(Path('usb_master_bundle.mpy').read_bytes(), b'current')
+        self.assertFalse(self.resets)
 
 
 if __name__ == '__main__':

@@ -102,6 +102,9 @@ class MasterControl:
         self.needs_rearm = False
         self.rearm_hold = False
         self.stopped_at = None
+        # A broadcast DISARM gets no per-module ACK, so it is unconfirmed
+        # until every armed target acknowledges a unique DISARM.
+        self.broadcast_disarm = False
 
     def permit(self, frame, host_active, switch=None):
         decoded = decode_master(frame)
@@ -109,6 +112,8 @@ class MasterControl:
             return False
         kind, command, data, uid = decoded
         if command in (0x11, 0x73):
+            if command == 0x11 and kind == 0xFD and self.may_be_armed:
+                self.broadcast_disarm = True
             return True  # STOP/DISARM remain possible after host expiry.
         if not host_active or self.expired or self.stop_pending:
             return False
@@ -122,6 +127,7 @@ class MasterControl:
             if command == 0x10 and kind == 0xFB:
                 self.targets.add(uid)
                 self.needs_rearm = False
+                self.broadcast_disarm = False
         elif command in (0x26, 0x30, 0x31, 0x32, 0x33, 0x60, 0x61, 0x62,
                          0x64, 0x70, 0x71) and self.may_be_armed:
             return False
@@ -156,6 +162,7 @@ class MasterControl:
         if self.expired and not self.stop_pending and host_active:
             # Fresh explicit ARM is required; this never represents field ACK.
             self.may_be_armed = False
+            self.broadcast_disarm = False
             self.targets.clear()
             self.expired = False
         if (self.needs_rearm and not self.stop_pending and host_active and
@@ -164,6 +171,25 @@ class MasterControl:
             # Resume the keepalive while the host stays connected, as the
             # original master does. ARM still requires a fresh explicit request.
             self.needs_rearm = False
+
+    ARM_SAFE = 0
+    ARM_ARMED = 1
+    ARM_UNCONFIRMED = 2
+
+    def arm_state(self):
+        """Field arm state for the status LED, as far as this bridge knows.
+
+        ARMED: an ARM was sent and not every target has ACKed a DISARM.
+        UNCONFIRMED: a DISARM went out without per-module confirmation, or the
+        keepalive is held so possibly-armed modules can self-disarm.
+        SAFE: nothing was armed through this bridge, or every target ACKed
+        DISARM, or the self-disarm window has passed.
+        """
+        if self.stop_pending or (self.needs_rearm and self.rearm_hold):
+            return self.ARM_UNCONFIRMED
+        if self.may_be_armed:
+            return self.ARM_UNCONFIRMED if self.broadcast_disarm else self.ARM_ARMED
+        return self.ARM_SAFE
 
     def sent(self, frame):
         # RF transmit success does not establish remote disarm.
@@ -177,3 +203,5 @@ class MasterControl:
         if len(payload) == 7 and payload[4] == 0x50 and payload[5] == 0x11 and payload[6] == 0:
             self.targets.discard(bridge_radio.int_from_be(payload[:4]))
             self.may_be_armed = bool(self.targets)
+            if not self.may_be_armed:
+                self.broadcast_disarm = False

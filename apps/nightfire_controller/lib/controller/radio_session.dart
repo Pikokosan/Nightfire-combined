@@ -12,6 +12,12 @@ import '../scripts/script_document.dart';
 
 part 'master_controller.dart';
 
+/// A field module's NACK (0x51) for [command] with its reason [code].
+class ModuleRejection extends StateError {
+  ModuleRejection(this.command, this.code, super.message);
+  final int command, code;
+}
+
 class RadioSession extends ChangeNotifier {
   RadioSession(
     this.transport, {
@@ -60,7 +66,7 @@ class RadioSession extends ChangeNotifier {
       !master.stepping &&
       (values['Firmware']?.startsWith('usb-monitor-0.2') == true ||
           values['Firmware']?.startsWith('usb-monitor-0.3') == true ||
-          values['Firmware'] == 'usb-master-0.4.0');
+          isMasterFirmware(values['Firmware']));
   InterfaceStatus? interfaceStatus;
   MasterHeartbeatStatus? masterHeartbeatStatus;
   Timer? _heartbeatTimer;
@@ -222,7 +228,9 @@ class RadioSession extends ChangeNotifier {
     }
     if (rejected) {
       pending.completeError(
-        StateError(
+        ModuleRejection(
+          _moduleCommand!,
+          packet.data[1],
           _moduleCommand == 0x31 && packet.data[1] == 1
               ? 'Module is armed. Disarm it before changing its group.'
               : 'Module rejected request (code ${packet.data[1]})',
@@ -483,9 +491,29 @@ class RadioSession extends ChangeNotifier {
     }
   }
 
+  String? _deviceId;
+
+  /// Opens the last radio again, e.g. after a firmware update restarted it.
+  /// The radio's USB port disappears for a few seconds while it restarts.
+  Future<bool> reconnect({
+    int attempts = 10,
+    Duration delay = const Duration(seconds: 2),
+  }) async {
+    final id = _deviceId;
+    if (id == null) return false;
+    for (var attempt = 0; attempt < attempts && !_disposed; attempt++) {
+      await Future<void>.delayed(delay);
+      if (_disposed) return false;
+      await connect(id);
+      if (ready) return true;
+    }
+    return false;
+  }
+
   Future<void> connect(String id) async {
     if (busy || master.stopping) return;
     if (ready) await disconnect();
+    _deviceId = id;
     final epoch = ++_epoch;
     busy = true;
     ready = false;

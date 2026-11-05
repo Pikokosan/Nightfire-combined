@@ -32,6 +32,10 @@ class CommandInterface:
         self.last_colors = None
         self.keepalive_supported = False
         self.group_settings_supported = False
+        # Fed by the main loop: MasterControl.arm_state() (None without master
+        # firmware) and the tick of the last RF keepalive sent.
+        self.module_arm = None
+        self.keepalive_at = None
         for name, fault in (("switch_pin", 1), ("led_pin", 2)):
             number = getattr(self, name)
             if number is not None and (type(number) is not int or number < 0 or number > 47):
@@ -104,11 +108,7 @@ class CommandInterface:
         self.faults = (self.faults & ~12) | (4 if session == 2 else 0) | (0 if radio_ready else 8)
         if self.led_status != 1:
             return
-        recent_rx = self.last_rx is not None and self.difference(now, self.last_rx) <= self.timeout
-        colors = [(0, 0, 12) if session == 1 else (0, 0, 0),
-                  (0, 10, 0) if radio_ready and recent_rx else (10, 5, 0),
-                  (10, 5, 0),
-                  (12, 0, 0) if self.faults and (now // 500) % 2 == 0 else (0, 0, 0)]
+        colors = self.colors(now, session)
         colors += [(0, 0, 0)] * (self.led_count - 4)
         encoded = bytes(color["RGB".index(component)] for color in colors for component in self.order)
         if encoded == self.last_colors:
@@ -119,6 +119,40 @@ class CommandInterface:
         except Exception:
             self.led_status = 2
             self.faults |= 2
+
+    GREEN = (0, 10, 0)
+    RED = (12, 0, 0)
+    AMBER = (10, 5, 0)
+    BLUE = (0, 0, 12)
+    OFF = (0, 0, 0)
+    KEEPALIVE_BLINK_MS = 150
+
+    def colors(self, now, session):
+        """Pixel 1 arm switch, 2 field arm state, 3 heartbeats, 4 fault."""
+        flash = (now // 500) % 2 == 0
+        if self.input is None:
+            switch = self.OFF
+        elif self.switch == 1:
+            switch = self.GREEN
+        elif self.switch == 2:
+            switch = self.RED
+        else:
+            switch = self.AMBER if flash else self.OFF
+        if self.module_arm == 0:
+            modules = self.GREEN
+        elif self.module_arm == 1:
+            modules = self.RED
+        else:
+            modules = self.AMBER
+        if session != 1:
+            heartbeat = self.OFF
+        elif (self.keepalive_at is not None and
+              self.difference(now, self.keepalive_at) < self.KEEPALIVE_BLINK_MS):
+            heartbeat = self.GREEN
+        else:
+            heartbeat = self.BLUE
+        fault = self.RED if self.faults and flash else self.OFF
+        return [switch, modules, heartbeat, fault]
 
     def payload(self):
         age = 65535 if self.last_host is None else min(65535, max(0, self.difference(self.clock(), self.last_host)))

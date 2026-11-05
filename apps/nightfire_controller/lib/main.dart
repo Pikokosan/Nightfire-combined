@@ -16,6 +16,7 @@ import 'scripts/script_document.dart';
 import 'controller/field_module.dart';
 import 'widgets/master_controls_panel.dart';
 import 'widgets/manual_fire_panel.dart';
+import 'widgets/firmware_panel.dart';
 
 /// Index of the Radio tab in [ControllerNavigation.destinations].
 const kRadioSection = 3;
@@ -453,6 +454,22 @@ class _RadioPageState extends State<RadioPage> with WidgetsBindingObserver {
                       ),
                     const SizedBox(height: 16),
                     const Text('Hardware wiring and bench checks are pending.'),
+                  ]),
+                  _page('firmware', [
+                    Text(
+                      'Firmware',
+                      style: Theme.of(context).textTheme.headlineLarge,
+                    ),
+                    const SizedBox(height: 8),
+                    const Text('Update the radio bridge and field modules'),
+                    const SizedBox(height: 16),
+                    if (session != null)
+                      FirmwarePanel(
+                        session: session,
+                        onPickingFile: _pickingScriptChanged,
+                      )
+                    else
+                      const Text('Connect the radio in Radio first.'),
                   ]),
                 ],
               ),

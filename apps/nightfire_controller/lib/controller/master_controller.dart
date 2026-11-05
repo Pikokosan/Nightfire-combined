@@ -42,7 +42,7 @@ class MasterController {
   int get ticks => _clock.elapsedMilliseconds & 0x3fffffff;
   int get elapsedMs => running ? _clock.elapsedMilliseconds - _startMs : 0;
   bool get supported =>
-      session.ready && session.values['Firmware'] == 'usb-master-0.4.0';
+      session.ready && isMasterFirmware(session.values['Firmware']);
   bool get available => supported && !session.busy && !interrupted && !stopping;
   String get armSummary => armed.isEmpty
       ? 'ARM STATE UNKNOWN'
@@ -670,42 +670,366 @@ class MasterController {
     }
   });
 
+  // ---------------------------------------------------------------- Updates
+
+  /// Field OTA chunks. 80 bytes fits even a worst-case escaped NFCP frame in
+  /// the USB MTU. The field ACKs a repeated chunk without rewriting it, so a
+  /// lost RF reply is retried; the field drops a transfer idle for 8 s, which
+  /// [updateAttempts] × [updateAckTimeout] stays inside.
+  static const updateChunk = 80;
+  static const updateAttempts = 5;
+
+  /// Realignments allowed per file after an out-of-step WRITE, and how far
+  /// each one rewinds.
+  static const maxResyncs = 20;
+  static const resyncChunks = 4;
+  Duration updateAckTimeout = const Duration(milliseconds: 1200);
+
+  /// Wait between attempts to reopen the radio after it restarts.
+  Duration reconnectDelay = const Duration(seconds: 2);
+
+  /// The field module sends every reply three times, 20 ms apart, and cannot
+  /// receive meanwhile. A chunk sent straight after the first ACK copy is lost
+  /// and a later copy is taken as its ACK, so wait for the repeats to finish.
+  Duration updateSettle = const Duration(milliseconds: 100);
+
+  /// Time a field module needs to restart before it answers INFO.
+  Duration rebootDelay = const Duration(seconds: 3);
+
+  /// Transfer progress 0–1 for the Firmware page; null when no update runs.
+  double? updateProgress;
+  bool _cancelUpdate = false;
+
+  /// Outcome per module UID of the last field firmware update.
+  final firmwareResults = <int, String>{};
+
+  /// Outcome of the last radio bridge update; survives the radio's restart.
+  String? bridgeUpdateResult;
+
+  void cancelUpdate() {
+    _cancelUpdate = true;
+    session.notifyListeners();
+  }
+
+  void _checkUpdate(int epoch) {
+    _check(epoch);
+    if (_cancelUpdate) throw StateError('Update cancelled');
+  }
+
+  Future<void> _ackWithRetry(
+    int uid,
+    int command,
+    int epoch,
+    List<int> data, [
+    List<int>? frame,
+  ]) async {
+    for (var attempt = 1; ; attempt++) {
+      _checkUpdate(epoch);
+      try {
+        await _ack(uid, command, epoch, data, frame, updateAckTimeout);
+        await Future<void>.delayed(updateSettle);
+        return;
+      } on TimeoutException {
+        if (attempt >= updateAttempts) rethrow;
+      }
+    }
+  }
+
+  Future<void> _sendModuleFile(
+    int uid,
+    String path,
+    List<int> bytes,
+    int epoch,
+    void Function(int sent) progress,
+  ) async {
+    if (bytes.isEmpty || bytes.length > 256 * 1024) {
+      throw ArgumentError('Module files must be 1 byte to 256 KiB');
+    }
+    final transfer = ticks & 65535;
+    final begin = otaBegin(uid, transfer, path, bytes);
+    await _ackWithRetry(uid, 0x60, epoch, const [], begin);
+    try {
+      var offset = 0;
+      var resyncs = 0;
+      while (offset < bytes.length) {
+        final end = (offset + updateChunk).clamp(0, bytes.length);
+        try {
+          await _ackWithRetry(uid, 0x61, epoch, [
+            ...bigEndian(transfer, 2),
+            ...bigEndian(offset, 4),
+            ...bytes.sublist(offset, end),
+          ]);
+        } on ModuleRejection catch (rejection) {
+          // WRITE ACKs carry no offset. A late ACK for a re-sent chunk can be
+          // taken as the next chunk's ACK, leaving the module behind; it then
+          // rejects the gap (code 3). It only writes at its exact offset and
+          // re-ACKs chunks it already has, so rewind and resend to realign.
+          if (rejection.code != 3 || offset == 0 || ++resyncs > maxResyncs) {
+            rethrow;
+          }
+          offset = (offset - resyncChunks * updateChunk).clamp(0, offset);
+          continue;
+        }
+        progress(end);
+        offset = end;
+      }
+      // END checks size and checksum before the field replaces the file.
+      var endReplyLost = false;
+      for (var attempt = 1; ; attempt++) {
+        _checkUpdate(epoch);
+        try {
+          await _ack(uid, 0x62, epoch, bigEndian(transfer, 2), null,
+              updateAckTimeout);
+          break;
+        } on TimeoutException {
+          endReplyLost = true;
+          if (attempt >= updateAttempts) rethrow;
+        } on StateError {
+          _checkUpdate(epoch);
+          // A finished transfer rejects a repeated END: the first END was
+          // applied and only its ACK was lost. The restart check confirms.
+          if (!endReplyLost) rethrow;
+          break;
+        }
+      }
+    } catch (_) {
+      if (supported) {
+        try {
+          await session._request(
+            0x10,
+            masterUnique(uid, 0x63, bigEndian(transfer, 2)),
+          );
+        } catch (_) {
+          /* Preserve original transfer error. */
+        }
+      }
+      rethrow;
+    }
+  }
+
   Future<bool> updateModule(int uid, String path, List<int> bytes) =>
       _operation('Update module file', (epoch) async {
         _requireDisarmed();
-        if (bytes.isEmpty || bytes.length > 256 * 1024) {
-          throw ArgumentError('Module files must be 1 byte to 256 KiB');
-        }
-        final transfer = ticks & 65535;
-        final begin = otaBegin(uid, transfer, path, bytes);
-        await _ack(uid, 0x60, epoch, [], begin);
-        try {
-          // 80 bytes fits even a worst-case escaped NFCP frame in the USB MTU.
-          for (var offset = 0; offset < bytes.length; offset += 80) {
-            final end = (offset + 80).clamp(0, bytes.length);
-            await _ack(uid, 0x61, epoch, [
-              ...bigEndian(transfer, 2),
-              ...bigEndian(offset, 4),
-              ...bytes.sublist(offset, end),
-            ]);
-            status = 'Module update: $end/${bytes.length} bytes';
-            session.notifyListeners();
-          }
-          await _ack(uid, 0x62, epoch, bigEndian(transfer, 2));
-        } catch (_) {
-          if (supported) {
-            try {
-              await session._request(
-                0x10,
-                masterUnique(uid, 0x63, bigEndian(transfer, 2)),
-              );
-            } catch (_) {
-              /* Preserve original transfer error. */
-            }
-          }
-          rethrow;
-        }
+        _cancelUpdate = false;
+        await _sendModuleFile(uid, path, bytes, epoch, (sent) {
+          status = 'Module update: $sent/${bytes.length} bytes';
+          session.notifyListeners();
+        });
       });
+
+  /// Sends [bytes] as [path] to each module, reboots it and confirms it comes
+  /// back as field firmware with its outputs disarmed. A failed module does
+  /// not stop the others; cancelling or losing the radio does.
+  Future<bool> updateModuleFirmware(
+    List<int> uids,
+    String path,
+    List<int> bytes,
+  ) => _operation('Field firmware update', (epoch) async {
+    _requireDisarmed();
+    if (uids.isEmpty) throw ArgumentError('Select at least one module');
+    otaBegin(uids.first, 0, path, bytes); // Validate the path up front.
+    _cancelUpdate = false;
+    firmwareResults.removeWhere((uid, _) => uids.contains(uid));
+    var failed = 0;
+    try {
+      for (var index = 0; index < uids.length; index++) {
+        final uid = uids[index];
+        final module = session.modules[uid];
+        final name = module == null
+            ? '0x${uid.toRadixString(16)}'
+            : 'group ${module.group}';
+        final before = module?.info['Firmware'];
+        try {
+          await _sendModuleFile(uid, path, bytes, epoch, (sent) {
+            final percent = sent * 100 ~/ bytes.length;
+            updateProgress = (index + sent / bytes.length) / uids.length;
+            status = 'Updating $name (${index + 1}/${uids.length}): $percent%';
+            firmwareResults[uid] = 'Sending $percent%';
+            session.notifyListeners();
+          });
+          firmwareResults[uid] = 'Stored; restarting…';
+          status = 'Restarting $name…';
+          session.notifyListeners();
+          final after = await _rebootAndVerify(uid, epoch);
+          firmwareResults[uid] = before == null || before == after
+              ? 'Installed • firmware $after'
+              : 'Updated • $before → $after';
+        } catch (error) {
+          firmwareResults[uid] = 'Failed: $error';
+          if (_cancelUpdate || session._epoch != epoch || !supported) rethrow;
+          failed++;
+        }
+        session.notifyListeners();
+      }
+    } finally {
+      updateProgress = null;
+    }
+    if (failed > 0) {
+      throw StateError('$failed of ${uids.length} module(s) not updated');
+    }
+  });
+
+  Future<String> _rebootAndVerify(int uid, int epoch) async {
+    try {
+      await _ack(uid, 0x64, epoch, const [], null, updateAckTimeout);
+    } on TimeoutException {
+      // The module resets right after its ACK, which can beat the RF reply.
+    }
+    session.modules[uid]?.seenInScan = false;
+    uploaded.clear(); // A restarted module has lost any uploaded script.
+    document = null;
+    await Future<void>.delayed(rebootDelay);
+    late Map<String, String> info;
+    for (var attempt = 1; ; attempt++) {
+      _check(epoch);
+      try {
+        final reply = await session._queryModule(
+          uid,
+          0x52,
+          0x53,
+          timeout: updateAckTimeout * 2,
+        );
+        info = moduleInfo(reply.data);
+        break;
+      } on TimeoutException {
+        if (attempt >= updateAttempts) {
+          throw StateError('Module did not answer after restarting');
+        }
+      }
+    }
+    if (info['App'] != 'field-module') {
+      throw StateError('Restarted module reports "${info['App']}"');
+    }
+    final module = session.modules[uid];
+    module?.info = info;
+    module?.seenInScan = true; // It answered by unique ID after the restart.
+    if ((await _outputStatus(uid, epoch)).armed) {
+      throw StateError('Module restarted ARMED');
+    }
+    return info['Firmware'] ?? 'unknown';
+  }
+
+  Future<void> _sendBridgeFile(
+    String name,
+    List<int> bytes,
+    int epoch,
+    void Function(int sent) progress,
+  ) async {
+    final filename = name.codeUnits;
+    await session._request(0x32, [
+      filename.length,
+      ...filename,
+      ...bigEndian(bytes.length, 4),
+      ...bigEndian(crc16(bytes), 2),
+    ]);
+    for (var offset = 0; offset < bytes.length; offset += 48) {
+      final end = (offset + 48).clamp(0, bytes.length);
+      for (var attempt = 1; ; attempt++) {
+        _checkUpdate(epoch);
+        try {
+          // Bridge 0.4.1 ACKs a repeated chunk without writing it again.
+          await session._request(0x33, [
+            ...bigEndian(offset, 4),
+            ...bytes.sublist(offset, end),
+          ]);
+          break;
+        } on TimeoutException {
+          if (attempt >= 3) rethrow;
+        }
+      }
+      progress(end);
+    }
+    _checkUpdate(epoch);
+    // END verifies length and CRC before the bridge replaces the file.
+    await session._request(0x34);
+  }
+
+  Future<bool> updateBridge(String name, List<int> bytes) =>
+      _operation('Update bridge file', (epoch) async {
+        _requireDisarmed();
+        if (!(bridgeFirmwareFiles.contains(name) ||
+                name == 'nrf_bridge_config.py') ||
+            bytes.isEmpty ||
+            bytes.length > 256 * 1024) {
+          throw ArgumentError('Unsupported bridge filename or file size');
+        }
+        _cancelUpdate = false;
+        await _sendBridgeFile(name, bytes, epoch, (sent) {
+          status = 'Bridge update: $sent/${bytes.length} bytes';
+          session.notifyListeners();
+        });
+      });
+
+  /// Installs bridge firmware files, restarts the radio and reconnects.
+  /// The radio keeps a new bundle only once this app opens a session with
+  /// it; otherwise it restores the previous bundle at its next start.
+  Future<bool> updateBridgeFirmware(Map<String, List<int>> files) async {
+    final unknown = files.keys.where((n) => !bridgeFirmwareFiles.contains(n));
+    if (unknown.isNotEmpty) {
+      bridgeUpdateResult = 'Not a radio firmware file: ${unknown.join(', ')}';
+      session.notifyListeners();
+      return false;
+    }
+    final names = [
+      for (final name in bridgeFirmwareFiles)
+        if (files.containsKey(name)) name,
+    ];
+    final bundle = files['usb_master_bundle.mpy'];
+    final expected = bundle == null ? null : embeddedBridgeVersion(bundle);
+    final total = files.values.fold<int>(0, (sum, f) => sum + f.length);
+    bridgeUpdateResult = null;
+    final stored = await _operation('Radio firmware update', (epoch) async {
+      _requireDisarmed();
+      if (names.isEmpty) throw ArgumentError('Choose radio firmware files');
+      for (final name in names) {
+        if (files[name]!.isEmpty || files[name]!.length > 256 * 1024) {
+          throw ArgumentError('$name must be 1 byte to 256 KiB');
+        }
+      }
+      _cancelUpdate = false;
+      var done = 0;
+      try {
+        for (final name in names) {
+          final bytes = files[name]!;
+          await _sendBridgeFile(name, bytes, epoch, (sent) {
+            updateProgress = (done + sent) / total;
+            status = 'Radio update: $name ${sent * 100 ~/ bytes.length}%';
+            session.notifyListeners();
+          });
+          done += bytes.length;
+        }
+      } finally {
+        updateProgress = null;
+      }
+    });
+    if (!stored) {
+      bridgeUpdateResult = status;
+      session.notifyListeners();
+      return false;
+    }
+    bridgeUpdateResult = 'Files stored. Restarting the radio…';
+    session.notifyListeners();
+    try {
+      // The bridge replies, then resets about 150 ms later.
+      await session._request(0x31);
+    } catch (_) {
+      /* The reset can beat the reply; reconnecting below tells. */
+    }
+    await session.disconnect();
+    final connected = await session.reconnect(delay: reconnectDelay);
+    final running = session.values['Firmware'];
+    if (!connected) {
+      bridgeUpdateResult =
+          'Files stored, but the radio did not reconnect. Reconnect it from '
+          'Radio; it keeps the update once the app connects.';
+    } else if (expected != null && running != expected) {
+      bridgeUpdateResult = 'Radio restarted with $running, not $expected.';
+    } else {
+      bridgeUpdateResult = 'Radio updated • running $running';
+    }
+    session.notifyListeners();
+    return connected && (expected == null || running == expected);
+  }
 
   Future<bool> rebootModule(int uid) =>
       _operation('Reboot module', (epoch) async {
@@ -714,44 +1038,6 @@ class MasterController {
         session.modules[uid]?.seenInScan = false;
         uploaded.clear();
         document = null;
-      });
-
-  Future<bool> updateBridge(String name, List<int> bytes) =>
-      _operation('Update bridge file', (epoch) async {
-        _requireDisarmed();
-        if (![
-              'main.py',
-              'bridge_radio.py',
-              'nrf_bridge_config.py',
-              'usb_master_control.py',
-              'usb_master_maintenance.py',
-              'usb_bridge_transport.py',
-              'usb_monitor_nfcp.py',
-              'command_interface.py',
-            ].contains(name) ||
-            bytes.isEmpty ||
-            bytes.length > 256 * 1024) {
-          throw ArgumentError('Unsupported bridge filename or file size');
-        }
-        final filename = name.codeUnits;
-        await session._request(0x32, [
-          filename.length,
-          ...filename,
-          ...bigEndian(bytes.length, 4),
-          ...bigEndian(crc16(bytes), 2),
-        ]);
-        for (var offset = 0; offset < bytes.length; offset += 48) {
-          _check(epoch);
-          final end = (offset + 48).clamp(0, bytes.length);
-          await session._request(0x33, [
-            ...bigEndian(offset, 4),
-            ...bytes.sublist(offset, end),
-          ]);
-          status = 'Bridge update: $end/${bytes.length} bytes';
-          session.notifyListeners();
-        }
-        _check(epoch);
-        await session._request(0x34);
       });
 
   Future<bool> bridgeCommand(int command, [List<int> payload = const []]) =>

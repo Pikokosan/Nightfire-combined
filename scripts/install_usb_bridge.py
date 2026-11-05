@@ -70,6 +70,10 @@ def main():
             # This touches only the files whose originals were just backed up.
             if options.compiled:
                 raw.remove_remote_files(port, list(copies))
+                # A serial install is already verified: drop any in-app update
+                # trial so main.py does not "restore" an older bundle at boot.
+                raw.remove_remote_files(port, ['update_pending', 'update_trial',
+                                               'usb_master_bundle.mpy.bak'])
             for remote, local in copies.items():
                 if local is None:
                     continue

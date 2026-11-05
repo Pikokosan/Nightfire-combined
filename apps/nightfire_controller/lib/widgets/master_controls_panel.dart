@@ -1,6 +1,5 @@
 import 'dart:convert';
 
-import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
 import '../controller/radio_session.dart';
@@ -79,32 +78,6 @@ class _MasterControlsPanelState extends State<MasterControlsPanel> {
     await widget.session.master.setModuleValue(_uid!, command, _number(value));
   }
 
-  Future<void> _update({bool bridge = false}) async {
-    widget.onPickingFile?.call(true);
-    XFile? file;
-    try {
-      file = await openFile();
-    } finally {
-      widget.onPickingFile?.call(false);
-    }
-    if (file == null || !mounted) return;
-    if (await file.length() > 256 * 1024) {
-      throw const FormatException('Maximum file size is 256 KiB');
-    }
-    final bytes = await file.readAsBytes();
-    final path = await _input(
-      bridge ? 'Update bridge file' : 'Update module file',
-      'Destination filename',
-      initial: file.name,
-    );
-    if (path == null || !mounted) return;
-    if (bridge) {
-      await widget.session.master.updateBridge(path, bytes);
-    } else if (_uid != null) {
-      await widget.session.master.updateModule(_uid!, path, bytes);
-    }
-  }
-
   Future<void> _calibrate() async {
     final bank = await _input(
       'Calibration bank',
@@ -156,7 +129,7 @@ class _MasterControlsPanelState extends State<MasterControlsPanel> {
         child: Padding(
           padding: EdgeInsets.all(16),
           child: Text(
-            'Live master controls require usb-master-0.4.0 bridge firmware. Monitor firmware supports diagnostics only.',
+            'Live master controls require usb-master-0.4 bridge firmware. Monitor firmware supports diagnostics only.',
           ),
         ),
       );
@@ -343,10 +316,6 @@ class _MasterControlsPanelState extends State<MasterControlsPanel> {
                               : null,
                         ),
                         button(
-                          'Update module file',
-                          maintenance ? _update : null,
-                        ),
-                        button(
                           'Reboot module',
                           maintenance
                               ? () => master.rebootModule(selected.uid)
@@ -413,10 +382,6 @@ class _MasterControlsPanelState extends State<MasterControlsPanel> {
                       button(
                         'Clear radio statistics',
                         maintenance ? () => master.bridgeCommand(0x16) : null,
-                      ),
-                      button(
-                        'Update bridge file',
-                        maintenance ? () => _update(bridge: true) : null,
                       ),
                       button(
                         'Reset radio',

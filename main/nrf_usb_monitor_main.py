@@ -23,6 +23,7 @@ interface.group_settings_supported = True
 keepalive = MasterKeepalive(network, nrf_radio.send, time.ticks_ms, time.ticks_diff)
 master = None
 maintenance = None
+trial_confirmed = False
 if getattr(config, 'MASTER_ENABLED', False):
     from usb_master_control import MasterControl
     from usb_master_maintenance import BridgeMaintenance
@@ -58,7 +59,7 @@ while True:
                     command = bridge_radio.CMD_PONG
                     payload = b""
                 elif command == bridge_radio.CMD_GET_INFO:
-                    version = b"usb-master-0.4.0" if master else b"usb-monitor-0.3.2"
+                    version = b"usb-master-0.4.1" if master else b"usb-monitor-0.3.2"
                     payload = (bridge_radio.int_to_be(nrf_radio.device_id32(), 4) +
                                b"\x00\x00" + bridge_radio.int_to_be(network, 2) +
                                bytes([len(version)]) + version)
@@ -71,6 +72,11 @@ while True:
                     if master and interface.session_id is not None and interface.session_id != bytes(frame.payload):
                         master.stop()
                     interface.heartbeat(frame.payload)
+                    if maintenance and not trial_confirmed:
+                        # A working app session proves this firmware can be
+                        # controlled over USB, so keep it (see main.py entry).
+                        maintenance.confirm_trial()
+                        trial_confirmed = True
                     payload = b""
                 elif command == bridge_radio.CMD_GET_KEEPALIVE_STATUS and not frame.payload:
                     payload = keepalive.payload()
@@ -134,6 +140,8 @@ while True:
                 maintenance.abort()
         keepalive.poll(interface.session_state() == 1 and not (master and master.needs_rearm), radio_ready)
         interface.faults = (interface.faults & ~16) | (16 if keepalive.failed else 0)
+        interface.module_arm = master.arm_state() if master else None
+        interface.keepalive_at = keepalive.last_success
         packet = nrf_radio.recv(50)
         if packet:
             reply = radio_reply(packet, network)

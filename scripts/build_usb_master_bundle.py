@@ -11,6 +11,53 @@ SOURCES = ('bridge_radio.py', 'usb_bridge_transport.py', 'usb_monitor_nfcp.py',
            'command_interface.py', 'usb_master_control.py',
            'usb_master_maintenance.py', 'nrf_usb_monitor_main.py')
 
+# Boot entry. A bundle installed over USB (usb_master_maintenance) is marked
+# update_pending. Its first boot turns that into update_trial; the bundle
+# deletes the marker when the app opens a host session. A trial that fails to
+# import, or that is still unconfirmed at the next boot, is replaced by the
+# previous bundle (.bak). The failed copy is deleted, so this cannot ping-pong.
+ENTRY = """import os
+
+
+def _exists(name):
+    try:
+        os.stat(name)
+        return True
+    except OSError:
+        return False
+
+
+def _rollback():
+    if not _exists('usb_master_bundle.mpy.bak'):
+        return False
+    try:
+        os.remove('usb_master_bundle.mpy')
+    except OSError:
+        pass
+    os.rename('usb_master_bundle.mpy.bak', 'usb_master_bundle.mpy')
+    for marker in ('update_trial', 'update_pending'):
+        try:
+            os.remove(marker)
+        except OSError:
+            pass
+    return True
+
+
+if _exists('update_trial'):
+    print('Bridge update was not confirmed by the app; restoring previous bundle')
+    _rollback()
+elif _exists('update_pending'):
+    os.rename('update_pending', 'update_trial')
+try:
+    import usb_master_bundle
+except Exception as error:
+    print('Bridge bundle failed to start:', error)
+    if _exists('update_trial') and _rollback():
+        import machine
+        machine.reset()
+    raise
+"""
+
 
 class RemoveInternalImports(ast.NodeTransformer):
     def visit_Import(self, node):
@@ -70,7 +117,7 @@ def build(root, output=None):
             'usb_master_bundle.py', wsl_path(source),
         ], check=True)
     entry = output / 'main.py'
-    entry.write_text('import usb_master_bundle\n', encoding='ascii')
+    entry.write_text(ENTRY, encoding='ascii')
     print('Compiled master bundle:', compiled, compiled.stat().st_size, 'bytes')
     return entry, compiled
 
