@@ -18,6 +18,7 @@ from field_measurement import (
 )
 from module_lcd import DebouncedButton, LcdMenu
 from module_link import ModuleLink, encode_text_field
+from mesh import MESH_DEFAULT_MAX_HOPS, MESH_RADIO_ADDRESS
 from module_script import ScriptEngine
 from nfcp import *
 from machine import I2C, Pin
@@ -123,7 +124,10 @@ DEFAULT_CUE_COUNT = 24
 DEFAULT_DEVICE_TYPE = 0x20
 
 RADIO_CHANNEL = RUNTIME_CONFIG[3] if RUNTIME_CONFIG else getattr(node_config, "RADIO_CHANNEL", 90)
-RADIO_ADDRESS = 0x67676767
+# Mesh radio (docs/mesh_radio_design.md). Pre-mesh firmware used 0x67676767.
+RADIO_ADDRESS = getattr(node_config, "MESH_RADIO_ADDRESS", MESH_RADIO_ADDRESS)
+MESH_MAX_HOPS = getattr(node_config, "MESH_MAX_HOPS", MESH_DEFAULT_MAX_HOPS)
+MESH_RELAY_ENABLED = getattr(node_config, "MESH_RELAY_ENABLED", True)
 RADIO_TX_POWER = 8
 RADIO_RX_TIMEOUT_MS = getattr(node_config, "RADIO_RX_TIMEOUT_MS", 50)
 RADIO_CCA_ENABLED = getattr(node_config, "RADIO_CCA_ENABLED", True)
@@ -388,6 +392,8 @@ link = ModuleLink(
     cca_retries=RADIO_CCA_RETRIES,
     cca_backoff_min_ms=RADIO_CCA_BACKOFF_MIN_MS,
     cca_backoff_max_ms=RADIO_CCA_BACKOFF_MAX_MS,
+    max_hops=MESH_MAX_HOPS,
+    relay_enabled=MESH_RELAY_ENABLED,
 )
 script = ScriptEngine(
     node,
@@ -1235,6 +1241,7 @@ def loop_once():
     poll_fire_outputs()
     script.run()
     check_master_link_failsafe()
+    link.service()
     lcd.service()
 
 
@@ -1254,7 +1261,8 @@ def main():
                 radio_ready = link.init_radio()
                 continue
 
-            payload = nrf_radio.recv(RADIO_RX_TIMEOUT_MS)
+            link.service()
+            payload = nrf_radio.recv(script.wait_ms(link.rx_timeout_ms(RADIO_RX_TIMEOUT_MS)))
             if payload:
                 handle_radio_payload(payload)
             lcd.service()

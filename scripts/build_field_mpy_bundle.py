@@ -10,6 +10,7 @@ LOCAL_IMPORTS = {
     "nrf_module_common": ["import nrf_module_common\n"],
     "module_lcd": ["from module_lcd import DebouncedButton, LcdMenu\n"],
     "module_link": ["from module_link import ModuleLink, encode_text_field\n"],
+    "mesh": ["from mesh import MESH_DEFAULT_MAX_HOPS, MESH_RADIO_ADDRESS\n"],
     "module_script": ["from module_script import ScriptEngine\n"],
     "analog_mux74hc4051": ["from analog_mux74hc4051 import HC4051Scanner\n"],
     "nfcp": ["from nfcp import *\n"],
@@ -148,10 +149,12 @@ def build_bundle(main_dir):
 
     # Shared module code. Their top-level names land in the bundle namespace,
     # so they must not clash with field_main.py.
+    mesh = read_text(os.path.join(main_dir, "mesh.py"))
     module_link = strip_imports(os.path.join(main_dir, "module_link.py"), [
         "import module_ota\n",
         "import nrf_module_common\n",
         "from nfcp import *\n",
+        "from mesh import *\n",
     ])
     module_script = strip_imports(os.path.join(main_dir, "module_script.py"), [
         "from nfcp import *\n",
@@ -174,6 +177,7 @@ def build_bundle(main_dir):
         read_text(os.path.join(main_dir, "analog_mux74hc4051.py")),
         read_text(os.path.join(main_dir, "shift_register74hc595.py")),
         read_text(os.path.join(main_dir, "lcd1602_i2c.py")),
+        mesh,
         module_link,
         module_script,
         module_lcd,

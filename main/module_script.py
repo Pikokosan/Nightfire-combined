@@ -64,12 +64,29 @@ class ScriptEngine:
         )
 
     # --- time sync ---------------------------------------------------------
+    @staticmethod
+    def arrival_ms(pkt):
+        """Local ticks_ms when the packet arrived (module_link stamps rx_us),
+        not when Python got round to handling it."""
+        rx_us = pkt.get("rx_us")
+        if rx_us is None:
+            return time.ticks_ms()
+        back_ms = (time.ticks_diff(time.ticks_us(), rx_us) + 500) // 1000
+        return time.ticks_add(time.ticks_ms(), -back_ms)
+
+    @staticmethod
+    def age_ms(pkt):
+        """How old the master's timestamp already was when the packet arrived:
+        bridge hold, repeats and relay waits (the mesh age field)."""
+        return (pkt.get("mesh_age_us", 0) + 500) // 1000
+
     def time_sync(self, pkt):
         data = pkt.get("data", b"")
         if len(data) < 4:
             return
         master_ms = int.from_bytes(data[0:4], "big") & 0x3FFFFFFF
-        local_ms = time.ticks_ms() & 0x3FFFFFFF
+        master_ms = (master_ms + self.age_ms(pkt)) & 0x3FFFFFFF
+        local_ms = self.arrival_ms(pkt) & 0x3FFFFFFF
         self.master_offset_ms = time.ticks_diff(master_ms, local_ms)
         self.time_sync_local_ms = time.ticks_ms()
         self.time_synced = True
@@ -170,7 +187,8 @@ class ScriptEngine:
         if start_master_ms is not None and self.time_sync_valid():
             self.start_ms = time.ticks_add(self.master_to_local_ms(start_master_ms), -offset_ms)
         else:
-            self.start_ms = time.ticks_add(time.ticks_ms(), start_delay_ms - offset_ms)
+            sent_ms = time.ticks_add(self.arrival_ms(pkt), -self.age_ms(pkt))
+            self.start_ms = time.ticks_add(sent_ms, start_delay_ms - offset_ms)
         self.running = True
         self.last_heartbeat_ms = time.ticks_ms()
         self.last_event = "start"
@@ -256,6 +274,16 @@ class ScriptEngine:
         if self.next_index >= len(self.entries):
             self.running = False
             self.last_event = "complete"
+
+    def wait_ms(self, default_ms):
+        """Receive timeout that wakes the main loop when the next cue is due,
+        so recv() never makes a cue late."""
+        if not self.running or self.next_index >= len(self.entries):
+            return default_ms
+        left = self.entries[self.next_index][0] - time.ticks_diff(time.ticks_ms(), self.start_ms)
+        if left < default_ms:
+            return left if left > 1 else 1
+        return default_ms
 
     def handle(self, pkt):
         """Handles script and time-sync commands. Returns True if handled."""

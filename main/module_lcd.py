@@ -90,6 +90,9 @@ class LcdMenu:
         self.force_refresh = True
         self.last_refresh_ms = 0
         self.scan_pending = False
+        self.pending_lines = None    # lines still being drawn, a row per pass
+        self.battery_ms = None
+        self.battery_value = 0
 
     def open(self, i2c, address, mapping, title, buttons):
         """Finds the LCD on i2c and shows the boot screen. buttons: [(name, DebouncedButton)]."""
@@ -231,8 +234,16 @@ class LcdMenu:
         self.force_refresh = True
 
     # --- pages -------------------------------------------------------------
+    def cached_battery_mv(self, now):
+        """Battery reading for the home screen, refreshed every 2 s (an ADC
+        read costs ~3.6 ms on the module)."""
+        if self.battery_ms is None or time.ticks_diff(now, self.battery_ms) >= 2000:
+            self.battery_value = int(self.node.battery_mv() or 0)
+            self.battery_ms = now
+        return self.battery_value
+
     def home_lines(self):
-        mv = int(self.node.battery_mv() or 0)
+        mv = self.cached_battery_mv(time.ticks_ms())
         left = "%d.%02dV" % (mv // 1000, (mv % 1000) // 10)
         ids = self.node.ids()
         right = "G%04X" % (ids[1] & 0xFFFF)
@@ -320,9 +331,13 @@ class LcdMenu:
 
             if self.force_refresh or time.ticks_diff(now, self.last_refresh_ms) >= self.refresh_ms:
                 line1, line2 = self.page_lines()
-                self.display.show_lines(str(line1)[:self.cols], str(line2)[:self.cols])
+                self.pending_lines = (str(line1)[:self.cols], str(line2)[:self.cols])
                 self.last_refresh_ms = now
                 self.force_refresh = False
+            # At most one row per pass, so the radio is never off for long.
+            if self.pending_lines is not None:
+                if self.display.show_lines(self.pending_lines[0], self.pending_lines[1], max_rows=1):
+                    self.pending_lines = None
         except Exception as e:
             self.display = None
             print("LCD service failed:", e)

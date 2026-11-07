@@ -5,9 +5,9 @@ import subprocess
 import sys
 
 
-INTERNAL = {'bridge_radio', 'usb_bridge_transport', 'usb_monitor_nfcp',
+INTERNAL = {'bridge_radio', 'mesh', 'usb_bridge_transport', 'usb_monitor_nfcp',
             'command_interface', 'usb_master_control', 'usb_master_maintenance'}
-SOURCES = ('bridge_radio.py', 'usb_bridge_transport.py', 'usb_monitor_nfcp.py',
+SOURCES = ('bridge_radio.py', 'mesh.py', 'usb_bridge_transport.py', 'usb_monitor_nfcp.py',
            'command_interface.py', 'usb_master_control.py',
            'usb_master_maintenance.py', 'nrf_usb_monitor_main.py')
 
@@ -59,6 +59,13 @@ except Exception as error:
 """
 
 
+# Bundled modules that the rest of the code uses through their module name.
+NAMESPACED = {
+    'bridge_radio.py': ('_BridgeRadio', 'bridge_radio'),
+    'mesh.py': ('_Mesh', 'mesh'),
+}
+
+
 class RemoveInternalImports(ast.NodeTransformer):
     def visit_Import(self, node):
         node.names = [name for name in node.names if name.name not in INTERNAL]
@@ -74,9 +81,11 @@ def bundle_source(source_root):
         tree = ast.parse((source_root / filename).read_text(encoding='utf-8'))
         tree = RemoveInternalImports().visit(tree)
         statements.extend(tree.body)
-        if filename == 'bridge_radio.py':
-            # Preserve the module-qualified API, and the original function globals.
-            # A class namespace needs no module allocation or runtime exec().
+        if filename in NAMESPACED:
+            # Preserve the module-qualified API (bridge_radio.x, mesh.x), and
+            # the original function globals. A class namespace needs no module
+            # allocation or runtime exec().
+            class_name, module_name = NAMESPACED[filename]
             aliases = []
             for node in tree.body:
                 if isinstance(node, ast.FunctionDef):
@@ -87,7 +96,7 @@ def bundle_source(source_root):
                     for target in node.targets:
                         if isinstance(target, ast.Name):
                             aliases.append('    %s = %s' % (target.id, target.id))
-            namespace = 'class _BridgeRadio:\n' + '\n'.join(aliases) + '\nbridge_radio = _BridgeRadio\n'
+            namespace = 'class %s:\n' % class_name + '\n'.join(aliases) + '\n%s = %s\n' % (module_name, class_name)
             statements.extend(ast.parse(namespace).body)
     return ast.unparse(ast.fix_missing_locations(ast.Module(body=statements, type_ignores=[]))) + '\n'
 

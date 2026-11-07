@@ -159,6 +159,7 @@ def _radio_send(payload, cca_ms=None, busy_dbm=None, backoff_ms=None):
 fake_radio.init = _radio_init
 fake_radio.send = _radio_send
 fake_radio.recv = lambda timeout=0: None
+fake_radio.last_rssi = lambda: -60
 fake_radio.device_id32 = lambda: 0xD96E30DD
 
 fake_urandom = types.ModuleType("urandom")
@@ -175,11 +176,12 @@ class FakeLcd(object):
     def find_address(i2c, preferred=None):
         return 0x27
 
-    def show_lines(self, a, b=""):
+    def show_lines(self, a, b="", max_rows=None):
         lines = (a, b)
         if lines != self.last:
             log("LCD", repr(a), repr(b))
         self.last = lines
+        return True
 
 
 fake_lcd_module = types.ModuleType("lcd1602_i2c")
@@ -219,6 +221,9 @@ def load_firmware(fw, src_dir):
     sys.modules["fw_under_test"] = module
     spec.loader.exec_module(module)
     return module
+
+
+MASTER_ORIGIN = 0x0B0B0B0B   # mesh origin used for frames from the simulated bridge
 
 
 class Driver(object):
@@ -266,12 +271,13 @@ class Driver(object):
             _clock["ms"] += step
 
     def send(self, frame, label, net=None, seq=None):
+        """Deliver an NFCP frame as the bridge would send it: a mesh frame.
+        Passing an earlier return value as seq resends the same msg_id."""
+        import mesh
         if seq is None:
-            self.seq = (self.seq + 1) & 0xFF
-            if self.seq in (0, 0xFF):
-                self.seq = 1
+            self.seq = (self.seq + 1) & 0xFFFF or 1
             seq = self.seq
-        payload = ((self.net if net is None else net) & 0xFFFF).to_bytes(2, "big") + bytes([seq]) + frame
+        payload = mesh.mesh_build(self.net if net is None else net, MASTER_ORIGIN, seq, frame)
         log("RX", label)
         self.fw.handle_radio_payload(payload)
         self.loop_once()

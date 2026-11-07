@@ -6,6 +6,7 @@ import nrf_module_common
 import nrf_radio
 from machine import I2C, Pin
 from module_link import ModuleLink, encode_text_field, ticks_rand
+from mesh import MESH_DEFAULT_MAX_HOPS, MESH_RADIO_ADDRESS
 from module_lcd import DebouncedButton, LcdMenu
 from module_script import ScriptEngine
 from nfcp import *
@@ -25,7 +26,10 @@ DEFAULT_CUE_COUNT = 16
 DEFAULT_DEVICE_TYPE = 0x10
 
 RADIO_CHANNEL = getattr(node_config, "RADIO_CHANNEL", 90)
-RADIO_ADDRESS = 0x67676767
+# Mesh radio (docs/mesh_radio_design.md). Pre-mesh firmware used 0x67676767.
+RADIO_ADDRESS = getattr(node_config, "MESH_RADIO_ADDRESS", MESH_RADIO_ADDRESS)
+MESH_MAX_HOPS = getattr(node_config, "MESH_MAX_HOPS", MESH_DEFAULT_MAX_HOPS)
+MESH_RELAY_ENABLED = getattr(node_config, "MESH_RELAY_ENABLED", True)
 RADIO_TX_POWER = 8
 RADIO_RX_TIMEOUT_MS = getattr(node_config, "RADIO_RX_TIMEOUT_MS", 50)
 RADIO_CCA_ENABLED = getattr(node_config, "RADIO_CCA_ENABLED", True)
@@ -107,6 +111,8 @@ def save_runtime_config():
             f.write("LCD_BUTTON_DEBOUNCE_MS = %d\n" % LCD_BUTTON_DEBOUNCE_MS)
             f.write("LCD_CONTINUITY_PAGE_SIZE = %d\n" % LCD_CONTINUITY_PAGE_SIZE)
             f.write("MASTER_LINK_TIMEOUT_MS = %d\n" % MASTER_LINK_TIMEOUT_MS)
+            f.write("MESH_MAX_HOPS = %d\n" % MESH_MAX_HOPS)
+            f.write("MESH_RELAY_ENABLED = %s\n" % ("True" if MESH_RELAY_ENABLED else "False"))
             f.write("UP_BUTTON_PIN = %d\n" % UP_BUTTON_PIN)
             f.write("DOWN_BUTTON_PIN = %d\n" % DOWN_BUTTON_PIN)
             if OK_FWD_BUTTON_PIN is None:
@@ -224,6 +230,8 @@ link = ModuleLink(
     cca_retries=RADIO_CCA_RETRIES,
     cca_backoff_min_ms=RADIO_CCA_BACKOFF_MIN_MS,
     cca_backoff_max_ms=RADIO_CCA_BACKOFF_MAX_MS,
+    max_hops=MESH_MAX_HOPS,
+    relay_enabled=MESH_RELAY_ENABLED,
 )
 nfcp = link.nfcp
 script = ScriptEngine(
@@ -355,6 +363,7 @@ def loop_once():
     module_ota.poll_timeout()
     script.run()
     check_master_link_failsafe()
+    link.service()
     lcd.service()
 
 
@@ -373,7 +382,8 @@ def main():
                 radio_ready = link.init_radio()
                 continue
 
-            payload = nrf_radio.recv(RADIO_RX_TIMEOUT_MS)
+            link.service()
+            payload = nrf_radio.recv(script.wait_ms(link.rx_timeout_ms(RADIO_RX_TIMEOUT_MS)))
             if payload:
                 handle_radio_payload(payload)
             lcd.service()

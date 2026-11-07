@@ -20,12 +20,14 @@ $UploadArgs = @(
     "--baud", "$Baud",
     "--delete", "main.py",
     "--delete", "bridge_radio.py",
+    "--delete", "mesh.py",
     "--delete", "nrf_bridge_config.py"
 )
 
 $UploadArgs += @(
     ".\main\nrf_bridge_main.py:main.py",
-    ".\main\bridge_radio.py:bridge_radio.py"
+    ".\main\bridge_radio.py:bridge_radio.py",
+    ".\main\mesh.py:mesh.py"
 )
 
 if ($ConfigPath) {

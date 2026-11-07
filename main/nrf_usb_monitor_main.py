@@ -1,6 +1,7 @@
 import time
 import nrf_radio
 import bridge_radio
+import mesh
 from usb_bridge_transport import UsbHexTransport
 from usb_monitor_nfcp import decode_query, radio_reply, MasterKeepalive
 from command_interface import CommandInterface
@@ -12,22 +13,29 @@ except ImportError:
 
 network = getattr(config, "NETWORK_ID", 0x04D2)
 channel = getattr(config, "RADIO_CHANNEL", 90)
-address = getattr(config, "RADIO_ADDRESS", 0x67676767)
+# Mesh radio (docs/mesh_radio_design.md). RADIO_ADDRESS in old configs is
+# the pre-mesh address (0x67676767), so it is ignored.
+address = getattr(config, "MESH_RADIO_ADDRESS", mesh.MESH_RADIO_ADDRESS)
 power = getattr(config, "RADIO_TX_POWER", 8)
 transport = UsbHexTransport()
+# Everything this bridge sends goes out as a mesh frame with repeats. The
+# keepalive and master stop/disarm code still build pre-mesh packets, so
+# they send through send_legacy, which converts them.
+bridge_mesh = mesh.MeshBridge(nrf_radio.send, nrf_radio.device_id32())
+RADIO_POLL_MS = 20   # was 50; bounds how long an app command waits
 parser = bridge_radio.BridgeFrameParser()
 radio_ready = False
 interface = CommandInterface(config, led_write=getattr(nrf_radio, "write_ws2811", None))
 interface.keepalive_supported = True
 interface.group_settings_supported = True
-keepalive = MasterKeepalive(network, nrf_radio.send, time.ticks_ms, time.ticks_diff)
+keepalive = MasterKeepalive(network, bridge_mesh.send_legacy, time.ticks_ms, time.ticks_diff)
 master = None
 maintenance = None
 trial_confirmed = False
 if getattr(config, 'MASTER_ENABLED', False):
     from usb_master_control import MasterControl
     from usb_master_maintenance import BridgeMaintenance
-    master = MasterControl(nrf_radio.send, time.ticks_ms, time.ticks_diff)
+    master = MasterControl(bridge_mesh.send_legacy, time.ticks_ms, time.ticks_diff)
     maintenance = BridgeMaintenance(nrf_radio, config)
 
 
@@ -49,17 +57,15 @@ while True:
             nrf_radio.init(channel=channel, tx_power=power, address=address)
             radio_ready = True
         if transport.any():
-            for value in transport.read(64):
-                frame = parser.feed(value)
-                if not frame:
-                    continue
+            host_rx_us = time.ticks_us()   # time code ages from here
+            for frame in parser.feed_bytes(transport.read(512)):
                 command = frame.cmd
                 flags = bridge_radio.FLAG_RESPONSE
                 if command == bridge_radio.CMD_PING:
                     command = bridge_radio.CMD_PONG
                     payload = b""
                 elif command == bridge_radio.CMD_GET_INFO:
-                    version = b"usb-master-0.4.1" if master else b"usb-monitor-0.3.2"
+                    version = b"usb-master-0.4.2" if master else b"usb-monitor-0.3.3"   # mesh: reliable delivery
                     payload = (bridge_radio.int_to_be(nrf_radio.device_id32(), 4) +
                                b"\x00\x00" + bridge_radio.int_to_be(network, 2) +
                                bytes([len(version)]) + version)
@@ -80,14 +86,24 @@ while True:
                     payload = b""
                 elif command == bridge_radio.CMD_GET_KEEPALIVE_STATUS and not frame.payload:
                     payload = keepalive.payload()
+                elif command == bridge_radio.CMD_SEND_NFCP_RELIABLE and len(frame.payload) > 6 and (
+                    master.permit(frame.payload[6:], interface.session_state() == 1,
+                                  interface.switch if interface.input is not None else None)
+                    if master else decode_query(frame.payload[6:], interface.session_state() == 1)
+                ):
+                    # Answered from bridge_mesh.poll() when the delivery ends.
+                    bridge_mesh.send_reliable(
+                        network, bridge_radio.int_from_be(frame.payload[0:4]), bytes(frame.payload[6:]),
+                        bridge_radio.int_from_be(frame.payload[4:6]), frame.seq, host_rx_us)
+                    if master:
+                        master.sent(frame.payload[6:])
+                    payload = None
                 elif command == bridge_radio.CMD_SEND_NFCP and (
                     master.permit(frame.payload, interface.session_state() == 1,
                                   interface.switch if interface.input is not None else None)
                     if master else decode_query(frame.payload, interface.session_state() == 1)
                 ):
-                    sequence = frame.seq if frame.seq != 255 else 0
-                    packet = bridge_radio.int_to_be(network, 2) + bytes([sequence]) + frame.payload
-                    if nrf_radio.send(packet):
+                    if bridge_mesh.send_frame(network, bytes(frame.payload), host_rx_us):
                         payload = b"\x00"
                         if master:
                             master.sent(frame.payload)
@@ -108,6 +124,7 @@ while True:
                                 frame.payload[0] == 0 or 74 <= frame.payload[0] <= 100):
                             new_channel = frame.payload[0]
                             nrf_radio.channel(new_channel)
+                            bridge_mesh.queue.clear()
                             maintenance.save(network, new_channel)
                             channel = new_channel
                         elif command == 0x14 and not frame.payload:
@@ -131,7 +148,11 @@ while True:
                     interface.reject()
                     flags |= bridge_radio.FLAG_ERROR
                     payload = b"\x05"
-                transport.write(bridge_radio.build_frame(frame.seq, command, payload, flags))
+                if payload is not None:
+                    transport.write(bridge_radio.build_frame(frame.seq, command, payload, flags))
+        for tag, result in bridge_mesh.poll():
+            transport.write(bridge_radio.build_frame(
+                tag, bridge_radio.CMD_SEND_NFCP_RELIABLE, result, bridge_radio.FLAG_RESPONSE))
         if master:
             master.network = network
             master.poll(interface.session_state() == 1, radio_ready,
@@ -142,15 +163,20 @@ while True:
         interface.faults = (interface.faults & ~16) | (16 if keepalive.failed else 0)
         interface.module_arm = master.arm_state() if master else None
         interface.keepalive_at = keepalive.last_success
-        packet = nrf_radio.recv(50)
+        bridge_mesh.service()
+        packet = nrf_radio.recv(bridge_mesh.wait_ms(RADIO_POLL_MS))
         if packet:
-            reply = radio_reply(packet, network)
+            # Drops duplicates, relayed copies of our own frames and pre-mesh
+            # payloads before any further work.
+            rssi = nrf_radio.last_rssi()
+            frame_bytes = bridge_mesh.receive(packet, network, rssi)
+            reply = radio_reply(bridge_radio.int_to_be(network, 2) + frame_bytes, network) if frame_bytes else None
             if reply:
                 if master:
                     master.observe_reply(reply)
                 interface.record_rx()
-                rssi = nrf_radio.last_rssi() & 65535
-                payload = bridge_radio.int_to_be(rssi, 2) + b"\x00" + reply
+                # rssi(2) hops(1) frame: the third byte was always 0 before.
+                payload = bridge_radio.int_to_be(rssi & 65535, 2) + bytes((bridge_mesh.last_hops,)) + reply
                 transport.write(bridge_radio.build_frame(0, bridge_radio.CMD_NFCP_RX, payload))
         interface.poll(radio_ready)
         time.sleep_ms(1)

@@ -13,15 +13,32 @@ $ErrorActionPreference = "Stop"
 if (-not $MicroPythonRoot) {
     $MicroPythonRoot = $env:MICROPYTHON_ROOT
 }
+# The checkout and toolchain have lived in nrf-micropython and, more recently,
+# e77-micropython (MicroPython be9a819, the build on the current boards).
+$Candidates = @(
+    "C:\Users\hog28\OneDrive\Documents\NightfirePY\nrf-micropython",
+    "C:\Users\hog28\OneDrive\Documents\NightfirePY\e77-micropython"
+)
 if (-not $MicroPythonRoot) {
-    $MicroPythonRoot = "C:\Users\hog28\OneDrive\Documents\NightfirePY\nrf-micropython\micropython"
+    foreach ($candidate in $Candidates) {
+        if (Test-Path -LiteralPath (Join-Path $candidate "micropython\ports\nrf")) {
+            $MicroPythonRoot = Join-Path $candidate "micropython"
+            break
+        }
+    }
 }
 
 if (-not $ToolchainDir) {
     $ToolchainDir = $env:ARM_TOOLCHAIN_DIR
 }
 if (-not $ToolchainDir) {
-    $ToolchainDir = "C:\Users\hog28\OneDrive\Documents\NightfirePY\nrf-micropython\arm-toolchain\arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi\bin"
+    foreach ($candidate in $Candidates) {
+        $bin = Join-Path $candidate "arm-toolchain\arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi\bin"
+        if (Test-Path -LiteralPath $bin) {
+            $ToolchainDir = $bin
+            break
+        }
+    }
 }
 
 function ConvertTo-WslPath([string]$WindowsPath) {

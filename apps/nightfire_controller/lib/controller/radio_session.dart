@@ -125,7 +125,9 @@ class RadioSession extends ChangeNotifier {
         if (packet != null && packet.kind == 0xfa) {
           var rssi = readUnsigned(frame.payload, 0, 2);
           if (rssi >= 32768) rssi -= 65536;
-          _receiveModule(packet, rssi);
+          // Mesh bridges put the frame's hop count in the third byte
+          // (always 0 before).
+          _receiveModule(packet, rssi, frame.payload[2]);
         }
         continue;
       }
@@ -174,7 +176,7 @@ class RadioSession extends ChangeNotifier {
     }
   }
 
-  void _receiveModule(NfcpPacket packet, int rssi) {
+  void _receiveModule(NfcpPacket packet, int rssi, [int hops = 0]) {
     if (_discoverNonce != null && packet.command == 0x41) {
       final data = packet.data;
       if (data.length != 10 && data.length != 12) return;
@@ -200,6 +202,7 @@ class RadioSession extends ChangeNotifier {
       module.group = readUnsigned(data, 0, 2);
       module.seenInScan = true;
       module.rssi = rssi;
+      module.hops = hops;
       modules[packet.source] = module;
       if (packet.source == _groupReadbackUid &&
           _groupReadback != null &&
@@ -225,6 +228,7 @@ class RadioSession extends ChangeNotifier {
     if (module != null) {
       module.lastSeen = DateTime.now();
       module.rssi = rssi;
+      module.hops = hops;
     }
     if (rejected) {
       pending.completeError(
@@ -253,13 +257,40 @@ class RadioSession extends ChangeNotifier {
     _moduleUid = uid;
     _moduleCommand = command;
     _moduleResponse = response;
+    final request = frame ?? moduleQuery(uid, command);
+    final wait = timeout ?? moduleTimeout;
+    // A mesh bridge delivers the request itself (route, retries with the
+    // same message id, then flood); the reply still arrives as a normal
+    // module frame and completes `completion`.
+    final reliable = supportsReliableDelivery(values['Firmware']);
+    final send = reliable
+        ? _request(
+            0x1a,
+            reliablePayload(uid, wait, request),
+            wait + const Duration(seconds: 1),
+          ).then((answer) {
+            final delivery = Delivery.parse(answer.payload);
+            final module = modules[uid];
+            if (delivery != null && delivery.delivered && module != null) {
+              module.route = delivery.route;
+              module.relay = delivery.relay;
+            }
+            if (delivery != null && !delivery.delivered) {
+              throw TimeoutException(
+                'No reply from module ${modules[uid]?.id ?? uid} '
+                '(${delivery.attempts} attempts)',
+              );
+            }
+            return answer;
+          })
+        : _request(0x10, request);
     try {
       final results =
           await Future.wait<Object?>([
-            _request(0x10, frame ?? moduleQuery(uid, command)),
+            send,
             completion.future,
           ], eagerError: true).timeout(
-            timeout ?? moduleTimeout,
+            reliable ? wait + const Duration(seconds: 1) : wait,
             onTimeout: () {
               throw TimeoutException(
                 'No reply from module ${modules[uid]?.id ?? uid}',

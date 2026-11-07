@@ -459,6 +459,11 @@ class _FieldModulesPanelState extends State<FieldModulesPanel> {
                             Text(
                               'RSSI: ${module.rssi ?? '—'} dBm • Device type 0x${module.deviceType.toRadixString(16)} • Protocol 0x${module.protocolVersion.toRadixString(16)}',
                             ),
+                            if (module.routeText != null)
+                              Text(
+                                'Route: ${module.routeText}',
+                                key: ValueKey('module-route-${module.uid}'),
+                              ),
                             for (final entry in module.info.entries)
                               if (entry.value.isNotEmpty &&
                                   entry.key != 'Battery mV')

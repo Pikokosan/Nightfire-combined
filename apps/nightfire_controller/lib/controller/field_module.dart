@@ -1,3 +1,4 @@
+import '../protocol/bridge_codec.dart';
 import '../protocol/nfcp_codec.dart';
 
 class ModuleFocus {
@@ -24,6 +25,22 @@ class FieldModule {
   DateTime? lastSeen;
   bool seenInScan = false;
   int? rssi;
+
+  /// Mesh hops of the last frame heard from the module (0 = direct).
+  int? hops;
+
+  /// How the bridge last delivered a request to it (mesh bridges only).
+  ModuleRoute? route;
+  int? relay;
+
+  /// "Direct", "Via 0x…", or "Flooded", once known.
+  String? get routeText => switch (route) {
+    ModuleRoute.direct => 'Direct',
+    ModuleRoute.relayed =>
+      'Via 0x${(relay ?? 0).toRadixString(16).padLeft(8, '0').toUpperCase()}',
+    ModuleRoute.flooded => 'Flooded',
+    null => hops == null ? null : (hops == 0 ? 'Direct' : '$hops hop${hops == 1 ? '' : 's'}'),
+  };
   Map<String, String> info = {};
   int? get scriptId {
     final match = RegExp(

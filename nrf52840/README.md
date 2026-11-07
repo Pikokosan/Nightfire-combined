@@ -29,6 +29,28 @@ nrf_radio.clear_stats()
 The first driver uses Nordic proprietary 1 Mbps mode, hardware packet length,
 hardware CRC, whitening, and +8 dBm TX power by default.
 
+### Prepared WS2811 output extension
+
+`nrf_radio.write_ws2811(gpio, rgb_bytes, timing_ns)` sends 1–16 RGB pixels using
+four explicit bit timing values `(T0H, T0L, T1H, T1L)` in nanoseconds. Pixel order
+is handled by the caller. The extension bounds the transfer length, uses the
+Cortex cycle counter, masks interrupts during the data waveform and leaves data
+low for 300 μs afterward. It is intended for status indicators between radio
+receive windows, not large animated strips.
+
+The nice!nano build with this extension compiles successfully. It has not been
+flashed to the connected radio or verified on actual LEDs. The Python command
+interface leaves LED and switch GPIOs disabled until wiring is checked. See
+`docs/command_interface_wiring.md` for the interface protocol, proposed connections,
+and required waveform/USB/radio bench checks.
+
+`last_rssi()` is the RSSI of the last received packet. While `recv()` is
+listening, the radio's `ADDRESS_RSSISTART` / `DISABLED_RSSISTOP` shortcuts
+sample it during the packet itself. Before 2026-11-06 the driver sampled
+as soon as the receiver was ready, so it always returned the noise floor
+(about -100 dBm), and CCA / `noise_sample()` overwrote it too. Those
+checks now keep their samples to themselves.
+
 `stats()` returns driver counters and current configuration values:
 
 - `tx_ok`
@@ -86,6 +108,24 @@ means the runtime derives the module UID from the nRF FICR device ID through
 `nrf_radio.device_id32()`. Set `UNIQUE_ID` to any nonzero 32-bit value to force a
 manual override; setting it back to zero returns the module to hardware-derived
 identity.
+
+## Building and flashing (current setup)
+
+`scripts/build_nrf52840_micropython.ps1` builds the NICENANO board with this
+module and copies the result to `firmware/nrf52840/`. It uses the
+MicroPython checkout and ARM toolchain in `NightfirePY/nrf-micropython` or
+`NightfirePY/e77-micropython` (commit `be9a819`). Don't pipe its output
+through `*>&1` in Windows PowerShell 5.1: the linker's warnings go to
+stderr and abort the script, even though the build is fine.
+
+To flash a board:
+1. Put it in UF2 mode: `py -3 scripts\enter_nrf_bootloader.py --port COMx`.
+2. Copy `firmware/nrf52840/nightfire_nicenano_micropython.uf2` to the drive
+   that appears (`INFO_UF2.TXT` names the board).
+
+Boards on the 2026-11-05 build or later keep their files. A board on an
+older build (for example 2026-09-16) has a different filesystem layout and
+comes back empty, so back it up first and reinstall its app afterwards.
 
 ## Build direction
 

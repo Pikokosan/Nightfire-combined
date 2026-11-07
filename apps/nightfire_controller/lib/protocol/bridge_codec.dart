@@ -165,11 +165,63 @@ Map<String, String> bridgeStats(List<int> bytes) {
 bool isMasterFirmware(String? firmware) =>
     firmware != null && RegExp(r'^usb-master-0\.4\.\d+$').hasMatch(firmware);
 
+/// Mesh bridges (usb-master 0.4.2+, usb-monitor 0.3.3+) deliver unicast
+/// requests themselves: on the module's known route, retried with the same
+/// mesh message id (the module answers a retry from its reply cache, never
+/// running a command twice), then flooded.
+bool supportsReliableDelivery(String? firmware) {
+  final match = RegExp(r'^usb-(master|monitor)-(\d+)\.(\d+)\.(\d+)').firstMatch(firmware ?? '');
+  if (match == null) return false;
+  final version = [for (var i = 2; i <= 4; i++) int.parse(match.group(i)!)];
+  final minimum = match.group(1) == 'master' ? [0, 4, 2] : [0, 3, 3];
+  for (var i = 0; i < 3; i++) {
+    if (version[i] != minimum[i]) return version[i] > minimum[i];
+  }
+  return true;
+}
+
+/// Bridge command 0x1A payload: uid(4) timeout_ms(2) NFCP frame.
+List<int> reliablePayload(int uid, Duration timeout, List<int> frame) {
+  final ms = timeout.inMilliseconds.clamp(0, 0xffff);
+  return [
+    (uid >> 24) & 0xff,
+    (uid >> 16) & 0xff,
+    (uid >> 8) & 0xff,
+    uid & 0xff,
+    (ms >> 8) & 0xff,
+    ms & 0xff,
+    ...frame,
+  ];
+}
+
+/// How a module was reached.
+enum ModuleRoute { direct, relayed, flooded }
+
+/// The bridge's answer to 0x1A once the delivery has finished.
+class Delivery {
+  const Delivery(this.delivered, this.route, this.relay, this.attempts);
+  final bool delivered;
+  final ModuleRoute route;
+  final int relay;
+  final int attempts;
+
+  static Delivery? parse(List<int> bytes) {
+    if (bytes.length < 7 || bytes[1] > 2) return null;
+    return Delivery(
+      bytes[0] == 0,
+      ModuleRoute.values[bytes[1]],
+      readUnsigned(bytes, 2, 4),
+      bytes[6],
+    );
+  }
+}
+
 /// Bridge files the firmware page may replace. The radio config is left out
 /// so an update keeps its network, channel and LED settings.
 const bridgeFirmwareFiles = [
   'usb_master_bundle.mpy',
   'bridge_radio.py',
+  'mesh.py',
   'usb_master_control.py',
   'usb_master_maintenance.py',
   'usb_bridge_transport.py',

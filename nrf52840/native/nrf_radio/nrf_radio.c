@@ -15,8 +15,18 @@
 #define NRF_RADIO_DEFAULT_CHANNEL 40
 #define NRF_RADIO_DEFAULT_ADDRESS 0x67676767u
 
+#define NRF_RADIO_DEFAULT_SHORTS (RADIO_SHORTS_READY_START_Msk | RADIO_SHORTS_END_DISABLE_Msk)
+// While receiving, the radio itself starts an RSSI sample when a packet's
+// address matches and stops sampling when the radio disables, so the value
+// belongs to that packet. (Starting it in software right after READY measured
+// the empty channel before the packet arrived: always the noise floor.)
+#define NRF_RADIO_RX_SHORTS (NRF_RADIO_DEFAULT_SHORTS | RADIO_SHORTS_ADDRESS_RSSISTART_Msk | \
+    RADIO_SHORTS_DISABLED_RSSISTOP_Msk)
+
 static uint8_t tx_packet[NRF_RADIO_MAX_PAYLOAD + 1];
 static uint8_t rx_packet[NRF_RADIO_MAX_PAYLOAD + 1];
+// RSSI of the last received packet. Channel checks (CCA, noise_sample) keep
+// their samples to themselves.
 static int last_rssi_dbm = 0;
 static uint32_t current_channel = NRF_RADIO_DEFAULT_CHANNEL;
 static int32_t current_tx_power = 8;
@@ -97,7 +107,7 @@ static void radio_config(uint32_t channel, int32_t tx_power, uint32_t address) {
     NRF_RADIO->CRCPOLY = 0x11021;
 
     NRF_RADIO->MODECNF0 = RADIO_MODECNF0_RU_Fast << RADIO_MODECNF0_RU_Pos;
-    NRF_RADIO->SHORTS = RADIO_SHORTS_READY_START_Msk | RADIO_SHORTS_END_DISABLE_Msk;
+    NRF_RADIO->SHORTS = NRF_RADIO_DEFAULT_SHORTS;
 }
 
 static bool channel_is_clear(uint32_t cca_ms, int32_t busy_dbm) {
@@ -135,7 +145,6 @@ static bool channel_is_clear(uint32_t cca_ms, int32_t busy_dbm) {
         }
 
         int32_t dbm = -(int32_t)NRF_RADIO->RSSISAMPLE;
-        last_rssi_dbm = dbm;
         if (dbm >= busy_dbm) {
             radio_disable();
             stat_cca_busy++;
@@ -238,29 +247,24 @@ static mp_obj_t nrf_radio_recv(size_t n_args, const mp_obj_t *args) {
     memset(rx_packet, 0, sizeof(rx_packet));
     NRF_RADIO->PACKETPTR = (uint32_t)rx_packet;
     NRF_RADIO->EVENTS_READY = 0;
+    NRF_RADIO->EVENTS_ADDRESS = 0;
     NRF_RADIO->EVENTS_END = 0;
     NRF_RADIO->EVENTS_RSSIEND = 0;
     NRF_RADIO->EVENTS_DISABLED = 0;
+    NRF_RADIO->SHORTS = NRF_RADIO_RX_SHORTS;
     NRF_RADIO->TASKS_RXEN = 1;
 
     uint32_t start = mp_hal_ticks_ms();
-    while (!NRF_RADIO->EVENTS_READY) {
-        if (timeout_ms && mp_hal_ticks_ms() - start >= timeout_ms) {
-            radio_disable();
-            stat_rx_timeout++;
-            return mp_const_none;
-        }
-    }
-    NRF_RADIO->TASKS_RSSISTART = 1;
-
     while (!NRF_RADIO->EVENTS_DISABLED) {
         if (timeout_ms && mp_hal_ticks_ms() - start >= timeout_ms) {
             radio_disable();
+            NRF_RADIO->SHORTS = NRF_RADIO_DEFAULT_SHORTS;
             stat_rx_timeout++;
             return mp_const_none;
         }
     }
     NRF_RADIO->EVENTS_DISABLED = 0;
+    NRF_RADIO->SHORTS = NRF_RADIO_DEFAULT_SHORTS;
     if (NRF_RADIO->EVENTS_RSSIEND) {
         last_rssi_dbm = -(int)NRF_RADIO->RSSISAMPLE;
     }
@@ -423,7 +427,6 @@ static mp_obj_t nrf_radio_noise_sample(size_t n_args, const mp_obj_t *pos_args, 
         }
 
         int dbm = -(int)NRF_RADIO->RSSISAMPLE;
-        last_rssi_dbm = dbm;
         if (count == 0 || dbm < min_dbm) {
             min_dbm = dbm;
         }
@@ -453,6 +456,56 @@ static mp_obj_t nrf_radio_noise_sample(size_t n_args, const mp_obj_t *pos_args, 
 }
 static MP_DEFINE_CONST_FUN_OBJ_KW(nrf_radio_noise_sample_obj, 1, nrf_radio_noise_sample);
 
+static mp_obj_t nrf_radio_write_ws2811(mp_obj_t pin_obj, mp_obj_t data_obj, mp_obj_t timing_obj) {
+    mp_int_t pin = mp_obj_get_int(pin_obj);
+    if (pin < 0 || pin > 47) {
+        mp_raise_ValueError(MP_ERROR_TEXT("GPIO must be 0..47"));
+    }
+    mp_buffer_info_t data;
+    mp_get_buffer_raise(data_obj, &data, MP_BUFFER_READ);
+    if (!data.len || data.len > 48 || data.len % 3) {
+        mp_raise_ValueError(MP_ERROR_TEXT("expected 1..16 RGB pixels"));
+    }
+    mp_obj_t *timing;
+    mp_obj_get_array_fixed_n(timing_obj, 4, &timing);
+    uint32_t cycles[4];
+    for (size_t index = 0; index < 4; index++) {
+        mp_int_t ns = mp_obj_get_int(timing[index]);
+        if (ns < 100 || ns > 5000) {
+            mp_raise_ValueError(MP_ERROR_TEXT("timings must be 100..5000 ns"));
+        }
+        cycles[index] = ((uint32_t)ns * (SystemCoreClock / 1000000u) + 999u) / 1000u;
+    }
+    NRF_GPIO_Type *gpio = pin < 32 ? NRF_P0 : NRF_P1;
+    uint32_t mask = 1u << (pin & 31);
+    gpio->OUTCLR = mask;
+    gpio->DIRSET = mask;
+    uint32_t previous_trace = CoreDebug->DEMCR;
+    uint32_t previous_counter = DWT->CTRL;
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    mp_uint_t atomic_state = MICROPY_BEGIN_ATOMIC_SECTION();
+    const uint8_t *bytes = data.buf;
+    for (size_t index = 0; index < data.len; index++) {
+        for (uint32_t bit = 0x80; bit; bit >>= 1) {
+            size_t slot = (bytes[index] & bit) ? 2 : 0;
+            uint32_t started = DWT->CYCCNT;
+            gpio->OUTSET = mask;
+            while ((uint32_t)(DWT->CYCCNT - started) < cycles[slot]) {
+            }
+            gpio->OUTCLR = mask;
+            while ((uint32_t)(DWT->CYCCNT - started) < cycles[slot] + cycles[slot + 1]) {
+            }
+        }
+    }
+    MICROPY_END_ATOMIC_SECTION(atomic_state);
+    DWT->CTRL = previous_counter;
+    CoreDebug->DEMCR = previous_trace;
+    mp_hal_delay_us(300);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_3(nrf_radio_write_ws2811_obj, nrf_radio_write_ws2811);
+
 static const mp_rom_map_elem_t nrf_radio_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_nrf_radio) },
     { MP_ROM_QSTR(MP_QSTR_init), MP_ROM_PTR(&nrf_radio_init_obj) },
@@ -465,6 +518,7 @@ static const mp_rom_map_elem_t nrf_radio_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_device_id32), MP_ROM_PTR(&nrf_radio_device_id32_obj) },
     { MP_ROM_QSTR(MP_QSTR_device_id), MP_ROM_PTR(&nrf_radio_device_id_obj) },
     { MP_ROM_QSTR(MP_QSTR_noise_sample), MP_ROM_PTR(&nrf_radio_noise_sample_obj) },
+    { MP_ROM_QSTR(MP_QSTR_write_ws2811), MP_ROM_PTR(&nrf_radio_write_ws2811_obj) },
 };
 static MP_DEFINE_CONST_DICT(nrf_radio_module_globals, nrf_radio_module_globals_table);
 

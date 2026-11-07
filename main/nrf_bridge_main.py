@@ -5,6 +5,7 @@ from machine import Pin, UART
 
 import bridge_radio
 import machine
+import mesh
 import nrf_radio
 
 try:
@@ -18,7 +19,8 @@ APP_FIRMWARE_VERSION = "0.1.2"
 
 DEFAULT_NETWORK_ID = bridge_radio.DEFAULT_NETWORK_ID
 DEFAULT_RADIO_CHANNEL = 90
-DEFAULT_RADIO_ADDRESS = 0x67676767
+# Mesh radio (docs/mesh_radio_design.md). Pre-mesh firmware used 0x67676767.
+DEFAULT_RADIO_ADDRESS = mesh.MESH_RADIO_ADDRESS
 DEFAULT_RADIO_TX_POWER = 8
 
 DEFAULT_UART_ID = 0
@@ -28,7 +30,8 @@ DEFAULT_UART_RX_PIN = 8
 
 NETWORK_ID = getattr(bridge_config, "NETWORK_ID", DEFAULT_NETWORK_ID)
 RADIO_CHANNEL = getattr(bridge_config, "RADIO_CHANNEL", DEFAULT_RADIO_CHANNEL)
-RADIO_ADDRESS = getattr(bridge_config, "RADIO_ADDRESS", DEFAULT_RADIO_ADDRESS)
+# RADIO_ADDRESS in old configs is the pre-mesh address, so it is ignored.
+RADIO_ADDRESS = getattr(bridge_config, "MESH_RADIO_ADDRESS", DEFAULT_RADIO_ADDRESS)
 RADIO_TX_POWER = getattr(bridge_config, "RADIO_TX_POWER", DEFAULT_RADIO_TX_POWER)
 
 UART_ID = getattr(bridge_config, "UART_ID", DEFAULT_UART_ID)
@@ -36,11 +39,10 @@ UART_BAUD = getattr(bridge_config, "UART_BAUD", DEFAULT_UART_BAUD)
 UART_TX_PIN = getattr(bridge_config, "UART_TX_PIN", DEFAULT_UART_TX_PIN)
 UART_RX_PIN = getattr(bridge_config, "UART_RX_PIN", DEFAULT_UART_RX_PIN)
 
-RADIO_POLL_TIMEOUT_MS = 50
+# Short, so an app command waits at most ~10 ms for the radio (was 50 ms).
+RADIO_POLL_TIMEOUT_MS = 10
 UART_READ_MAX = 64
 POST_SEND_RX_WINDOW_MS = 1500
-RX_DEDUPE_WINDOW_MS = 1500
-RX_DEDUPE_CACHE_LIMIT = 16
 SCAN_BUSY_DBM = -85
 SCAN_SAMPLE_MS = 45
 SCAN_SAMPLE_INTERVAL_MS = 3
@@ -52,7 +54,8 @@ def valid_radio_channel(channel):
 
 local_parser = bridge_radio.BridgeFrameParser()
 uart = None
-rx_seen = []
+bridge_mesh = None
+uart_rx_us = None   # when the current UART chunk was read; time code ages from here
 stat_rx_duplicate = 0
 stat_rx_wrong_network = 0
 file_update = None
@@ -166,33 +169,6 @@ def write_error(seq, cmd, code=1):
     write_local(seq, cmd, bytes([code & 0xFF]), bridge_radio.FLAG_RESPONSE | bridge_radio.FLAG_ERROR)
 
 
-def remember_rx_packet(seq, frame):
-    global rx_seen
-
-    if seq is None:
-        return False
-
-    now = time.ticks_ms()
-    signature = bytes(frame[:24])
-    kept = []
-    duplicate = False
-
-    for item in rx_seen:
-        age = time.ticks_diff(now, item[0])
-        if age < RX_DEDUPE_WINDOW_MS:
-            kept.append(item)
-            if item[1] == seq and item[2] == signature:
-                duplicate = True
-
-    if not duplicate:
-        kept.append((now, seq, signature))
-        if len(kept) > RX_DEDUPE_CACHE_LIMIT:
-            kept = kept[-RX_DEDUPE_CACHE_LIMIT:]
-
-    rx_seen = kept
-    return duplicate
-
-
 def set_network(network_id):
     global NETWORK_ID
 
@@ -207,6 +183,7 @@ def set_radio_channel(channel):
         return False
 
     RADIO_CHANNEL = channel
+    bridge_mesh.queue.clear()   # repeats queued for the old channel
     nrf_radio.init(
         channel=RADIO_CHANNEL,
         tx_power=RADIO_TX_POWER,
@@ -221,7 +198,7 @@ def save_runtime_config():
         with open("nrf_bridge_config.py", "w") as f:
             f.write("NETWORK_ID = 0x%04X\n" % (NETWORK_ID & 0xFFFF))
             f.write("RADIO_CHANNEL = %d\n" % (RADIO_CHANNEL & 0xFF))
-            f.write("RADIO_ADDRESS = 0x%08X\n" % (RADIO_ADDRESS & 0xFFFFFFFF))
+            f.write("MESH_RADIO_ADDRESS = 0x%08X\n" % (RADIO_ADDRESS & 0xFFFFFFFF))
             f.write("RADIO_TX_POWER = %d\n" % RADIO_TX_POWER)
             f.write("UART_ID = %d\n" % UART_ID)
             f.write("UART_BAUD = %d\n" % UART_BAUD)
@@ -481,14 +458,25 @@ def handle_local_frame(frame):
         end_file_update(frame.seq)
         return
 
+    if frame.cmd == bridge_radio.CMD_SEND_NFCP_RELIABLE:
+        if len(frame.payload) <= 6:
+            write_error(frame.seq, frame.cmd, 3)
+            return
+        # Answered by poll_deliveries() when the delivery ends.
+        bridge_mesh.send_reliable(
+            NETWORK_ID, bridge_radio.int_from_be(frame.payload[0:4]), bytes(frame.payload[6:]),
+            bridge_radio.int_from_be(frame.payload[4:6]), frame.seq, uart_rx_us)
+        receive_and_forward_radio(POST_SEND_RX_WINDOW_MS)
+        return
+
     if frame.cmd == bridge_radio.CMD_SEND_NFCP:
         if len(frame.payload) > bridge_radio.MAX_PAYLOAD - 2:
             write_error(frame.seq, bridge_radio.CMD_SEND_NFCP, 3)
             return
 
-        radio_payload = bridge_radio.int_to_be(NETWORK_ID & 0xFFFF, 2) + bytes([frame.seq & 0xFF]) + frame.payload
         try:
-            nrf_radio.send(radio_payload)
+            # A mesh frame from this bridge: sent now, repeats queued.
+            bridge_mesh.send_frame(NETWORK_ID, bytes(frame.payload), uart_rx_us)
             write_local(frame.seq, bridge_radio.CMD_SEND_NFCP, b"\x00")
             receive_and_forward_radio(POST_SEND_RX_WINDOW_MS)
         except Exception:
@@ -514,8 +502,11 @@ def handle_local_frame(frame):
 
 
 def handle_local_uart():
+    global uart_rx_us
+
     if not uart.any():
         return
+    uart_rx_us = time.ticks_us()
 
     data = uart.read(UART_READ_MAX) or b""
     for b in data:
@@ -535,27 +526,30 @@ def handle_radio_packet(payload):
         stat_rx_wrong_network += 1
         return
 
-    radio_seq = None
-    nfcp_offset = 2
-
-    if len(payload) >= 4 and payload[2] != 0xFF and payload[3] == 0xFF:
-        radio_seq = payload[2]
-        nfcp_offset = 3
-
+    # Duplicates, relayed copies of our own frames and pre-mesh payloads
+    # are dropped here, before any USB framing.
     rssi = nrf_radio.last_rssi()
-    nfcp_frame = payload[nfcp_offset:]
-    if remember_rx_packet(radio_seq, nfcp_frame):
-        stat_rx_duplicate += 1
+    nfcp_frame = bridge_mesh.receive(payload, NETWORK_ID, rssi)
+    if nfcp_frame is None:
+        stat_rx_duplicate = bridge_mesh.stat_duplicate + bridge_mesh.stat_echo
         return
 
-    rx_payload = int_to_be_signed(rssi, 2) + int_to_be_signed(0, 1) + nfcp_frame
+    # rssi(2) hops(1) frame: the third byte was always 0 before.
+    rx_payload = int_to_be_signed(rssi, 2) + bytes((bridge_mesh.last_hops,)) + nfcp_frame
     write_local(0, bridge_radio.CMD_NFCP_RX, rx_payload, 0)
+
+
+def poll_deliveries():
+    for tag, result in bridge_mesh.poll():
+        write_local(tag, bridge_radio.CMD_SEND_NFCP_RELIABLE, result)
 
 
 def receive_and_forward_radio(timeout_ms):
     deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
     while time.ticks_diff(deadline, time.ticks_ms()) > 0:
-        payload = nrf_radio.recv(RADIO_POLL_TIMEOUT_MS)
+        bridge_mesh.service()
+        poll_deliveries()
+        payload = nrf_radio.recv(bridge_mesh.wait_ms(RADIO_POLL_TIMEOUT_MS))
         if payload:
             handle_radio_packet(payload)
             deadline = time.ticks_add(time.ticks_ms(), 100)
@@ -589,7 +583,9 @@ def init_radio():
 
 
 def main():
-    global uart
+    global uart, bridge_mesh
+
+    bridge_mesh = mesh.MeshBridge(nrf_radio.send, get_node_id())
 
     try:
         uart = init_uart()
@@ -621,7 +617,9 @@ def main():
                 radio_ready = init_radio()
                 continue
 
-            payload = nrf_radio.recv(RADIO_POLL_TIMEOUT_MS)
+            bridge_mesh.service()
+            poll_deliveries()
+            payload = nrf_radio.recv(bridge_mesh.wait_ms(RADIO_POLL_TIMEOUT_MS))
             if payload:
                 handle_radio_packet(payload)
         except Exception as e:

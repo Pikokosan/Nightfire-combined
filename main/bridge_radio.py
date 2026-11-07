@@ -21,6 +21,12 @@ CMD_CLEAR_STATS = 0x16
 CMD_GET_INTERFACE_STATUS = 0x17
 CMD_HOST_HEARTBEAT = 0x18
 CMD_GET_KEEPALIVE_STATUS = 0x19
+# Reliable delivery to one module. Payload: uid(4) timeout_ms(2) NFCP frame.
+# The bridge answers when the module's reply has arrived (it is forwarded as
+# a normal CMD_NFCP_RX too) or all attempts failed: status(1, 0 delivered,
+# 1 no reply) route(1, 0 direct, 1 via relay, 2 flood) relay_uid(4)
+# attempts(1). A bridge without mesh answers with FLAG_ERROR.
+CMD_SEND_NFCP_RELIABLE = 0x1A
 CMD_BOOTLOADER = 0x30
 CMD_RESET = 0x31
 CMD_FILE_BEGIN = 0x32
@@ -29,6 +35,7 @@ CMD_FILE_END = 0x34
 CMD_ERROR = 0x40
 
 DEFAULT_NETWORK_ID = 0x04D2
+SOF_PAIR = bytes((SOF0, SOF1))
 
 
 def byte_value(data, index=0):
@@ -54,16 +61,51 @@ def int_from_be(data, signed=False):
     return value
 
 
+# CRC16-CCITT (poly 0x1021) by table lookup: one step per byte instead of
+# eight bit steps. Same results as the bit loop; on the nRF52840 the bit
+# loop was most of the cost of handling a frame in MicroPython.
+BRIDGE_CRC_TABLE = (
+    0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50A5, 0x60C6, 0x70E7,
+    0x8108, 0x9129, 0xA14A, 0xB16B, 0xC18C, 0xD1AD, 0xE1CE, 0xF1EF,
+    0x1231, 0x0210, 0x3273, 0x2252, 0x52B5, 0x4294, 0x72F7, 0x62D6,
+    0x9339, 0x8318, 0xB37B, 0xA35A, 0xD3BD, 0xC39C, 0xF3FF, 0xE3DE,
+    0x2462, 0x3443, 0x0420, 0x1401, 0x64E6, 0x74C7, 0x44A4, 0x5485,
+    0xA56A, 0xB54B, 0x8528, 0x9509, 0xE5EE, 0xF5CF, 0xC5AC, 0xD58D,
+    0x3653, 0x2672, 0x1611, 0x0630, 0x76D7, 0x66F6, 0x5695, 0x46B4,
+    0xB75B, 0xA77A, 0x9719, 0x8738, 0xF7DF, 0xE7FE, 0xD79D, 0xC7BC,
+    0x48C4, 0x58E5, 0x6886, 0x78A7, 0x0840, 0x1861, 0x2802, 0x3823,
+    0xC9CC, 0xD9ED, 0xE98E, 0xF9AF, 0x8948, 0x9969, 0xA90A, 0xB92B,
+    0x5AF5, 0x4AD4, 0x7AB7, 0x6A96, 0x1A71, 0x0A50, 0x3A33, 0x2A12,
+    0xDBFD, 0xCBDC, 0xFBBF, 0xEB9E, 0x9B79, 0x8B58, 0xBB3B, 0xAB1A,
+    0x6CA6, 0x7C87, 0x4CE4, 0x5CC5, 0x2C22, 0x3C03, 0x0C60, 0x1C41,
+    0xEDAE, 0xFD8F, 0xCDEC, 0xDDCD, 0xAD2A, 0xBD0B, 0x8D68, 0x9D49,
+    0x7E97, 0x6EB6, 0x5ED5, 0x4EF4, 0x3E13, 0x2E32, 0x1E51, 0x0E70,
+    0xFF9F, 0xEFBE, 0xDFDD, 0xCFFC, 0xBF1B, 0xAF3A, 0x9F59, 0x8F78,
+    0x9188, 0x81A9, 0xB1CA, 0xA1EB, 0xD10C, 0xC12D, 0xF14E, 0xE16F,
+    0x1080, 0x00A1, 0x30C2, 0x20E3, 0x5004, 0x4025, 0x7046, 0x6067,
+    0x83B9, 0x9398, 0xA3FB, 0xB3DA, 0xC33D, 0xD31C, 0xE37F, 0xF35E,
+    0x02B1, 0x1290, 0x22F3, 0x32D2, 0x4235, 0x5214, 0x6277, 0x7256,
+    0xB5EA, 0xA5CB, 0x95A8, 0x8589, 0xF56E, 0xE54F, 0xD52C, 0xC50D,
+    0x34E2, 0x24C3, 0x14A0, 0x0481, 0x7466, 0x6447, 0x5424, 0x4405,
+    0xA7DB, 0xB7FA, 0x8799, 0x97B8, 0xE75F, 0xF77E, 0xC71D, 0xD73C,
+    0x26D3, 0x36F2, 0x0691, 0x16B0, 0x6657, 0x7676, 0x4615, 0x5634,
+    0xD94C, 0xC96D, 0xF90E, 0xE92F, 0x99C8, 0x89E9, 0xB98A, 0xA9AB,
+    0x5844, 0x4865, 0x7806, 0x6827, 0x18C0, 0x08E1, 0x3882, 0x28A3,
+    0xCB7D, 0xDB5C, 0xEB3F, 0xFB1E, 0x8BF9, 0x9BD8, 0xABBB, 0xBB9A,
+    0x4A75, 0x5A54, 0x6A37, 0x7A16, 0x0AF1, 0x1AD0, 0x2AB3, 0x3A92,
+    0xFD2E, 0xED0F, 0xDD6C, 0xCD4D, 0xBDAA, 0xAD8B, 0x9DE8, 0x8DC9,
+    0x7C26, 0x6C07, 0x5C64, 0x4C45, 0x3CA2, 0x2C83, 0x1CE0, 0x0CC1,
+    0xEF1F, 0xFF3E, 0xCF5D, 0xDF7C, 0xAF9B, 0xBFBA, 0x8FD9, 0x9FF8,
+    0x6E17, 0x7E36, 0x4E55, 0x5E74, 0x2E93, 0x3EB2, 0x0ED1, 0x1EF0,
+)
+
+
 def crc16_ccitt(data, crc=0xFFFF):
+    if isinstance(data, str):
+        data = data.encode()
+    table = BRIDGE_CRC_TABLE
     for b in data:
-        if not isinstance(b, int):
-            b = ord(b)
-        crc ^= b << 8
-        for _ in range(8):
-            if crc & 0x8000:
-                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
-            else:
-                crc = (crc << 1) & 0xFFFF
+        crc = ((crc << 8) & 0xFF00) ^ table[((crc >> 8) ^ b) & 0xFF]
     return crc
 
 
@@ -169,6 +211,47 @@ class Frame(object):
 class BridgeFrameParser(object):
     def __init__(self):
         self.reset()
+        self.bulk = bytearray()   # feed_bytes() buffer
+
+    def feed_bytes(self, data):
+        """Frames found in data (and any partial frame left from before).
+
+        Same frames as feeding every byte to feed(), with a few calls per
+        frame instead of several per byte: on MicroPython that per-byte cost
+        added milliseconds to every command the bridge forwards. Use either
+        feed() or feed_bytes() on one parser, not both."""
+        buf = self.bulk
+        buf += data
+        frames = []
+        start = 0
+        end = len(buf)
+        while True:
+            index = buf.find(SOF_PAIR, start)
+            if index < 0:
+                # Keep a trailing SOF0: it may begin the next frame.
+                start = end - 1 if end and buf[end - 1] == SOF0 else end
+                break
+            if index + 3 > end:
+                start = index
+                break
+            length = buf[index + 2]
+            if length < 4 or length > MAX_PAYLOAD + 4:
+                start = index + 1
+                continue
+            frame_end = index + 3 + length + 2
+            if frame_end > end:
+                start = index
+                break
+            body = buf[index + 2:index + 3 + length]
+            rx_crc = (buf[frame_end - 2] << 8) | buf[frame_end - 1]
+            if rx_crc == crc16_ccitt(body) and body[1] == VERSION:
+                frames.append(Frame(flags=body[2], seq=body[3], cmd=body[4], payload=body[5:]))
+                start = frame_end
+            else:
+                start = index + 1
+        if start:
+            self.bulk = buf[start:]
+        return frames
 
     def reset(self):
         self.state = 0

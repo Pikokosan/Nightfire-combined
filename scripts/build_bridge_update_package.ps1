@@ -11,6 +11,7 @@ $Output = Join-Path $Root $OutputDir
 $files = @(
     @{ Source = "nrf_bridge_main.py"; Target = "main.py" },
     @{ Source = "bridge_radio.py"; Target = "bridge_radio.py" },
+    @{ Source = "mesh.py"; Target = "mesh.py" },
     @{ Source = "nrf_bridge_config_master.py"; Target = "nrf_bridge_config.py" }
 )
 

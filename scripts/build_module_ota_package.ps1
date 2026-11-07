@@ -36,6 +36,7 @@ $files = @(
     @{ Source = "nfcp.py"; Target = "/nfcp.py" },
     @{ Source = "module_ota.py"; Target = "/module_ota.py" },
     @{ Source = "nrf_module_common.py"; Target = "/nrf_module_common.py" },
+    @{ Source = "mesh.py"; Target = "/mesh.py" },
     @{ Source = "module_link.py"; Target = "/module_link.py" },
     @{ Source = "module_script.py"; Target = "/module_script.py" },
     @{ Source = "module_lcd.py"; Target = "/module_lcd.py" },
