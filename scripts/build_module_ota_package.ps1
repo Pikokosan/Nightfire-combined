@@ -35,7 +35,11 @@ $files = @(
     @{ Source = $entry; Target = "/main.py" },
     @{ Source = "nfcp.py"; Target = "/nfcp.py" },
     @{ Source = "module_ota.py"; Target = "/module_ota.py" },
-    @{ Source = "nrf_module_common.py"; Target = "/nrf_module_common.py" }
+    @{ Source = "nrf_module_common.py"; Target = "/nrf_module_common.py" },
+    @{ Source = "module_link.py"; Target = "/module_link.py" },
+    @{ Source = "module_script.py"; Target = "/module_script.py" },
+    @{ Source = "module_lcd.py"; Target = "/module_lcd.py" },
+    @{ Source = "lcd1602_i2c.py"; Target = "/lcd1602_i2c.py" }
 )
 
 if ($Target -eq "field") {
@@ -43,8 +47,7 @@ if ($Target -eq "field") {
         @{ Source = "shift_register74hc595.py"; Target = "/shift_register74hc595.py" },
         @{ Source = "analog_mux74hc4051.py"; Target = "/analog_mux74hc4051.py" },
         @{ Source = "adc_scaling.py"; Target = "/adc_scaling.py" },
-        @{ Source = "field_measurement.py"; Target = "/field_measurement.py" },
-        @{ Source = "lcd1602_i2c.py"; Target = "/lcd1602_i2c.py" }
+        @{ Source = "field_measurement.py"; Target = "/field_measurement.py" }
     )
 }
 

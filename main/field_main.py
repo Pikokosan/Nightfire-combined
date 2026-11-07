@@ -16,14 +16,12 @@ from field_measurement import (
     STATE_NORMAL,
     STATE_OPEN,
 )
+from module_lcd import DebouncedButton, LcdMenu
+from module_link import ModuleLink, encode_text_field
+from module_script import ScriptEngine
 from nfcp import *
 from machine import I2C, Pin
 from shift_register74hc595 import ShiftRegister74HC59524
-
-try:
-    from lcd1602_i2c import I2cLcd1602
-except Exception:
-    I2cLcd1602 = None
 
 try:
     import nrf_node_config as node_config
@@ -117,7 +115,7 @@ def save_resistance_calibration_banks(banks):
 
 
 APP_FIRMWARE_NAME = "field-module"
-APP_FIRMWARE_VERSION = "0.2.0"
+APP_FIRMWARE_VERSION = "0.3.0"
 
 DEFAULT_NETWORK_ID = 0x04D2
 DEFAULT_GROUP_ID = 0x0001
@@ -134,8 +132,6 @@ RADIO_CCA_BUSY_DBM = getattr(node_config, "RADIO_CCA_BUSY_DBM", -85)
 RADIO_CCA_RETRIES = getattr(node_config, "RADIO_CCA_RETRIES", 4)
 RADIO_CCA_BACKOFF_MIN_MS = getattr(node_config, "RADIO_CCA_BACKOFF_MIN_MS", 2)
 RADIO_CCA_BACKOFF_MAX_MS = getattr(node_config, "RADIO_CCA_BACKOFF_MAX_MS", 10)
-RX_DEDUPE_WINDOW_MS = 1500
-RX_DEDUPE_CACHE_LIMIT = 16
 
 DISCOVER_BACKOFF_MIN_MS = 250
 DISCOVER_BACKOFF_MAX_MS = 500
@@ -158,12 +154,18 @@ EXTERNAL_VCC_SETTLE_MS = getattr(node_config, "EXTERNAL_VCC_SETTLE_MS", 50)
 PRE_TEST_PIN = getattr(node_config, "PRE_TEST_PIN", 9)
 ARM_CONTROL_PIN = getattr(node_config, "ARM_CONTROL_PIN", None)
 ARM_CONTROL_ACTIVE_VALUE = 1 if getattr(node_config, "ARM_CONTROL_ACTIVE_VALUE", 1) else 0
+ARM_VOLTAGE_CHECK_ENABLED = bool(getattr(node_config, "ARM_VOLTAGE_CHECK_ENABLED", True))
+ARM_VOLTAGE_CHECK_SETTLE_MS = int(getattr(node_config, "ARM_VOLTAGE_CHECK_SETTLE_MS", 50))
+ARM_VOLTAGE_CHECK_MIN_MV = int(getattr(node_config, "ARM_VOLTAGE_CHECK_MIN_MV", 500))
+ARM_VOLTAGE_CHECK_SAMPLES = int(getattr(node_config, "ARM_VOLTAGE_CHECK_SAMPLES", 16))
 SAFE_LED_PIN = getattr(node_config, "SAFE_LED_PIN", 10)
 ARM_LED_PIN = getattr(node_config, "ARM_LED_PIN", 11)
 UP_BUTTON_PIN = getattr(node_config, "UP_BUTTON_PIN", 33)      # P1.01 bottom pad
 DOWN_BUTTON_PIN = getattr(node_config, "DOWN_BUTTON_PIN", 34)  # P1.02 bottom pad
 OK_FWD_BUTTON_PIN = getattr(node_config, "OK_FWD_BUTTON_PIN", getattr(node_config, "OK_BUTTON_PIN", None))
 BACK_BUTTON_PIN = getattr(node_config, "BACK_BUTTON_PIN", None)
+BUTTON_ACTIVE_VALUE = 1 if getattr(node_config, "BUTTON_ACTIVE_VALUE", 0) else 0
+BUTTON_INTERNAL_PULL_UP = bool(getattr(node_config, "BUTTON_INTERNAL_PULL_UP", True))
 BATT_CHECK_PIN = getattr(node_config, "BATT_CHECK_PIN", 29)    # P0.29 / D20 / AIN5
 LCD_SDA_PIN = getattr(node_config, "LCD_SDA_PIN", 39)          # P1.07 bottom pad
 LCD_SCL_PIN = getattr(node_config, "LCD_SCL_PIN", 35)          # P1.03 if LCD is fitted later
@@ -235,6 +237,9 @@ CHANNEL_SHORT_MIN_FRACTION = getattr(
 CHANNEL_INVALID_IS_OPEN = getattr(node_config, "CHANNEL_INVALID_IS_OPEN", True)
 CHANNEL_OPEN_MIN_FRACTION = getattr(node_config, "CHANNEL_OPEN_MIN_FRACTION", None)
 RESISTANCE_CALIBRATION_POINTS = getattr(node_config, "RESISTANCE_CALIBRATION_POINTS", ())
+RESISTANCE_SHORT_MAX_DECI_OHM = int(
+    getattr(node_config, "RESISTANCE_SHORT_MAX_DECI_OHM", 0)
+)
 RESISTANCE_CALIBRATION_BANKS = load_resistance_calibration_banks()
 
 CONT_STATUS_OK = 0x00
@@ -257,49 +262,149 @@ if CUE_COUNT > DEFAULT_CUE_COUNT:
 DEVICE_TYPE = DEFAULT_DEVICE_TYPE
 NETWORK_ID = RUNTIME_CONFIG[2] if RUNTIME_CONFIG else getattr(node_config, "NETWORK_ID", DEFAULT_NETWORK_ID)
 ARMED = False
+arm_check_error = ""
+arm_check_mv = None
 STARTUP_FAULT = False
 STARTUP_FAULT_REASON = ""
 STARTUP_595_CHAIN_RESULT = None
-script_id_loaded = None
-script_entries = []
-script_running = False
-script_start_ms = 0
-script_next_index = 0
-script_last_heartbeat_ms = 0
-script_last_event = "idle"
-script_time_synced = False
-script_master_offset_ms = 0
-script_time_sync_local_ms = 0
 
-parser = NFCPStreamParser()
-nfcp = NFCP(node_id=0x01)
-tx_seq = 1
-rx_seen = []
 fire_out_mask = 0
 fire_deadlines = [0] * CUE_COUNT
+last_fire_mask = 0
+last_fire_seq = 0
+last_fire_ms = 0
 last_cont_status = CONT_STATUS_OK
 last_cont_open_mask = None
 last_cont_ms = 0
-lcd_display = None
-lcd_buttons = []
-lcd_mode = "home"
-lcd_menu_index = 0
-lcd_active_view = ""
-lcd_cont_detail_index = -1
-lcd_edit_target = ""
-lcd_edit_value = 0
-lcd_force_refresh = True
-lcd_last_refresh_ms = 0
-lcd_local_scan_pending = False
-last_master_rx_ms = 0
 
-LCD_MENU_ITEMS = (
-    "System Info",
-    "Continuity",
-    "Script",
-    "Set Group",
-    "Set Network",
-    "Set Channel",
+
+
+class FieldNode:
+    """Firmware state and hooks used by the shared link, script and LCD code."""
+
+    firmware_version = APP_FIRMWARE_VERSION
+    can_scan = True
+
+    def ids(self):
+        return NETWORK_ID, GROUP_ID, UNIQUE_ID, RADIO_CHANNEL
+
+    def armed(self):
+        return ARMED
+
+    def fire(self, mask):
+        return fire_mask(mask)
+
+    def fire_blocked(self):
+        if STARTUP_FAULT:
+            return NACK_INTERNAL_ERROR, "fault"
+        if not ARMED:
+            return NACK_REJECTED_ARMED, "disarmed"
+        return None
+
+    def stop_outputs(self):
+        clear_fire_outputs()
+
+    def info_payload(self):
+        fault_text = " fault=%s" % STARTUP_FAULT_REASON if STARTUP_FAULT else ""
+        return (
+            encode_text_field(APP_FIRMWARE_NAME) +
+            encode_text_field(APP_FIRMWARE_VERSION) +
+            encode_text_field("nrf-radio-native") +
+            encode_text_field(script.status_text(fault_text)) +
+            encode_text_field("0x%08X" % (get_default_unique_id() & 0xFFFFFFFF)) +
+            encode_text_field("0x%08X" % (CONFIG_UNIQUE_ID & 0xFFFFFFFF)) +
+            encode_text_field(str(read_battery_mv())) +
+            encode_text_field(BATTERY_PACK_TYPE)
+        )
+
+    def apply_setting(self, name, value):
+        global GROUP_ID, NETWORK_ID, RADIO_CHANNEL, CONFIG_UNIQUE_ID, UNIQUE_ID
+
+        previous = runtime_config_values()
+        if name == "group":
+            GROUP_ID = value
+        elif name == "network":
+            NETWORK_ID = value
+        elif name == "channel":
+            RADIO_CHANNEL = value
+        elif name == "unique":
+            CONFIG_UNIQUE_ID = value
+            UNIQUE_ID = CONFIG_UNIQUE_ID or get_default_unique_id()
+        return persist_runtime_change(previous)
+
+    # LCD
+    def status_text(self):
+        if STARTUP_FAULT:
+            return "FAULT"
+        if ARMED:
+            return "ARMED"
+        return "SAFE"
+
+    def battery_mv(self):
+        try:
+            return read_battery_mv()
+        except Exception:
+            return 0
+
+    def cue_count(self):
+        return CUE_COUNT
+
+    def continuity(self):
+        status = "OK" if last_cont_status == CONT_STATUS_OK else "WARN%02X" % last_cont_status
+        return last_cont_open_mask, status
+
+    def scan_continuity(self):
+        try:
+            unit, status, values = read_resistance_values()
+            open_mask = 0
+            for index, value in enumerate(values):
+                if value in (RESISTANCE_VALUE_OPEN, RESISTANCE_VALUE_INVALID):
+                    open_mask |= 1 << index
+                elif (
+                    unit == RESISTANCE_UNIT_DECI_OHM and
+                    int(value) <= RESISTANCE_SHORT_MAX_DECI_OHM
+                ):
+                    open_mask |= 1 << index
+            set_last_continuity(status, open_mask)
+            print("LCD RES status=0x%02X open_mask=0x%06X" % (status, open_mask))
+        except Exception as e:
+            print("LCD continuity scan failed:", e)
+
+    def alert_lines(self):
+        if arm_check_error:
+            measured = "--" if arm_check_mv is None else str(int(arm_check_mv))
+            return "ARM CHECK FAILED", "%smV need %d" % (measured, ARM_VOLTAGE_CHECK_MIN_MV)
+        return None
+
+
+node = FieldNode()
+link = ModuleLink(
+    node,
+    RADIO_ADDRESS,
+    RADIO_TX_POWER,
+    cca_enabled=RADIO_CCA_ENABLED,
+    cca_ms=RADIO_CCA_MS,
+    cca_busy_dbm=RADIO_CCA_BUSY_DBM,
+    cca_retries=RADIO_CCA_RETRIES,
+    cca_backoff_min_ms=RADIO_CCA_BACKOFF_MIN_MS,
+    cca_backoff_max_ms=RADIO_CCA_BACKOFF_MAX_MS,
+)
+script = ScriptEngine(
+    node,
+    link,
+    max_entries=SCRIPT_MAX_ENTRIES,
+    heartbeat_timeout_ms=SCRIPT_HEARTBEAT_TIMEOUT_MS,
+    sync_valid_ms=SCRIPT_TIME_SYNC_VALID_MS,
+)
+lcd = LcdMenu(
+    node,
+    link,
+    script,
+    cols=LCD_COLS,
+    rows=LCD_ROWS,
+    refresh_ms=LCD_REFRESH_MS,
+    page_size=LCD_CONTINUITY_PAGE_SIZE,
+    link_timeout_ms=MASTER_LINK_TIMEOUT_MS,
 )
 
 
@@ -375,10 +480,11 @@ arm_control = (
     )
     if ARM_CONTROL_PIN is not None else None
 )
-up_button = make_pin(UP_BUTTON_PIN, Pin.IN, Pin.PULL_UP, name="up button")
-down_button = make_pin(DOWN_BUTTON_PIN, Pin.IN, Pin.PULL_UP, name="down button")
-ok_fwd_button = make_pin(OK_FWD_BUTTON_PIN, Pin.IN, Pin.PULL_UP, name="ok/fwd button") if OK_FWD_BUTTON_PIN is not None else None
-back_button = make_pin(BACK_BUTTON_PIN, Pin.IN, Pin.PULL_UP, name="back button") if BACK_BUTTON_PIN is not None else None
+button_pull = Pin.PULL_UP if BUTTON_INTERNAL_PULL_UP else None
+up_button = make_pin(UP_BUTTON_PIN, Pin.IN, button_pull, name="up button")
+down_button = make_pin(DOWN_BUTTON_PIN, Pin.IN, button_pull, name="down button")
+ok_fwd_button = make_pin(OK_FWD_BUTTON_PIN, Pin.IN, button_pull, name="ok/fwd button") if OK_FWD_BUTTON_PIN is not None else None
+back_button = make_pin(BACK_BUTTON_PIN, Pin.IN, button_pull, name="back button") if BACK_BUTTON_PIN is not None else None
 
 try:
     lcd_i2c = None
@@ -519,533 +625,13 @@ channel_classifier = ChannelClassifier(
 )
 
 
-class DebouncedButton:
-    def __init__(self, pin, debounce_ms=80):
-        self.pin = pin
-        self.debounce_ms = int(debounce_ms)
-        self.last_raw = self.read_raw()
-        self.stable = self.last_raw
-        self.changed_ms = time.ticks_ms()
-
-    def read_raw(self):
-        if self.pin is None:
-            return False
-        try:
-            return self.pin.value() == 0
-        except Exception:
-            return False
-
-    def update(self, now):
-        raw = self.read_raw()
-        if raw != self.last_raw:
-            self.last_raw = raw
-            self.changed_ms = now
-            return False
-
-        if raw != self.stable and time.ticks_diff(now, self.changed_ms) >= self.debounce_ms:
-            self.stable = raw
-            return self.stable
-
-        return False
-
-
-def count_mask_bits(mask):
-    mask = int(mask or 0)
-    count = 0
-    while mask:
-        count += mask & 1
-        mask >>= 1
-    return count
-
-
-def lcd_trim(text):
-    return str(text)[:LCD_COLS]
-
-
 def set_last_continuity(status, open_mask):
-    global last_cont_status, last_cont_open_mask, last_cont_ms, lcd_force_refresh
+    global last_cont_status, last_cont_open_mask, last_cont_ms
 
     last_cont_status = int(status or CONT_STATUS_OK)
     last_cont_open_mask = int(open_mask or 0) & ((1 << CUE_COUNT) - 1)
     last_cont_ms = time.ticks_ms()
-    lcd_force_refresh = True
-
-
-def record_master_rx():
-    global last_master_rx_ms, lcd_force_refresh
-
-    last_master_rx_ms = time.ticks_ms()
-    lcd_force_refresh = True
-
-
-def check_master_link_failsafe():
-    global ARMED, script_running, lcd_force_refresh
-
-    if not ARMED:
-        return
-    if not last_master_rx_ms:
-        return
-    if time.ticks_diff(time.ticks_ms(), last_master_rx_ms) <= MASTER_LINK_TIMEOUT_MS:
-        return
-
-    ARMED = False
-    script_running = False
-    clear_fire_outputs()
-    set_armed_outputs(False)
-    lcd_force_refresh = True
-    print("DISARMED - master link timeout")
-
-
-def init_lcd_ui():
-    global lcd_display, lcd_buttons, lcd_force_refresh
-
-    if not LCD_ENABLED:
-        return
-    if I2cLcd1602 is None:
-        print("LCD driver unavailable")
-        return
-    if lcd_i2c is None:
-        return
-
-    try:
-        address = I2cLcd1602.find_address(lcd_i2c, LCD_ADDRESS)
-        if address is None:
-            print("LCD not found on I2C")
-            return
-
-        lcd_display = I2cLcd1602(lcd_i2c, address, LCD_COLS, LCD_ROWS, mapping=LCD_MAPPING)
-        lcd_display.show_lines("Nightfire Field", "Booting...")
-        lcd_buttons = [
-            ("up", DebouncedButton(up_button, LCD_BUTTON_DEBOUNCE_MS)),
-            ("down", DebouncedButton(down_button, LCD_BUTTON_DEBOUNCE_MS)),
-        ]
-        if ok_fwd_button is not None:
-            lcd_buttons.append(("ok", DebouncedButton(ok_fwd_button, LCD_BUTTON_DEBOUNCE_MS)))
-        if back_button is not None:
-            lcd_buttons.append(("back", DebouncedButton(back_button, LCD_BUTTON_DEBOUNCE_MS)))
-        lcd_force_refresh = True
-        print("LCD ready at 0x%02X mapping=%s" % (address, LCD_MAPPING))
-    except Exception as e:
-        lcd_display = None
-        print("LCD init failed:", e)
-
-
-def lcd_continuity_detail_pages():
-    page_size = max(1, int(LCD_CONTINUITY_PAGE_SIZE or 1))
-    return max(1, (CUE_COUNT + page_size - 1) // page_size)
-
-
-def lcd_start_edit(target, value):
-    global lcd_mode, lcd_edit_target, lcd_edit_value
-
-    lcd_mode = "edit"
-    lcd_edit_target = target
-    lcd_edit_value = int(value or 0)
-
-
-def lcd_open_menu_item():
-    global lcd_mode, lcd_active_view, lcd_cont_detail_index
-
-    item = LCD_MENU_ITEMS[lcd_menu_index]
-    if item == "System Info":
-        lcd_mode = "view"
-        lcd_active_view = "system"
-    elif item == "Continuity":
-        lcd_mode = "view"
-        lcd_active_view = "continuity"
-        lcd_cont_detail_index = -1
-    elif item == "Script":
-        lcd_mode = "view"
-        lcd_active_view = "script"
-    elif item == "Set Group":
-        lcd_start_edit("group", GROUP_ID)
-    elif item == "Set Network":
-        lcd_start_edit("network", NETWORK_ID)
-    elif item == "Set Channel":
-        lcd_start_edit("channel", RADIO_CHANNEL)
-
-
-def lcd_adjust_edit(delta):
-    global lcd_edit_value
-
-    if lcd_edit_target == "channel":
-        lcd_edit_value = (lcd_edit_value + delta) % 101
-        while not valid_radio_channel(lcd_edit_value):
-            lcd_edit_value = (lcd_edit_value + delta) % 101
-    else:
-        lcd_edit_value = (lcd_edit_value + delta) & 0xFFFF
-
-
-def lcd_save_edit():
-    global GROUP_ID, NETWORK_ID, RADIO_CHANNEL, lcd_mode, lcd_active_view
-
-    if ARMED:
-        lcd_mode = "view"
-        lcd_active_view = "edit_blocked"
-        return
-
-    previous = runtime_config_values()
-    if lcd_edit_target == "group":
-        GROUP_ID = lcd_edit_value & 0xFFFF
-    elif lcd_edit_target == "network":
-        NETWORK_ID = lcd_edit_value & 0xFFFF
-    elif lcd_edit_target == "channel":
-        if not valid_radio_channel(lcd_edit_value):
-            lcd_mode = "view"
-            lcd_active_view = "edit_blocked"
-            return
-        RADIO_CHANNEL = lcd_edit_value % 101
-
-    if not persist_runtime_change(previous):
-        lcd_mode = "view"
-        lcd_active_view = "edit_blocked"
-        return
-
-    if lcd_edit_target == "channel":
-        try:
-            nrf_radio.init(
-                channel=RADIO_CHANNEL,
-                tx_power=RADIO_TX_POWER,
-                address=RADIO_ADDRESS,
-            )
-        except Exception as e:
-            print("LCD channel radio init failed:", e)
-
-    lcd_mode = "menu"
-
-
-def lcd_button_action(name):
-    global lcd_mode, lcd_menu_index, lcd_force_refresh, lcd_local_scan_pending, lcd_cont_detail_index
-
-    if lcd_mode == "home":
-        if name == "ok":
-            lcd_mode = "menu"
-        lcd_force_refresh = True
-        return
-
-    if lcd_mode == "menu":
-        if name == "up":
-            lcd_menu_index = (lcd_menu_index - 1) % len(LCD_MENU_ITEMS)
-        elif name == "down":
-            lcd_menu_index = (lcd_menu_index + 1) % len(LCD_MENU_ITEMS)
-        elif name == "back":
-            lcd_mode = "home"
-        elif name == "ok":
-            lcd_open_menu_item()
-        lcd_force_refresh = True
-        return
-
-    if lcd_mode == "view":
-        if name == "back":
-            lcd_mode = "menu"
-        elif lcd_active_view == "continuity" and name == "ok":
-            lcd_local_scan_pending = True
-        elif lcd_active_view == "continuity" and name == "up":
-            lcd_cont_detail_index -= 1
-            if lcd_cont_detail_index < -1:
-                lcd_cont_detail_index = lcd_continuity_detail_pages() - 1
-        elif lcd_active_view == "continuity" and name == "down":
-            lcd_cont_detail_index += 1
-            if lcd_cont_detail_index >= lcd_continuity_detail_pages():
-                lcd_cont_detail_index = -1
-        elif name == "ok":
-            lcd_mode = "menu"
-        lcd_force_refresh = True
-        return
-
-    if lcd_mode == "edit":
-        if name == "up":
-            lcd_adjust_edit(1)
-        elif name == "down":
-            lcd_adjust_edit(-1)
-        elif name == "back":
-            lcd_mode = "menu"
-        elif name == "ok":
-            lcd_save_edit()
-
-    lcd_force_refresh = True
-
-
-def lcd_status_text():
-    if STARTUP_FAULT:
-        return "FAULT"
-    if ARMED:
-        return "ARMED"
-    return "SAFE"
-
-
-def lcd_battery_short_text():
-    try:
-        battery_mv = read_battery_mv()
-    except Exception:
-        battery_mv = 0
-    return "%d.%02dV" % (battery_mv // 1000, (battery_mv % 1000) // 10)
-
-
-def lcd_home_top_line():
-    left = lcd_battery_short_text()
-    right = "G%04X" % (GROUP_ID & 0xFFFF)
-    gap = LCD_COLS - len(left) - len(right)
-    if gap < 1:
-        gap = 1
-    return left + (" " * gap) + right
-
-
-def lcd_master_link_text():
-    if not last_master_rx_ms:
-        return "M:--"
-
-    age = time.ticks_diff(time.ticks_ms(), last_master_rx_ms)
-    return "M:OK" if age <= MASTER_LINK_TIMEOUT_MS else "M:--"
-
-
-def lcd_home_bottom_line():
-    return "%s %08X" % (lcd_master_link_text(), UNIQUE_ID & 0xFFFFFFFF)
-
-
-def lcd_menu_lines():
-    item = LCD_MENU_ITEMS[lcd_menu_index]
-    next_item = LCD_MENU_ITEMS[(lcd_menu_index + 1) % len(LCD_MENU_ITEMS)]
-    return ">%s" % item, " %s" % next_item
-
-
-def lcd_edit_lines():
-    if lcd_edit_target == "channel":
-        return "Channel", "%03d OK=save" % lcd_edit_value
-    if lcd_edit_target == "network":
-        return "Network ID", "%04X OK=save" % (lcd_edit_value & 0xFFFF)
-    return "Group ID", "%04X OK=save" % (lcd_edit_value & 0xFFFF)
-
-
-def lcd_continuity_lines():
-    if lcd_cont_detail_index < 0:
-        if last_cont_open_mask is None:
-            return ("Cont not checked", "OK=Scan")
-
-        open_count = count_mask_bits(last_cont_open_mask)
-        good = CUE_COUNT - open_count
-        status = "OK" if last_cont_status == CONT_STATUS_OK else "WARN%02X" % last_cont_status
-        return (
-            "Cont %02d/%02d %s" % (good, CUE_COUNT, status),
-            "OK=Scan UP/DN",
-        )
-
-    page_size = max(1, int(LCD_CONTINUITY_PAGE_SIZE or 1))
-    start = lcd_cont_detail_index * page_size + 1
-    end = min(CUE_COUNT, start + page_size - 1)
-
-    if last_cont_open_mask is None:
-        return ("Cues %02d-%02d" % (start, end), "-- no data --")
-
-    parts = []
-    for cue in range(start, end + 1):
-        open_bit = bool(last_cont_open_mask & (1 << (cue - 1)))
-        parts.append("%02d%s" % (cue, " " if open_bit else chr(255)))
-
-    return (
-        " ".join(parts[:4]),
-        " ".join(parts[4:8]),
-    )
-
-
-def lcd_page_lines():
-    if lcd_mode == "home":
-        return (
-            lcd_home_top_line(),
-            lcd_home_bottom_line(),
-        )
-
-    if lcd_mode == "menu":
-        return lcd_menu_lines()
-
-    if lcd_mode == "edit":
-        return lcd_edit_lines()
-
-    if lcd_active_view == "system":
-        return (
-            "FW %s C%02d" % (APP_FIRMWARE_VERSION, CUE_COUNT),
-            "Net%04X Ch%03d" % (NETWORK_ID & 0xFFFF, RADIO_CHANNEL & 0xFF),
-        )
-
-    if lcd_active_view == "script":
-        script_id_text = "----" if script_id_loaded is None else "%04X" % script_id_loaded
-        return (
-            "Script %s" % script_id_text,
-            "%s Run%d N%03d" % (lcd_status_text(), 1 if script_running else 0, script_next_index),
-        )
-
-    if lcd_active_view == "continuity":
-        return lcd_continuity_lines()
-
-    if lcd_active_view == "edit_blocked":
-        return "Disarm first", "BACK=menu"
-
-    return lcd_home_top_line(), lcd_home_bottom_line()
-
-
-def run_lcd_continuity_scan():
-    global lcd_local_scan_pending
-
-    if not lcd_local_scan_pending:
-        return
-
-    lcd_local_scan_pending = False
-    if lcd_display:
-        try:
-            lcd_display.show_lines("Checking cues", "Please wait...")
-        except Exception:
-            pass
-
-    try:
-        unit, status, values = read_resistance_values()
-        open_mask = 0
-        for index, value in enumerate(values):
-            if value in (RESISTANCE_VALUE_OPEN, RESISTANCE_VALUE_INVALID):
-                open_mask |= 1 << index
-            elif unit == RESISTANCE_UNIT_DECI_OHM and int(value) <= 5:
-                open_mask |= 1 << index
-        set_last_continuity(status, open_mask)
-        print("LCD RES status=0x%02X open_mask=0x%06X" % (status, open_mask))
-    except Exception as e:
-        print("LCD continuity scan failed:", e)
-
-
-def service_lcd_ui():
-    global lcd_display, lcd_last_refresh_ms, lcd_force_refresh
-
-    if lcd_display is None:
-        return
-
-    try:
-        now = time.ticks_ms()
-        for name, button in lcd_buttons:
-            if button.update(now):
-                lcd_button_action(name)
-
-        run_lcd_continuity_scan()
-
-        if lcd_force_refresh or time.ticks_diff(now, lcd_last_refresh_ms) >= LCD_REFRESH_MS:
-            line1, line2 = lcd_page_lines()
-            lcd_display.show_lines(lcd_trim(line1), lcd_trim(line2))
-            lcd_last_refresh_ms = now
-            lcd_force_refresh = False
-    except Exception as e:
-        lcd_display = None
-        print("LCD service failed:", e)
-
-
-def ticks_rand(limit):
-    if limit <= 0:
-        return 0
-    return (time.ticks_us() ^ time.ticks_ms()) % limit
-
-
-def next_tx_seq():
-    global tx_seq
-
-    seq = tx_seq & 0xFF
-    tx_seq = (tx_seq + 1) & 0xFF
-    if tx_seq == 0:
-        tx_seq = 1
-    return seq
-
-
-def tx_radio_payload(payload, use_cca=True):
-    return nrf_module_common.send_with_cca(
-        payload,
-        enabled=use_cca and RADIO_CCA_ENABLED,
-        cca_ms=RADIO_CCA_MS,
-        busy_dbm=RADIO_CCA_BUSY_DBM,
-        retries=RADIO_CCA_RETRIES,
-        backoff_min_ms=RADIO_CCA_BACKOFF_MIN_MS,
-        backoff_max_ms=RADIO_CCA_BACKOFF_MAX_MS,
-        rand_fn=ticks_rand,
-    )
-
-
-def tx_nfcp(frame, repeats=3, gap_ms=20):
-    payload = (NETWORK_ID & 0xFFFF).to_bytes(2, "big") + bytes([next_tx_seq()]) + frame
-    for i in range(repeats):
-        tx_radio_payload(payload)
-        if i + 1 < repeats:
-            time.sleep_ms(gap_ms)
-
-
-def remember_rx_packet(seq, pkt):
-    global rx_seen
-
-    if seq is None:
-        return False
-
-    now = time.ticks_ms()
-    signature = (
-        pkt.get("frame_type"),
-        pkt.get("src"),
-        pkt.get("target"),
-        pkt.get("cmd"),
-        bytes(pkt.get("data", b"")[:16]),
-    )
-    kept = []
-    duplicate = False
-
-    for item in rx_seen:
-        age = time.ticks_diff(now, item[0])
-        if age < RX_DEDUPE_WINDOW_MS:
-            kept.append(item)
-            if item[1] == seq and item[2] == signature:
-                duplicate = True
-
-    if not duplicate:
-        kept.append((now, seq, signature))
-        if len(kept) > RX_DEDUPE_CACHE_LIMIT:
-            kept = kept[-RX_DEDUPE_CACHE_LIMIT:]
-
-    rx_seen = kept
-    return duplicate
-
-
-def address_matches(pkt):
-    frame_type = pkt.get("frame_type")
-    if frame_type == SOF_BROADCAST:
-        return True
-    if frame_type == SOF_GROUP:
-        return pkt.get("target") == GROUP_ID
-    if frame_type == SOF_UNIQUE:
-        return pkt.get("target") == UNIQUE_ID
-    return False
-
-
-def reply_ack_if_unique(pkt, orig_cmd, code=ACK_OK):
-    if pkt.get("frame_type") == SOF_UNIQUE:
-        tx_nfcp(nfcp.build_ack(UNIQUE_ID, orig_cmd, code))
-
-
-def reply_nack_if_unique(pkt, orig_cmd, code):
-    if pkt.get("frame_type") == SOF_UNIQUE:
-        tx_nfcp(nfcp.build_nack(UNIQUE_ID, orig_cmd, code))
-
-
-def encode_text_field(text):
-    try:
-        data = text.encode()
-    except Exception:
-        data = b""
-    if len(data) > 63:
-        data = data[:63]
-    return bytes([len(data)]) + data
-
-
-def build_info_payload():
-    return (
-        encode_text_field(APP_FIRMWARE_NAME) +
-        encode_text_field(APP_FIRMWARE_VERSION) +
-        encode_text_field("nrf-radio-native") +
-        encode_text_field(build_script_status_text()) +
-        encode_text_field("0x%08X" % (get_default_unique_id() & 0xFFFFFFFF)) +
-        encode_text_field("0x%08X" % (CONFIG_UNIQUE_ID & 0xFFFFFFFF)) +
-        encode_text_field(str(read_battery_mv())) +
-        encode_text_field(BATTERY_PACK_TYPE)
-    )
+    lcd.refresh()
 
 
 def read_battery_mv():
@@ -1055,29 +641,6 @@ def read_battery_mv():
     if BATTERY_MV:
         return int(BATTERY_MV or 0)
     return int(reading.get("battery_mv") or 0)
-
-
-def build_script_status_text():
-    if script_id_loaded is None:
-        script_id_text = "--"
-    else:
-        script_id_text = "%04X" % script_id_loaded
-
-    hb_age = -1
-    if script_last_heartbeat_ms:
-        hb_age = time.ticks_diff(time.ticks_ms(), script_last_heartbeat_ms)
-
-    fault_text = " fault=%s" % STARTUP_FAULT_REASON if STARTUP_FAULT else ""
-
-    return "id=%s entries=%d run=%d next=%d hb=%d %s%s" % (
-        script_id_text,
-        len(script_entries),
-        1 if script_running else 0,
-        script_next_index,
-        hb_age,
-        script_last_event,
-        fault_text,
-    )
 
 
 def save_runtime_config():
@@ -1109,11 +672,9 @@ def persist_runtime_change(previous):
 
 
 def set_armed_outputs(armed):
-    global lcd_force_refresh
-
     if armed and STARTUP_FAULT:
         armed = False
-    lcd_force_refresh = True
+    lcd.refresh()
     safe_led.value(0 if armed else 1)
     arm_led.value(1 if armed else 0)
     if arm_control is not None:
@@ -1126,6 +687,48 @@ def set_armed_outputs(armed):
         outputs.clear()
 
 
+def read_short_check_mv():
+    if sense_adc is None:
+        return None
+
+    sample_count = max(1, ARM_VOLTAGE_CHECK_SAMPLES)
+    total = 0
+    try:
+        for index in range(sample_count):
+            total += int(sense_adc.read_u16())
+            if index + 1 < sample_count and ADC_SAMPLE_DELAY_US:
+                time.sleep_us(ADC_SAMPLE_DELAY_US)
+    except Exception as e:
+        print("Arm voltage ADC failed:", e)
+        return None
+
+    average = total // sample_count
+    return (average * ADC_FULL_SCALE_MV + 32767) // 65535
+
+
+def check_arm_voltage():
+    global arm_check_mv
+
+    arm_check_mv = None
+    if not ARM_VOLTAGE_CHECK_ENABLED:
+        return True
+    if arm_control is None or sense_adc is None:
+        return False
+
+    clear_fire_outputs()
+    outputs.set_enabled(False)
+    outputs.clear()
+    pre_test.value(0)
+    safe_led.value(1)
+    arm_led.value(0)
+    arm_control.value(ARM_CONTROL_ACTIVE_VALUE)
+    if ARM_VOLTAGE_CHECK_SETTLE_MS:
+        time.sleep_ms(ARM_VOLTAGE_CHECK_SETTLE_MS)
+
+    arm_check_mv = read_short_check_mv()
+    return arm_check_mv is not None and arm_check_mv >= ARM_VOLTAGE_CHECK_MIN_MV
+
+
 def clear_fire_outputs():
     global fire_out_mask
 
@@ -1136,6 +739,22 @@ def clear_fire_outputs():
 def disable_measurement_frontend():
     if scanner is not None:
         scanner.disable_all()
+
+
+def begin_resistance_measurement():
+    if fire_out_mask or script.running:
+        raise RuntimeError("resistance scan blocked while firing")
+
+    restore_armed_outputs = bool(ARMED)
+    if restore_armed_outputs:
+        set_armed_outputs(False)
+    return restore_armed_outputs
+
+
+def end_resistance_measurement(restore_armed_outputs):
+    disable_measurement_frontend()
+    if restore_armed_outputs and ARMED:
+        set_armed_outputs(True)
 
 
 def detect_output_chain(max_bits=64):
@@ -1156,11 +775,11 @@ def detect_output_chain(max_bits=64):
 
 
 def set_startup_fault(reason):
-    global ARMED, script_running
+    global ARMED
 
     record_startup_fault(reason)
     ARMED = False
-    script_running = False
+    script.halt()
     pre_test.value(0)
     clear_fire_outputs()
     set_armed_outputs(False)
@@ -1215,6 +834,32 @@ def poll_fire_outputs():
         outputs.digitalWriteMask(fire_out_mask)
 
 
+def build_output_status_payload():
+    flags = 0
+    if ARMED:
+        flags |= 0x01
+    if script.running:
+        flags |= 0x02
+    if STARTUP_FAULT:
+        flags |= 0x04
+    try:
+        if outputs.is_enabled():
+            flags |= 0x08
+    except Exception:
+        pass
+    age_ms = 0xFFFF
+    if last_fire_seq:
+        age_ms = max(0, min(0xFFFE, time.ticks_diff(time.ticks_ms(), last_fire_ms)))
+    loaded = 0xFFFF if script.id_loaded is None else script.id_loaded & 0xFFFF
+    return bytes((1, flags, CUE_COUNT & 0xFF)) + (
+        (fire_out_mask & 0xFFFFFFFFFFFFFFFF).to_bytes(8, "big") +
+        (last_fire_mask & 0xFFFFFFFFFFFFFFFF).to_bytes(8, "big") +
+        (last_fire_seq & 0xFFFFFFFF).to_bytes(4, "big") +
+        (age_ms & 0xFFFF).to_bytes(2, "big") +
+        loaded.to_bytes(2, "big")
+    )
+
+
 def build_resistance_payload(unit, status, values):
     payload = bytearray((
         RESISTANCE_PAYLOAD_VERSION,
@@ -1250,6 +895,7 @@ def read_resistance_values(force_raw_adc=False):
             )
 
     values = []
+    restore_armed_outputs = begin_resistance_measurement()
     try:
         for cue_index in range(CUE_COUNT):
             reading = channel_sensor.read_channel(cue_index + 1, battery_mv)
@@ -1277,50 +923,29 @@ def read_resistance_values(force_raw_adc=False):
             else:
                 values.append(max(0, min(0xFFFD, int(value))))
     finally:
-        disable_measurement_frontend()
+        end_resistance_measurement(restore_armed_outputs)
 
     return unit, status, values
 
 
-def handle_discover(pkt):
-    data = pkt.get("data", b"")
-    nonce = int.from_bytes(data[:2], "big") if len(data) >= 2 else None
-    span = DISCOVER_BACKOFF_MAX_MS - DISCOVER_BACKOFF_MIN_MS + 1
-    time.sleep_ms(DISCOVER_BACKOFF_MIN_MS + ticks_rand(span))
-    tx_nfcp(
-        nfcp.build_discover_response(
-            src_unique=UNIQUE_ID,
-            group_id=GROUP_ID,
-            unique_id=UNIQUE_ID,
-            cue_count=CUE_COUNT,
-            device_type=DEVICE_TYPE,
-            proto_ver=0x20,
-            flags=0x00,
-            nonce=nonce,
-        ),
-        DISCOVER_RESPONSE_REPEATS,
-        DISCOVER_RESPONSE_GAP_MS,
-    )
-
-
 def handle_resistance(pkt):
     if STARTUP_FAULT:
-        reply_nack_if_unique(pkt, CMD_RESISTANCE_REQ, NACK_INTERNAL_ERROR)
+        link.nack(pkt, CMD_RESISTANCE_REQ, NACK_INTERNAL_ERROR)
         return
 
     try:
         data = pkt.get("data", b"")
         if len(data) > 1:
-            reply_nack_if_unique(pkt, CMD_RESISTANCE_REQ, NACK_BAD_LENGTH)
+            link.nack(pkt, CMD_RESISTANCE_REQ, NACK_BAD_LENGTH)
             return
         force_raw_adc = bool(data and data[0] == RESISTANCE_REQUEST_RAW_ADC)
         unit, status, values = read_resistance_values(force_raw_adc)
         payload = build_resistance_payload(unit, status, values)
-        tx_nfcp(nfcp.build_response(UNIQUE_ID, CMD_RESISTANCE_RSP, payload))
+        link.respond(CMD_RESISTANCE_RSP, payload)
         print("RES unit=%d status=0x%02X values=%s" % (unit, status, str(values)))
     except Exception as e:
         print("RES error:", e)
-        reply_nack_if_unique(pkt, CMD_RESISTANCE_REQ, NACK_INTERNAL_ERROR)
+        link.nack(pkt, CMD_RESISTANCE_REQ, NACK_INTERNAL_ERROR)
 
 
 def handle_set_resistance_calibration(pkt):
@@ -1328,10 +953,10 @@ def handle_set_resistance_calibration(pkt):
 
     data = pkt.get("data", b"")
     if ARMED:
-        reply_nack_if_unique(pkt, CMD_SET_RESISTANCE_CAL, NACK_REJECTED_ARMED)
+        link.nack(pkt, CMD_SET_RESISTANCE_CAL, NACK_REJECTED_ARMED)
         return
     if len(data) < 3 or data[0] != RESISTANCE_CALIBRATION_VERSION:
-        reply_nack_if_unique(pkt, CMD_SET_RESISTANCE_CAL, NACK_BAD_LENGTH)
+        link.nack(pkt, CMD_SET_RESISTANCE_CAL, NACK_BAD_LENGTH)
         return
 
     bank_index = int(data[1])
@@ -1344,10 +969,10 @@ def handle_set_resistance_calibration(pkt):
         point_count < 2 or
         point_count > RESISTANCE_CALIBRATION_BANK_SIZE
     ):
-        reply_nack_if_unique(pkt, CMD_SET_RESISTANCE_CAL, NACK_INVALID_VALUE)
+        link.nack(pkt, CMD_SET_RESISTANCE_CAL, NACK_INVALID_VALUE)
         return
     if len(data) != 3 + point_count * 4:
-        reply_nack_if_unique(pkt, CMD_SET_RESISTANCE_CAL, NACK_BAD_LENGTH)
+        link.nack(pkt, CMD_SET_RESISTANCE_CAL, NACK_BAD_LENGTH)
         return
 
     points = []
@@ -1360,7 +985,7 @@ def handle_set_resistance_calibration(pkt):
 
     points.sort(key=lambda point: point[0])
     if not ResistanceCalibration(points).is_valid():
-        reply_nack_if_unique(pkt, CMD_SET_RESISTANCE_CAL, NACK_INVALID_VALUE)
+        link.nack(pkt, CMD_SET_RESISTANCE_CAL, NACK_INVALID_VALUE)
         return
 
     banks = list(RESISTANCE_CALIBRATION_BANKS or ())
@@ -1372,15 +997,15 @@ def handle_set_resistance_calibration(pkt):
         save_resistance_calibration_banks(updated_banks)
     except Exception as e:
         print("Resistance calibration save failed:", e)
-        reply_nack_if_unique(pkt, CMD_SET_RESISTANCE_CAL, NACK_INTERNAL_ERROR)
+        link.nack(pkt, CMD_SET_RESISTANCE_CAL, NACK_INTERNAL_ERROR)
         return
     RESISTANCE_CALIBRATION_BANKS = updated_banks
-    reply_ack_if_unique(pkt, CMD_SET_RESISTANCE_CAL)
+    link.ack(pkt, CMD_SET_RESISTANCE_CAL)
     print("RES CAL bank=%d points=%s" % (bank_index + 1, str(points)))
 
 
 def fire_mask(mask):
-    global fire_out_mask
+    global fire_out_mask, last_fire_mask, last_fire_seq, last_fire_ms
 
     if STARTUP_FAULT:
         clear_fire_outputs()
@@ -1400,6 +1025,9 @@ def fire_mask(mask):
                 fire_deadlines[i] = end_ms
         fire_out_mask |= mask
         outputs.digitalWriteMask(fire_out_mask)
+        last_fire_mask = mask
+        last_fire_seq = (last_fire_seq + 1) & 0xFFFFFFFF
+        last_fire_ms = time.ticks_ms()
         return ACK_OK
     except Exception as e:
         clear_fire_outputs()
@@ -1407,494 +1035,138 @@ def fire_mask(mask):
         return NACK_INTERNAL_ERROR
 
 
-def handle_time_sync(pkt):
-    global script_time_synced, script_master_offset_ms, script_time_sync_local_ms, script_last_event
-
-    data = pkt.get("data", b"")
-    if len(data) < 4:
-        return
-
-    master_ms = int.from_bytes(data[0:4], "big") & 0x3FFFFFFF
-    local_ms = time.ticks_ms() & 0x3FFFFFFF
-    script_master_offset_ms = time.ticks_diff(master_ms, local_ms)
-    script_time_sync_local_ms = time.ticks_ms()
-    script_time_synced = True
-    script_last_event = "time sync"
-
-
-def script_time_sync_valid():
-    return (
-        script_time_synced and
-        time.ticks_diff(time.ticks_ms(), script_time_sync_local_ms) <= SCRIPT_TIME_SYNC_VALID_MS
-    )
-
-
-def master_ms_to_local_ms(master_ms):
-    return time.ticks_add(master_ms & 0x3FFFFFFF, -script_master_offset_ms)
-
-
 def handle_fire(pkt):
     data = pkt.get("data", b"")
     if not data or len(data) > 8:
-        reply_nack_if_unique(pkt, CMD_FIRE, NACK_BAD_LENGTH)
+        link.nack(pkt, CMD_FIRE, NACK_BAD_LENGTH)
         return
     if STARTUP_FAULT:
-        reply_nack_if_unique(pkt, CMD_FIRE, NACK_INTERNAL_ERROR)
+        link.nack(pkt, CMD_FIRE, NACK_INTERNAL_ERROR)
         return
     if not ARMED:
-        reply_nack_if_unique(pkt, CMD_FIRE, NACK_REJECTED_ARMED)
+        link.nack(pkt, CMD_FIRE, NACK_REJECTED_ARMED)
         return
 
     mask = int.from_bytes(data, "big") & ((1 << CUE_COUNT) - 1)
     code = fire_mask(mask)
     if code == ACK_OK:
-        reply_ack_if_unique(pkt, CMD_FIRE)
+        link.ack(pkt, CMD_FIRE)
     else:
-        reply_nack_if_unique(pkt, CMD_FIRE, code)
+        link.nack(pkt, CMD_FIRE, code)
 
 
-def clear_script(script_id=None):
-    global script_id_loaded, script_entries, script_running, script_start_ms, script_next_index
-    global script_last_heartbeat_ms, script_last_event
+def check_master_link_failsafe():
+    global ARMED
 
-    script_id_loaded = script_id
-    script_entries = []
-    script_running = False
-    script_start_ms = 0
-    script_next_index = 0
-    script_last_heartbeat_ms = 0
-    script_last_event = "clear"
-    print("SCRIPT CLEAR id=%s" % ("--" if script_id is None else "%04X" % script_id))
-
-
-def handle_script_clear(pkt):
-    data = pkt.get("data", b"")
-    if len(data) != 2:
-        reply_nack_if_unique(pkt, CMD_SCRIPT_CLEAR, NACK_BAD_LENGTH)
+    if not ARMED or not link.master_link_lost(MASTER_LINK_TIMEOUT_MS):
         return
 
-    clear_script(int.from_bytes(data, "big") & 0xFFFF)
-    reply_ack_if_unique(pkt, CMD_SCRIPT_CLEAR)
-
-
-def parse_script_load_data(data):
-    if len(data) < 4:
-        return None, None, None, NACK_BAD_LENGTH
-
-    script_id = int.from_bytes(data[0:2], "big") & 0xFFFF
-    chunk_index = data[2]
-    entry_count = data[3]
-    payload = data[4:]
-    if len(payload) != entry_count * SCRIPT_ENTRY_BYTES:
-        return None, None, None, NACK_BAD_LENGTH
-
-    entries = []
-    pos = 0
-    for _ in range(entry_count):
-        event_ms = int.from_bytes(payload[pos:pos + 4], "big")
-        cue_mask = int.from_bytes(payload[pos + 4:pos + 12], "big") & 0xFFFFFFFFFFFFFFFF
-        pos += SCRIPT_ENTRY_BYTES
-        if cue_mask:
-            entries.append((event_ms, cue_mask))
-
-    return script_id, chunk_index, entries, ACK_OK
-
-
-def find_script_index_at_or_after(offset_ms):
-    index = 0
-    while index < len(script_entries):
-        if script_entries[index][0] >= offset_ms:
-            break
-        index += 1
-    return index
-
-
-def handle_script_load(pkt):
-    global script_id_loaded, script_entries, script_last_event
-
-    script_id, chunk_index, entries, code = parse_script_load_data(pkt.get("data", b""))
-    if code != ACK_OK:
-        reply_nack_if_unique(pkt, CMD_SCRIPT_LOAD, code)
-        return
-
-    if script_id_loaded != script_id:
-        clear_script(script_id)
-
-    if len(script_entries) + len(entries) > SCRIPT_MAX_ENTRIES:
-        reply_nack_if_unique(pkt, CMD_SCRIPT_LOAD, NACK_BUSY)
-        return
-
-    script_entries.extend(entries)
-    script_entries.sort(key=lambda item: item[0])
-    script_last_event = "load"
-    print("SCRIPT LOAD id=%04X chunk=%d add=%d total=%d" % (script_id, chunk_index, len(entries), len(script_entries)))
-    reply_ack_if_unique(pkt, CMD_SCRIPT_LOAD)
-
-
-def handle_script_start(pkt):
-    global script_running, script_start_ms, script_next_index, script_last_heartbeat_ms, script_last_event
-
-    if STARTUP_FAULT:
-        script_last_event = "start fault"
-        reply_nack_if_unique(pkt, CMD_SCRIPT_START, NACK_INTERNAL_ERROR)
-        return
-
-    if not ARMED:
-        script_last_event = "start disarmed"
-        reply_nack_if_unique(pkt, CMD_SCRIPT_START, NACK_REJECTED_ARMED)
-        return
-
-    data = pkt.get("data", b"")
-    if len(data) < 4:
-        reply_nack_if_unique(pkt, CMD_SCRIPT_START, NACK_BAD_LENGTH)
-        return
-
-    script_id = int.from_bytes(data[0:2], "big") & 0xFFFF
-    start_delay_ms = int.from_bytes(data[2:4], "big")
-    offset_ms = int.from_bytes(data[4:8], "big") if len(data) >= 8 else 0
-    start_master_ms = int.from_bytes(data[8:12], "big") & 0x3FFFFFFF if len(data) >= 12 else None
-
-    if script_id_loaded != script_id or not script_entries:
-        script_last_event = "start invalid"
-        reply_nack_if_unique(pkt, CMD_SCRIPT_START, NACK_INVALID_VALUE)
-        return
-
-    script_next_index = find_script_index_at_or_after(offset_ms)
-
-    if start_master_ms is not None and script_time_sync_valid():
-        script_start_ms = time.ticks_add(master_ms_to_local_ms(start_master_ms), -offset_ms)
-    else:
-        script_start_ms = time.ticks_add(time.ticks_ms(), start_delay_ms - offset_ms)
-    script_running = True
-    script_last_heartbeat_ms = time.ticks_ms()
-    script_last_event = "start"
-    print("SCRIPT START id=%04X entries=%d offset=%d next=%d" % (script_id, len(script_entries), offset_ms, script_next_index))
-    reply_ack_if_unique(pkt, CMD_SCRIPT_START)
-
-
-def handle_script_stop(pkt):
-    global script_running, script_last_heartbeat_ms, script_last_event
-
-    script_running = False
-    script_last_heartbeat_ms = 0
-    script_last_event = "stop"
+    ARMED = False
+    script.halt()
     clear_fire_outputs()
-    print("SCRIPT STOP")
-    reply_ack_if_unique(pkt, CMD_SCRIPT_STOP)
+    set_armed_outputs(False)
+    lcd.refresh()
+    print("DISARMED - master link timeout")
 
 
-def handle_script_heartbeat(pkt):
-    global script_last_heartbeat_ms, script_last_event
-
-    data = pkt.get("data", b"")
-    if len(data) < 2:
+def init_lcd_ui():
+    if not LCD_ENABLED or lcd_i2c is None:
         return
 
-    script_id = int.from_bytes(data[0:2], "big") & 0xFFFF
-    if script_running and script_id_loaded == script_id:
-        script_last_heartbeat_ms = time.ticks_ms()
-        script_last_event = "heartbeat"
+    buttons = [
+        ("up", DebouncedButton(up_button, LCD_BUTTON_DEBOUNCE_MS, BUTTON_ACTIVE_VALUE)),
+        ("down", DebouncedButton(down_button, LCD_BUTTON_DEBOUNCE_MS, BUTTON_ACTIVE_VALUE)),
+    ]
+    if ok_fwd_button is not None:
+        buttons.append(("ok", DebouncedButton(ok_fwd_button, LCD_BUTTON_DEBOUNCE_MS, BUTTON_ACTIVE_VALUE)))
+    if back_button is not None:
+        buttons.append(("back", DebouncedButton(back_button, LCD_BUTTON_DEBOUNCE_MS, BUTTON_ACTIVE_VALUE)))
+    lcd.open(lcd_i2c, LCD_ADDRESS, LCD_MAPPING, "Nightfire Field", buttons)
 
 
-def fire_script_event(event_ms):
-    fired = 0
-    for entry_ms, cue_mask in script_entries:
-        if entry_ms == event_ms:
-            fire_mask(cue_mask)
-            fired += 1
-    return fired
-
-
-def handle_script_step(pkt):
-    global script_last_event
+def handle_arm(pkt):
+    global ARMED, arm_check_error
 
     if STARTUP_FAULT:
-        script_last_event = "step fault"
+        ARMED = False
+        set_armed_outputs(False)
+        link.nack(pkt, CMD_ARM, NACK_INTERNAL_ERROR)
+        print("ARM rejected - startup fault:", STARTUP_FAULT_REASON)
         return
 
-    if not ARMED:
-        script_last_event = "step disarmed"
-        return
-
-    data = pkt.get("data", b"")
-    if len(data) != 6:
-        return
-
-    script_id = int.from_bytes(data[0:2], "big") & 0xFFFF
-    event_ms = int.from_bytes(data[2:6], "big")
-    if script_id_loaded != script_id:
-        script_last_event = "step invalid"
-        return
-
-    if not fire_script_event(event_ms):
-        script_last_event = "step missing"
-        return
-
-    script_last_event = "step"
-
-
-def run_script_scheduler():
-    global script_running, script_next_index, script_last_event
-
-    if not script_running:
-        return
-    if STARTUP_FAULT:
-        script_running = False
+    ARMED = False
+    script.halt()
+    if not check_arm_voltage():
         clear_fire_outputs()
-        script_last_event = "stopped fault"
-        return
-    if not ARMED:
-        script_running = False
-        clear_fire_outputs()
-        script_last_event = "stopped disarmed"
-        return
-    if time.ticks_diff(time.ticks_ms(), script_last_heartbeat_ms) > SCRIPT_HEARTBEAT_TIMEOUT_MS:
-        script_running = False
-        clear_fire_outputs()
-        script_last_event = "hb timeout"
-        print("SCRIPT stopped - heartbeat timeout")
+        set_armed_outputs(False)
+        measured = "--" if arm_check_mv is None else str(int(arm_check_mv))
+        arm_check_error = "arm voltage %smV" % measured
+        lcd.refresh()
+        link.nack(pkt, CMD_ARM, NACK_INTERNAL_ERROR)
+        print(
+            "ARM rejected - SHORT_CHECK %smV below %dmV" %
+            (measured, ARM_VOLTAGE_CHECK_MIN_MV)
+        )
         return
 
-    elapsed = time.ticks_diff(time.ticks_ms(), script_start_ms)
-    while script_next_index < len(script_entries):
-        event_ms, cue_mask = script_entries[script_next_index]
-        if event_ms > elapsed:
-            break
-        script_last_event = "fire"
-        print("SCRIPT FIRE mask=0x%06X event=%d elapsed=%d" % (cue_mask, event_ms, elapsed))
-        fire_mask(cue_mask)
-        script_next_index += 1
-
-    if script_next_index >= len(script_entries):
-        script_running = False
-        script_last_event = "complete"
+    arm_check_error = ""
+    ARMED = True
+    set_armed_outputs(True)
+    lcd.refresh()
+    link.ack(pkt, CMD_ARM)
+    print("ARMED - SHORT_CHECK %dmV" % int(arm_check_mv or 0))
 
 
 def handle(pkt):
-    global ARMED, GROUP_ID, UNIQUE_ID, CONFIG_UNIQUE_ID, NETWORK_ID, RADIO_CHANNEL, script_running
+    global ARMED
 
+    lcd.refresh()
     cmd = pkt.get("cmd")
     data = pkt.get("data", b"")
 
     if cmd == CMD_DISCOVER:
-        handle_discover(pkt)
-        return
-
-    if cmd == CMD_PING:
-        if pkt.get("frame_type") == SOF_UNIQUE and pkt.get("target") == UNIQUE_ID:
-            tx_nfcp(nfcp.build_response(UNIQUE_ID, CMD_PING, data or bytes([PING_REPLY_BYTE])))
-        return
-
-    if cmd == CMD_INFO_REQ:
-        if pkt.get("frame_type") == SOF_UNIQUE and pkt.get("target") == UNIQUE_ID:
-            tx_nfcp(nfcp.build_response(UNIQUE_ID, CMD_INFO_RSP, build_info_payload()))
-        return
-
-    if cmd == CMD_KEEPALIVE:
-        return
-
-    if cmd == CMD_ARM:
-        if STARTUP_FAULT:
-            ARMED = False
-            set_armed_outputs(False)
-            reply_nack_if_unique(pkt, CMD_ARM, NACK_INTERNAL_ERROR)
-            print("ARM rejected - startup fault:", STARTUP_FAULT_REASON)
-            return
-        ARMED = True
-        set_armed_outputs(True)
-        reply_ack_if_unique(pkt, CMD_ARM)
-        print("ARMED")
-        return
-
-    if cmd == CMD_DISARM:
+        link.discover_reply(
+            pkt,
+            CUE_COUNT,
+            DEVICE_TYPE,
+            DISCOVER_BACKOFF_MIN_MS,
+            DISCOVER_BACKOFF_MAX_MS,
+            DISCOVER_RESPONSE_REPEATS,
+            DISCOVER_RESPONSE_GAP_MS,
+        )
+    elif cmd == CMD_OUTPUT_STATUS_REQ:
+        if link.is_for_me(pkt) and not data:
+            link.respond(CMD_OUTPUT_STATUS_RSP, build_output_status_payload())
+    elif cmd == CMD_ARM:
+        handle_arm(pkt)
+    elif cmd == CMD_DISARM:
         ARMED = False
-        script_running = False
+        script.halt()
         clear_fire_outputs()
         set_armed_outputs(False)
-        reply_ack_if_unique(pkt, CMD_DISARM)
+        link.ack(pkt, CMD_DISARM)
         print("DISARMED")
-        return
-
-    if cmd == CMD_FIRE:
+    elif cmd == CMD_FIRE:
         handle_fire(pkt)
-        return
-
-    if cmd == CMD_SCRIPT_CLEAR:
-        handle_script_clear(pkt)
-        return
-
-    if cmd == CMD_SCRIPT_LOAD:
-        handle_script_load(pkt)
-        return
-
-    if cmd == CMD_SCRIPT_START:
-        handle_script_start(pkt)
-        return
-
-    if cmd == CMD_SCRIPT_STOP:
-        handle_script_stop(pkt)
-        return
-
-    if cmd == CMD_SCRIPT_HEARTBEAT:
-        handle_script_heartbeat(pkt)
-        return
-
-    if cmd == CMD_TIME_SYNC:
-        handle_time_sync(pkt)
-        return
-
-    if cmd == CMD_SCRIPT_STEP:
-        handle_script_step(pkt)
-        return
-
-    if cmd == CMD_OTA_UPDATE_BEGIN:
-        module_ota.begin(pkt, UNIQUE_ID, ARMED, reply_ack_if_unique, reply_nack_if_unique)
-        return
-
-    if cmd == CMD_OTA_UPDATE_WRITE:
-        module_ota.write(pkt, UNIQUE_ID, reply_ack_if_unique, reply_nack_if_unique)
-        return
-
-    if cmd == CMD_OTA_UPDATE_END:
-        module_ota.end(pkt, UNIQUE_ID, reply_ack_if_unique, reply_nack_if_unique)
-        return
-
-    if cmd == CMD_OTA_UPDATE_ABORT:
-        module_ota.abort(pkt, UNIQUE_ID, reply_ack_if_unique, reply_nack_if_unique)
-        return
-
-    if cmd == CMD_OTA_UPDATE_REBOOT:
-        if module_ota.reboot(pkt, UNIQUE_ID, ARMED, reply_ack_if_unique, reply_nack_if_unique):
-            time.sleep_ms(250)
-            machine.reset()
-        return
-
-    if cmd == CMD_RESISTANCE_REQ:
-        if pkt.get("frame_type") == SOF_UNIQUE and pkt.get("target") == UNIQUE_ID:
+    elif cmd == CMD_RESISTANCE_REQ:
+        if link.is_for_me(pkt):
             handle_resistance(pkt)
-        return
-
-    if cmd == CMD_SET_RESISTANCE_CAL:
-        if pkt.get("frame_type") == SOF_UNIQUE and pkt.get("target") == UNIQUE_ID:
+    elif cmd == CMD_SET_RESISTANCE_CAL:
+        if link.is_for_me(pkt):
             handle_set_resistance_calibration(pkt)
-        return
-
-    if cmd == CMD_SET_GROUP:
-        if ARMED:
-            reply_nack_if_unique(pkt, CMD_SET_GROUP, NACK_REJECTED_ARMED)
-        elif len(data) != 2:
-            reply_nack_if_unique(pkt, CMD_SET_GROUP, NACK_BAD_LENGTH)
-        else:
-            previous = runtime_config_values()
-            GROUP_ID = int.from_bytes(data, "big") & 0xFFFF
-            if persist_runtime_change(previous):
-                reply_ack_if_unique(pkt, CMD_SET_GROUP)
-            else:
-                reply_nack_if_unique(pkt, CMD_SET_GROUP, NACK_INTERNAL_ERROR)
-        return
-
-    if cmd == CMD_SET_NETWORK:
-        if ARMED:
-            reply_nack_if_unique(pkt, CMD_SET_NETWORK, NACK_REJECTED_ARMED)
-        elif len(data) != 2:
-            reply_nack_if_unique(pkt, CMD_SET_NETWORK, NACK_BAD_LENGTH)
-        else:
-            previous = runtime_config_values()
-            NETWORK_ID = int.from_bytes(data, "big") & 0xFFFF
-            if persist_runtime_change(previous):
-                reply_ack_if_unique(pkt, CMD_SET_NETWORK)
-            else:
-                reply_nack_if_unique(pkt, CMD_SET_NETWORK, NACK_INTERNAL_ERROR)
-        return
-
-    if cmd == CMD_SET_RADIO_CHANNEL:
-        if ARMED:
-            reply_nack_if_unique(pkt, CMD_SET_RADIO_CHANNEL, NACK_REJECTED_ARMED)
-        elif len(data) != 1:
-            reply_nack_if_unique(pkt, CMD_SET_RADIO_CHANNEL, NACK_BAD_LENGTH)
-        elif not valid_radio_channel(data[0]):
-            reply_nack_if_unique(pkt, CMD_SET_RADIO_CHANNEL, NACK_INVALID_VALUE)
-        else:
-            previous = runtime_config_values()
-            RADIO_CHANNEL = data[0]
-            if persist_runtime_change(previous):
-                reply_ack_if_unique(pkt, CMD_SET_RADIO_CHANNEL)
-                time.sleep_ms(80)
-                nrf_radio.init(
-                    channel=RADIO_CHANNEL,
-                    tx_power=RADIO_TX_POWER,
-                    address=RADIO_ADDRESS,
-                )
-            else:
-                reply_nack_if_unique(pkt, CMD_SET_RADIO_CHANNEL, NACK_INTERNAL_ERROR)
-        return
-
-    if cmd == CMD_SET_UNIQUE:
-        old_unique = UNIQUE_ID
-        if ARMED:
-            if pkt.get("frame_type") == SOF_UNIQUE:
-                tx_nfcp(nfcp.build_nack(old_unique, CMD_SET_UNIQUE, NACK_REJECTED_ARMED))
-        elif len(data) != 4:
-            if pkt.get("frame_type") == SOF_UNIQUE:
-                tx_nfcp(nfcp.build_nack(old_unique, CMD_SET_UNIQUE, NACK_BAD_LENGTH))
-        else:
-            previous = runtime_config_values()
-            CONFIG_UNIQUE_ID = int.from_bytes(data, "big") & 0xFFFFFFFF
-            UNIQUE_ID = CONFIG_UNIQUE_ID or get_default_unique_id()
-            saved = persist_runtime_change(previous)
-            if saved and pkt.get("frame_type") == SOF_UNIQUE:
-                tx_nfcp(nfcp.build_ack(old_unique, CMD_SET_UNIQUE, ACK_OK))
-            elif not saved and pkt.get("frame_type") == SOF_UNIQUE:
-                tx_nfcp(nfcp.build_nack(old_unique, CMD_SET_UNIQUE, NACK_INTERNAL_ERROR))
-            if saved:
-                print("NEW UNIQUE_ID = 0x%08X" % UNIQUE_ID)
-        return
+    elif not script.handle(pkt):
+        link.handle_common(pkt)
 
 
 def handle_radio_payload(payload):
-    if len(payload) < 3:
-        return
-
-    network_id = int.from_bytes(payload[:2], "big")
-    if network_id != NETWORK_ID:
-        return
-
-    radio_seq = None
-    nfcp_offset = 2
-
-    if len(payload) >= 4 and payload[2] != 0xFF and payload[3] == 0xFF:
-        radio_seq = payload[2]
-        nfcp_offset = 3
-
-    for b in payload[nfcp_offset:]:
-        pkt = parser.feed(b)
-        if pkt and address_matches(pkt):
-            if remember_rx_packet(radio_seq, pkt):
-                return
-            record_master_rx()
-            handle(pkt)
+    link.receive(payload, handle)
 
 
-def init_radio():
-    try:
-        nrf_radio.init(
-            channel=RADIO_CHANNEL,
-            tx_power=RADIO_TX_POWER,
-            address=RADIO_ADDRESS,
-        )
-        return True
-    except Exception as e:
-        print("Radio init failed:", e)
-        return False
-
-
-def main():
-    global ARMED, script_running
-
+def setup():
     init_lcd_ui()
     set_armed_outputs(False)
     run_startup_self_tests()
-    radio_ready = init_radio()
+    radio_ready = link.init_radio()
     print(
         "Nightfire nRF52840 field module board=%s uid=0x%08X group=0x%04X net=0x%04X channel=%d" %
         (BOARD_PINOUT, UNIQUE_ID, GROUP_ID, NETWORK_ID, RADIO_CHANNEL)
@@ -1937,7 +1209,7 @@ def main():
         (LCD_SDA_PIN, LCD_SCL_PIN, 1 if lcd_i2c else 0)
     )
     print(
-        "Controls SAFE=P%d ARM_LED=P%d UP=P%d DOWN=P%d OK_FWD=%s BACK=%s BATT=P%d" %
+        "Controls SAFE=P%d ARM_LED=P%d UP=P%d DOWN=P%d OK_FWD=%s BACK=%s BATT=P%d active=%d pullup=%d" %
         (
             SAFE_LED_PIN,
             ARM_LED_PIN,
@@ -1946,37 +1218,62 @@ def main():
             "--" if OK_FWD_BUTTON_PIN is None else "P%d" % OK_FWD_BUTTON_PIN,
             "--" if BACK_BUTTON_PIN is None else "P%d" % BACK_BUTTON_PIN,
             BATT_CHECK_PIN,
+            BUTTON_ACTIVE_VALUE,
+            1 if BUTTON_INTERNAL_PULL_UP else 0,
         )
     )
     print(
         "Radio node uid=0x%08X group=0x%04X net=0x%04X" %
         (UNIQUE_ID, GROUP_ID, NETWORK_ID)
     )
+    return radio_ready
 
+
+def loop_once():
+    """One main-loop pass without radio receive (used by the PC trace harness)."""
+    module_ota.poll_timeout()
+    poll_fire_outputs()
+    script.run()
+    check_master_link_failsafe()
+    lcd.service()
+
+
+def main():
+    global ARMED
+
+    radio_ready = setup()
     while True:
         try:
             module_ota.poll_timeout()
             poll_fire_outputs()
-            run_script_scheduler()
+            script.run()
             check_master_link_failsafe()
 
             if not radio_ready:
                 time.sleep_ms(250)
-                radio_ready = init_radio()
+                radio_ready = link.init_radio()
                 continue
 
             payload = nrf_radio.recv(RADIO_RX_TIMEOUT_MS)
             if payload:
                 handle_radio_payload(payload)
-            service_lcd_ui()
+            lcd.service()
         except Exception as e:
             print("Field main loop error:", e)
             radio_ready = False
             ARMED = False
-            script_running = False
+            script.halt()
             clear_fire_outputs()
             set_armed_outputs(False)
             time.sleep_ms(100)
 
 
-main()
+try:
+    service_file = open("field_service.flag", "r")
+    service_file.close()
+    field_service_mode = True
+except OSError:
+    field_service_mode = False
+
+if not field_service_mode:
+    main()

@@ -11,5 +11,5 @@
 
 1. Module state model
 2. Script-fire UI state
-3. Shared module firmware helpers
+3. Shared module firmware helpers (done: `module_link.py`, `module_script.py`, `module_lcd.py`)
 4. Bench regression scripts

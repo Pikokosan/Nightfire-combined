@@ -8,6 +8,9 @@ import os
 LOCAL_IMPORTS = {
     "module_ota": ["import module_ota\n"],
     "nrf_module_common": ["import nrf_module_common\n"],
+    "module_lcd": ["from module_lcd import DebouncedButton, LcdMenu\n"],
+    "module_link": ["from module_link import ModuleLink, encode_text_field\n"],
+    "module_script": ["from module_script import ScriptEngine\n"],
     "analog_mux74hc4051": ["from analog_mux74hc4051 import HC4051Scanner\n"],
     "nfcp": ["from nfcp import *\n"],
     "shift_register74hc595": [
@@ -59,15 +62,15 @@ def strip_field_imports(text):
         "    STATE_OPEN,\n"
         ")\n"
     )
-    text = remove_exact(text, measurement_import, "field_main.py")
+    return remove_exact(text, measurement_import, "field_main.py")
 
-    lcd_import = (
-        "try:\n"
-        "    from lcd1602_i2c import I2cLcd1602\n"
-        "except Exception:\n"
-        "    I2cLcd1602 = None\n"
-    )
-    return remove_exact(text, lcd_import, "field_main.py")
+
+def strip_imports(path, imports):
+    text = read_text(path)
+    name = os.path.basename(path)
+    for import_line in imports:
+        text = remove_exact(text, import_line, name)
+    return text
 
 
 def build_bundle(main_dir):
@@ -90,6 +93,7 @@ def build_bundle(main_dir):
         "build_set_radio_channel",
         "build_continuity_request",
         "build_resistance_request",
+        "build_output_status_request",
         "build_set_resistance_calibration",
         "build_ping",
         "build_info_request",
@@ -142,6 +146,22 @@ def build_bundle(main_dir):
         "field_measurement.py",
     )
 
+    # Shared module code. Their top-level names land in the bundle namespace,
+    # so they must not clash with field_main.py.
+    module_link = strip_imports(os.path.join(main_dir, "module_link.py"), [
+        "import module_ota\n",
+        "import nrf_module_common\n",
+        "from nfcp import *\n",
+    ])
+    module_script = strip_imports(os.path.join(main_dir, "module_script.py"), [
+        "from nfcp import *\n",
+    ])
+    module_lcd = strip_imports(os.path.join(main_dir, "module_lcd.py"), [
+        "import nrf_module_common\n",
+        "from module_link import count_mask_bits\n",
+        "try:\n    from lcd1602_i2c import I2cLcd1602\nexcept Exception:\n    I2cLcd1602 = None\n",
+    ])
+
     field_main = strip_field_imports(read_text(os.path.join(main_dir, "field_main.py")))
 
     parts = [
@@ -154,6 +174,9 @@ def build_bundle(main_dir):
         read_text(os.path.join(main_dir, "analog_mux74hc4051.py")),
         read_text(os.path.join(main_dir, "shift_register74hc595.py")),
         read_text(os.path.join(main_dir, "lcd1602_i2c.py")),
+        module_link,
+        module_script,
+        module_lcd,
         field_main,
     ]
     return "\n\n".join(parts)

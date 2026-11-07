@@ -52,6 +52,12 @@ $UploadArgs = @(
     "--delete", "module_ota.mpy",
     "--delete", "nrf_module_common.py",
     "--delete", "nrf_module_common.mpy",
+    "--delete", "module_link.py",
+    "--delete", "module_link.mpy",
+    "--delete", "module_script.py",
+    "--delete", "module_script.mpy",
+    "--delete", "module_lcd.py",
+    "--delete", "module_lcd.mpy",
     "--delete", "lcd1602_i2c.py",
     "--delete", "lcd1602_i2c.mpy",
     "--delete", "nrf_dummy_main.py",
@@ -68,6 +74,9 @@ if ($NoMpy) {
         ".\main\nfcp.py:nfcp.py",
         ".\main\module_ota.py:module_ota.py",
         ".\main\nrf_module_common.py:nrf_module_common.py",
+        ".\main\module_link.py:module_link.py",
+        ".\main\module_script.py:module_script.py",
+        ".\main\module_lcd.py:module_lcd.py",
         ".\main\lcd1602_i2c.py:lcd1602_i2c.py"
     )
 }
@@ -77,6 +86,9 @@ else {
     $OtaMpy = Compile-Mpy ".\main\module_ota.py" "module_ota.mpy"
     $NrfCommonMpy = Compile-Mpy ".\main\nrf_module_common.py" "nrf_module_common.mpy"
     $LcdMpy = Compile-Mpy ".\main\lcd1602_i2c.py" "lcd1602_i2c.mpy"
+    $LinkMpy = Compile-Mpy ".\main\module_link.py" "module_link.mpy"
+    $ScriptMpy = Compile-Mpy ".\main\module_script.py" "module_script.mpy"
+    $MenuMpy = Compile-Mpy ".\main\module_lcd.py" "module_lcd.mpy"
 
     $UploadArgs += @(
         ".\main\nrf_dummy_boot.py:main.py",
@@ -84,7 +96,10 @@ else {
         "$($NfcpMpy):nfcp.mpy",
         "$($OtaMpy):module_ota.mpy",
         "$($NrfCommonMpy):nrf_module_common.mpy",
-        "$($LcdMpy):lcd1602_i2c.mpy"
+        "$($LcdMpy):lcd1602_i2c.mpy",
+        "$($LinkMpy):module_link.mpy",
+        "$($ScriptMpy):module_script.mpy",
+        "$($MenuMpy):module_lcd.mpy"
     )
 }
 

@@ -12,6 +12,10 @@ used to upload or test that firmware, and generated output packages.
 - `main/nfcp.py` - Shared Nightfire command protocol.
 - `main/bridge_radio.py` - Local UART framing between the master and bridge.
 - `main/module_ota.py` - Shared module OTA transfer helper.
+- `main/module_link.py` - Shared module radio link: NFCP framing, duplicate suppression, replies, and the ping/info/settings/OTA commands.
+- `main/module_script.py` - Shared module script engine: time sync, upload, start/stop/heartbeat, step mode and scheduler.
+- `main/module_lcd.py` - Shared module 16x2 LCD menu and debounced buttons.
+- `scripts/firmware_trace_harness.py` - Runs the field or dummy firmware on a PC against fake hardware and writes a behaviour trace; compare traces before and after a firmware change.
 
 ## Device Configs
 
