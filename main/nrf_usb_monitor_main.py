@@ -22,6 +22,10 @@ transport = UsbHexTransport()
 # keepalive and master stop/disarm code still build pre-mesh packets, so
 # they send through send_legacy, which converts them.
 bridge_mesh = mesh.MeshBridge(nrf_radio.send, nrf_radio.device_id32())
+# Bench test only: nodes this bridge pretends it can't hear directly.
+bridge_mesh.deaf_to = tuple(getattr(config, "MESH_BENCH_DEAF_TO", ()) or ())
+if bridge_mesh.deaf_to:
+    print("MESH BENCH: deaf to", " ".join("%08X" % u for u in bridge_mesh.deaf_to))
 RADIO_POLL_MS = 20   # was 50; bounds how long an app command waits
 parser = bridge_radio.BridgeFrameParser()
 radio_ready = False

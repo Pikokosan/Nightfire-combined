@@ -115,6 +115,8 @@ class ModuleLink:
         self.cca_backoff_max_ms = cca_backoff_max_ms
         self.max_hops = max(1, min(MESH_HOPS_LIMIT, int(max_hops)))
         self.relay_enabled = relay_enabled
+        self.deaf_to = ()        # bench test: see mesh_deaf()
+        self.stat_deaf = 0
         self.nfcp = NFCP(node_id=0x01)
         self.queue = MeshQueue()
         self.seen = MeshSeen()
@@ -324,6 +326,9 @@ class ModuleLink:
             return
         parsed = mesh_parse(payload)
         if parsed is None:
+            return
+        if mesh_deaf(self.deaf_to, parsed):
+            self.stat_deaf += 1
             return
         ctl = parsed[0]
         origin = parsed[1]

@@ -586,6 +586,10 @@ def main():
     global uart, bridge_mesh
 
     bridge_mesh = mesh.MeshBridge(nrf_radio.send, get_node_id())
+    # Bench test only: nodes this bridge pretends it can't hear directly.
+    bridge_mesh.deaf_to = tuple(getattr(bridge_config, "MESH_BENCH_DEAF_TO", ()) or ())
+    if bridge_mesh.deaf_to:
+        print("MESH BENCH: deaf to", " ".join("%08X" % u for u in bridge_mesh.deaf_to))
 
     try:
         uart = init_uart()

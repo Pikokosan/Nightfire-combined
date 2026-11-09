@@ -63,7 +63,9 @@ MESH_ROUTE_DIRECT = 0
 MESH_ROUTE_VIA = 1
 MESH_ROUTE_FLOOD = 2
 MESH_ROUTE_FRESH_MS = 30000          # a learned route is trusted this long
-MESH_ROUTE_DIRECT_DBM = -88          # weaker direct links prefer a relay
+MESH_ROUTE_DIRECT_DBM = -80          # weaker direct links use a relay or a flood
+MESH_ROUTE_CLOSE_DBM = -60           # a direct link this strong beats a sticky relay
+                                     # (a dummy at -81..-83 dBm lost replies, 2026-11-08)
 MESH_ATTEMPT_MIN_MS = 250            # shortest wait for a reply per attempt
 MESH_REPLY_CACHE = 4                 # replies a module keeps for retries
 MESH_REPLY_KEEP_MS = 3000
@@ -122,6 +124,21 @@ def mesh_parse(payload):
     if len(payload) < offset + 2:
         return None
     return ctl, origin, msg_id, relay, age, offset
+
+
+def mesh_transmitter(parsed):
+    """Who sent this copy over the air: the relay that forwarded it, or the
+    originator. (A VIA frame names its relay before anyone has forwarded it,
+    so the relay field only counts once HOPS is above 0.)"""
+    if parsed[0] & 3 and parsed[3] is not None:
+        return parsed[3]
+    return parsed[1]
+
+
+def mesh_deaf(deaf_to, parsed):
+    """Bench test only (MESH_BENCH_DEAF_TO): True if this copy came straight
+    from a node we pretend is out of range, so the frame must take a relay."""
+    return bool(deaf_to) and mesh_transmitter(parsed) in deaf_to
 
 
 def mesh_relay_wait_ms(rssi, rand_fn):
@@ -279,10 +296,15 @@ class MeshBridge:
         self.stat_echo = 0
         self.stat_duplicate = 0
         self.stat_legacy = 0
-        # uid -> [direct_rssi, direct_ms, relay_uid, relay_ms]
+        # uid -> [direct_rssi, direct_ms, relay_uid, relay_ms, preferred]
+        # preferred: the route that last worked (MESH_ROUTE_DIRECT / VIA) or
+        # None. It sticks until a delivery on it fails, so a module doesn't
+        # flip between a relay and a marginal direct link.
         self.routes = {}
         self.deliveries = []
         self.last_hops = 0           # hops of the frame receive() returned
+        self.deaf_to = ()            # bench test: see mesh_deaf()
+        self.stat_deaf = 0
 
     def next_msg_id(self):
         self.msg_id = (self.msg_id + 1) & 0xFFFF
@@ -322,13 +344,20 @@ class MeshBridge:
         if route is None:
             if len(self.routes) >= 64:
                 self.routes = {}
-            route = self.routes[origin] = [None, None, None, None]
+            route = self.routes[origin] = [None, None, None, None, None]
         if hops == 0:
             route[0] = rssi
             route[1] = now
+            if route[4] == MESH_ROUTE_VIA and rssi is not None and rssi >= MESH_ROUTE_CLOSE_DBM:
+                route[4] = None      # it came close: let the RSSI rules choose again
         elif hops == 1 and relay is not None:
             route[2] = relay
             route[3] = now
+            # A relay carries it and the direct link is weak or silent: the
+            # relay is the better route from now on.
+            direct = route[1] is not None and time.ticks_diff(now, route[1]) < MESH_ROUTE_FRESH_MS
+            if route[4] is None and not (direct and route[0] is not None and route[0] >= MESH_ROUTE_DIRECT_DBM):
+                route[4] = MESH_ROUTE_VIA
 
     def route_for(self, uid, now):
         """(MESH_ROUTE_*, relay uid or None) for reaching uid."""
@@ -337,10 +366,18 @@ class MeshBridge:
             direct = route[1] is not None and time.ticks_diff(now, route[1]) < MESH_ROUTE_FRESH_MS
             via = route[3] is not None and time.ticks_diff(now, route[3]) < MESH_ROUTE_FRESH_MS
             strong = route[0] is None or route[0] >= MESH_ROUTE_DIRECT_DBM
-            if direct and (strong or not via):
+            preferred = route[4]
+            if preferred == MESH_ROUTE_VIA and route[2] is not None:
+                return MESH_ROUTE_VIA, route[2]
+            if preferred == MESH_ROUTE_DIRECT and direct:
+                return MESH_ROUTE_DIRECT, None
+            if direct and strong:
                 return MESH_ROUTE_DIRECT, None
             if via:
                 return MESH_ROUTE_VIA, route[2]
+        # A weak direct link and no known relay: flood, so any module that
+        # hears the bridge can carry it (DIRECT would forbid relaying). The
+        # relayed reply then teaches a VIA route for the next request.
         return MESH_ROUTE_FLOOD, None
 
     def forget(self, uid, kind):
@@ -352,18 +389,21 @@ class MeshBridge:
             route[1] = None
         elif kind == MESH_ROUTE_VIA:
             route[3] = None
+        if route[4] == kind:
+            route[4] = None
 
     # --- reliable delivery -------------------------------------------------
     def send_reliable(self, network_id, uid, frame, timeout_ms, tag, since_us=None):
-        """Deliver an NFCP request to uid: the cached route twice, then a
-        flood, each attempt with the same msg_id, until the reply arrives.
+        """Deliver an NFCP request to uid: the cached route once, then
+        floods, each attempt with the same msg_id, until the reply arrives.
         poll() reports the outcome under tag."""
         now = time.ticks_ms()
         route = self.route_for(uid, now)
         if route[0] == MESH_ROUTE_FLOOD:
             plan = (route, route, route)
         else:
-            plan = (route, route, (MESH_ROUTE_FLOOD, None))
+            # A route that just failed is forgotten, so don't try it again.
+            plan = (route, (MESH_ROUTE_FLOOD, None), (MESH_ROUTE_FLOOD, None))
         delivery = {
             "tag": tag, "uid": uid & 0xFFFFFFFF, "id": self.next_msg_id(), "network": network_id,
             "frame": frame, "plan": plan, "step": -1, "since": since_us,
@@ -449,6 +489,9 @@ class MeshBridge:
         if parsed is None:
             self.stat_legacy += 1
             return None
+        if mesh_deaf(self.deaf_to, parsed):
+            self.stat_deaf += 1
+            return None
         origin = parsed[1]
         if origin == self.origin:
             self.stat_echo += 1      # our own frame, relayed back
@@ -460,7 +503,16 @@ class MeshBridge:
         self.learn(origin, hops, parsed[3], rssi, now)
         for delivery in self.deliveries:
             if delivery["done"] is None and delivery["uid"] == origin and delivery["id"] == parsed[2]:
-                if hops == 0:
+                sent, sent_relay = delivery["plan"][delivery["step"]]
+                if sent != MESH_ROUTE_FLOOD:
+                    # The route we chose carried it, whichever copy of the
+                    # reply arrived first (a VIA target's own transmission is
+                    # often heard directly before the relay forwards it).
+                    delivery["done"] = (0, sent, sent_relay or 0)
+                    route = self.routes.get(origin)
+                    if route is not None:
+                        route[4] = sent
+                elif hops == 0:
                     delivery["done"] = (0, MESH_ROUTE_DIRECT, 0)
                 elif hops == 1 and parsed[3] is not None:
                     delivery["done"] = (0, MESH_ROUTE_VIA, parsed[3])

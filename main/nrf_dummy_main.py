@@ -18,7 +18,7 @@ except Exception:
 
 
 APP_FIRMWARE_NAME = "nrf-dummy"
-APP_FIRMWARE_VERSION = "0.1.0"
+APP_FIRMWARE_VERSION = "0.2.0"
 
 DEFAULT_NETWORK_ID = 0x04D2
 DEFAULT_GROUP_ID = 0x0001
@@ -30,6 +30,8 @@ RADIO_CHANNEL = getattr(node_config, "RADIO_CHANNEL", 90)
 RADIO_ADDRESS = getattr(node_config, "MESH_RADIO_ADDRESS", MESH_RADIO_ADDRESS)
 MESH_MAX_HOPS = getattr(node_config, "MESH_MAX_HOPS", MESH_DEFAULT_MAX_HOPS)
 MESH_RELAY_ENABLED = getattr(node_config, "MESH_RELAY_ENABLED", True)
+# Bench test only: nodes this module pretends it can't hear directly.
+MESH_BENCH_DEAF_TO = tuple(getattr(node_config, "MESH_BENCH_DEAF_TO", ()) or ())
 RADIO_TX_POWER = 8
 RADIO_RX_TIMEOUT_MS = getattr(node_config, "RADIO_RX_TIMEOUT_MS", 50)
 RADIO_CCA_ENABLED = getattr(node_config, "RADIO_CCA_ENABLED", True)
@@ -83,6 +85,16 @@ ARMED = False
 
 _sim_open = set()
 _sim_last_refresh = 0
+
+# Simulated physical outputs, reported by CMD_OUTPUT_STATUS_RSP.
+_last_fire_mask = 0
+_last_fire_seq = 0
+_last_fire_ms = 0
+
+# Simulated resistance of a connected cue: 1.8-2.4 ohm, in deci-ohms.
+SIM_CONNECTED_MIN_DECI_OHMS = 18
+SIM_CONNECTED_SPAN_DECI_OHMS = 7
+RESISTANCE_VALUE_OPEN = 0xFFFF
 
 
 def save_runtime_config():
@@ -149,6 +161,44 @@ def build_open_mask():
     return open_mask
 
 
+def build_resistance_payload():
+    """Simulated resistance scan in the field module format (deci-ohms)."""
+    open_mask = build_open_mask()
+    payload = bytearray((
+        RESISTANCE_PAYLOAD_VERSION,
+        RESISTANCE_UNIT_DECI_OHM,
+        CUE_COUNT & 0xFF,
+        0,  # status: OK
+    ))
+    for i in range(CUE_COUNT):
+        if open_mask & (1 << i):
+            value = RESISTANCE_VALUE_OPEN
+        else:
+            value = SIM_CONNECTED_MIN_DECI_OHMS + urandom.getrandbits(8) % SIM_CONNECTED_SPAN_DECI_OHMS
+        payload += value.to_bytes(2, "big")
+    return bytes(payload)
+
+
+def build_output_status_payload():
+    """Simulated physical output state in the field module format."""
+    flags = 0
+    if ARMED:
+        flags |= 0x01 | 0x08  # armed, driver enabled
+    if script.running:
+        flags |= 0x02
+    age_ms = 0xFFFF
+    if _last_fire_seq:
+        age_ms = max(0, min(0xFFFE, time.ticks_diff(time.ticks_ms(), _last_fire_ms)))
+    loaded = 0xFFFF if script.id_loaded is None else script.id_loaded & 0xFFFF
+    return bytes((1, flags, CUE_COUNT & 0xFF)) + (
+        bytes(8) +  # no output is held on
+        (_last_fire_mask & 0xFFFFFFFFFFFFFFFF).to_bytes(8, "big") +
+        (_last_fire_seq & 0xFFFFFFFF).to_bytes(4, "big") +
+        (age_ms & 0xFFFF).to_bytes(2, "big") +
+        loaded.to_bytes(2, "big")
+    )
+
+
 class DummyNode:
     """Firmware state and hooks used by the shared link, script and LCD code."""
 
@@ -162,6 +212,11 @@ class DummyNode:
         return ARMED
 
     def fire(self, mask):
+        global _last_fire_mask, _last_fire_seq, _last_fire_ms
+
+        _last_fire_mask = mask
+        _last_fire_seq += 1
+        _last_fire_ms = time.ticks_ms()
         print("DUMMY FIRE mask=0x%04X" % (mask & 0xFFFF))
         return ACK_OK
 
@@ -233,6 +288,9 @@ link = ModuleLink(
     max_hops=MESH_MAX_HOPS,
     relay_enabled=MESH_RELAY_ENABLED,
 )
+link.deaf_to = MESH_BENCH_DEAF_TO
+if MESH_BENCH_DEAF_TO:
+    print("MESH BENCH: deaf to", " ".join("%08X" % u for u in MESH_BENCH_DEAF_TO))
 nfcp = link.nfcp
 script = ScriptEngine(
     node,
@@ -341,6 +399,16 @@ def handle(pkt):
         if link.is_for_me(pkt):
             data = build_open_mask().to_bytes((CUE_COUNT + 7) // 8, "big")
             link.respond(CMD_CONTINUITY_RSP, data)
+    elif cmd == CMD_RESISTANCE_REQ:
+        if link.is_for_me(pkt):
+            if len(pkt.get("data", b"")) > 1:
+                link.nack(pkt, CMD_RESISTANCE_REQ, NACK_BAD_LENGTH)
+            else:
+                # A raw-ADC request gets calibrated values too: the dummy has no ADC.
+                link.respond(CMD_RESISTANCE_RSP, build_resistance_payload())
+    elif cmd == CMD_OUTPUT_STATUS_REQ:
+        if link.is_for_me(pkt) and not pkt.get("data", b""):
+            link.respond(CMD_OUTPUT_STATUS_RSP, build_output_status_payload())
     elif not script.handle(pkt):
         link.handle_common(pkt)
 

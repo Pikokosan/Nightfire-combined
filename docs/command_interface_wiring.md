@@ -1,9 +1,22 @@
 # nice!nano command interface: wiring preparation
 
-Status: firmware and app interface prepared. The switch and LEDs are not wired.
-The deployed configuration leaves both GPIO assignments as `None`; no LED data
-output is enabled. This stage continues to reject ARM/FIRE/script commands even
-if a switch later reports its ARM position.
+Status: wired and checked on the COM12 bench bridge (nice!nano) on 2026-11-08.
+The switch reads SAFE open / ARM closed, the four WS2812B pixels show the status
+below, and the mesh smoke test passes 11/11 with the LEDs running (ping times
+are the same with LED output switched off).
+
+As built on the bench:
+
+| Function | GPIO | Connection |
+| --- | --- | --- |
+| SAFE/ARM switch | P0.06 | Switch to GND; reads 1 open (SAFE), 0 closed (ARM) |
+| LED data | P0.08 | Direct wire to the first WS2812B's DIN (no buffer) |
+| LED power | P0.13 | The nice!nano's VCC switch; **high = on** (low left the LEDs dark) |
+
+The LEDs run from the board's 3.3 V VCC pin, so a 3.3 V data line drives them
+directly. Bench findings: colour order is GRB, and the WS2812B datasheet
+timing with a 400 ns "0" pulse read every bit as 1 (all pixels white); a
+250 ns "0" pulse decodes correctly.
 
 ## Proposed connections
 
@@ -58,20 +71,26 @@ self-disarm window has passed, not that each module reported DISARM. Extra
 configured pixels are kept off. Brightness is limited in firmware; do not use this software
 limit to determine the power supply's required capacity.
 
-## Firmware setup after wiring
+## Firmware setup
 
-`main/nrf_bridge_config_usb.py` currently contains:
+`main/nrf_bridge_config_usb.py` now contains the bench wiring:
 
 ```python
-ARM_SWITCH_PIN = None
-STATUS_LED_PIN = None
+ARM_SWITCH_PIN = 6
+STATUS_LED_PIN = 8
 STATUS_LED_COUNT = 4
-STATUS_LED_ORDER = "RGB"
-STATUS_LED_TIMING_NS = None
+STATUS_LED_ORDER = "GRB"
+STATUS_LED_TIMING_NS = (250, 1000, 800, 450)
+STATUS_LED_POWER_PIN = 13
+STATUS_LED_POWER_ON_VALUE = 1
 ```
 
-After wiring is verified, the proposed GPIO values are 6 and 8. The exact LED
-model, pixel count, color order and its bit timings must be checked first.
+Set the pins to `None` for a bridge without a switch or LEDs. The power pin is
+driven to its on value only when the LED settings are valid, and it must not
+share a GPIO with the switch or LED data. `install_usb_bridge.py --master`
+keeps a bridge's own config; a bridge whose switch and LED pins are both unset
+takes this whole switch/LED block from the repository config. For other LEDs,
+check the model, pixel count, colour order and bit timings first.
 `STATUS_LED_TIMING_NS` is `(T0H, T0L, T1H, T1L)` in nanoseconds. No timing is
 guessed from the supply voltage. RGB and other channel permutations are accepted.
 The native driver supports up to 16 RGB pixels and a 300 μs low reset interval;

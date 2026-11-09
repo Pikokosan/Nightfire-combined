@@ -128,6 +128,53 @@ class InterfaceTests(unittest.TestCase):
         interface.poll(True)
         self.assertEqual(interface.led_status, 2)
 
+    def make_powered(self, **settings):
+        self.outputs = []
+        self.now = 0
+        self.pin = InputPin()
+        self.writes = []
+        return CommandInterface(SimpleNamespace(**settings), pin_factory=lambda number: self.pin,
+                                led_write=lambda *values: self.writes.append(values),
+                                clock=lambda: self.now, difference=lambda current, previous: current - previous,
+                                output_factory=lambda number, value: self.outputs.append((number, value)))
+
+    def test_led_power_pin_is_driven_on_only_with_valid_led_output(self):
+        led = dict(STATUS_LED_PIN=8, STATUS_LED_TIMING_NS=(250, 1000, 800, 450))
+        interface = self.make_powered(STATUS_LED_POWER_PIN=13, **led)
+        self.assertEqual(self.outputs, [(13, 1)])
+        self.assertEqual(interface.led_status, 1)
+        self.make_powered(STATUS_LED_POWER_PIN=13, STATUS_LED_POWER_ON_VALUE=0, **led)
+        self.assertEqual(self.outputs, [(13, 0)])
+        # Invalid LED settings, or a power pin shared with another signal,
+        # leave the power pin untouched.
+        for settings in ({"STATUS_LED_PIN": 8, "STATUS_LED_POWER_PIN": 13},
+                         dict(led, STATUS_LED_POWER_PIN=8),
+                         dict(led, ARM_SWITCH_PIN=6, STATUS_LED_POWER_PIN=6),
+                         dict(led, STATUS_LED_POWER_PIN=48)):
+            interface = self.make_powered(**settings)
+            self.assertEqual(self.outputs, [], settings)
+            self.assertTrue(interface.faults & 2, settings)
+
+    def test_installer_master_config(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from install_usb_bridge import prepare_master_config
+        repository = (Path(__file__).resolve().parents[1] / "main/nrf_bridge_config_usb.py").read_bytes()
+        device = (b"NETWORK_ID = 0x0101\r\nARM_SWITCH_PIN = None\r\nSTATUS_LED_PIN = None\r\n"
+                  b"STATUS_LED_ORDER = \"RGB\"\r\nMASTER_ENABLED = True\r\n\r\nMASTER_ENABLED = True\r\n")
+        prepared = prepare_master_config(device, repository)
+        settings = {}
+        exec(prepared.decode(), settings)
+        self.assertEqual(settings["NETWORK_ID"], 0x0101)
+        self.assertEqual(settings["STATUS_LED_ORDER"], "GRB")
+        self.assertEqual(settings["STATUS_LED_POWER_PIN"], 13)
+        self.assertEqual(prepared.count(b"MASTER_ENABLED"), 1)
+        # A bridge with its own pins keeps its block.
+        own = b"ARM_SWITCH_PIN = 9\nSTATUS_LED_PIN = None\nSTATUS_LED_ORDER = 'RGB'\n"
+        settings = {}
+        exec(prepare_master_config(own, repository).decode(), settings)
+        self.assertEqual((settings["ARM_SWITCH_PIN"], settings["STATUS_LED_ORDER"]), (9, "RGB"))
+        self.assertNotIn("STATUS_LED_POWER_PIN", settings)
+
 
 if __name__ == "__main__":
     unittest.main()

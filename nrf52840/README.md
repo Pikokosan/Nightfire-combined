@@ -38,9 +38,9 @@ Cortex cycle counter, masks interrupts during the data waveform and leaves data
 low for 300 μs afterward. It is intended for status indicators between radio
 receive windows, not large animated strips.
 
-The nice!nano build with this extension compiles successfully. It has not been
-flashed to the connected radio or verified on actual LEDs. The Python command
-interface leaves LED and switch GPIOs disabled until wiring is checked. See
+This extension is flashed on the COM12 bench bridge and drives its four
+WS2812B status pixels (GRB, timing `(250, 1000, 800, 450)`; a 400 ns T0H
+read as all-ones on these LEDs). See
 `docs/command_interface_wiring.md` for the interface protocol, proposed connections,
 and required waveform/USB/radio bench checks.
 

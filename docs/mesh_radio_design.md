@@ -215,8 +215,10 @@ The bridge keeps a route per module:
   - discover replies;
   - command replies;
   - flooded frames a relay forwards with `relay` set.
-- **Choosing a route:**
-  - Direct if the module was heard directly in the last 30 s at ≥ −88 dBm.
+- **Choosing a route** (revised 2026-11-08, see "Route preference" below):
+  - The route that last worked, if any (it sticks until it fails).
+  - Otherwise direct if the module was heard directly in the last 30 s at
+    ≥ −80 dBm.
   - Otherwise through the relay it was last heard through.
   - Otherwise flood.
 
@@ -225,9 +227,9 @@ the radio timing:
 
 1. Send on the cached route and wait for the reply. The app passes the
    timeout per command (resistance scans and OTA END are slow).
-2. If no reply, retry once on the same route.
-3. If still no reply, drop the cached route and send once as a flood.
-   Learn the new route from whichever path the reply comes back on.
+2. If no reply, drop the cached route and flood. Learn the new route from
+   whichever path the reply comes back on.
+3. If still no reply, flood once more.
 4. If there's still no reply, report failure to the app.
 
 This needs a new bridge USB command (`CMD_SEND_NFCP_RELIABLE`). It takes
@@ -350,10 +352,12 @@ results" below.
 - **Bridges** (`MeshBridge` in `mesh.py`):
   - **Route cache:** learned from every frame heard, duplicates included.
     Direct if heard directly within 30 s at -88 dBm or better; otherwise
-    through the relay it was last heard through; otherwise flood.
+    through the relay it was last heard through; otherwise flood. (Changed
+    on 2026-11-08: see "Route preference".)
   - **New command** `CMD_SEND_NFCP_RELIABLE` (0x1A): uid(4) timeout_ms(2)
     NFCP frame.
-  - **Delivery:** the cached route twice, then a flood. Each attempt waits
+  - **Delivery:** the cached route twice, then a flood (now: once, then
+    two floods). Each attempt waits
     timeout/3 (at least 250 ms) and reuses the same `msg_id`. A route that
     gets no reply is forgotten.
   - **Answer:** status, route, relay uid and attempts, sent once the reply
@@ -666,6 +670,46 @@ COM16):
   1 in 65,536 per frame during a delivery.
 - Each bridge install appends another `MASTER_ENABLED = True` to its
   config. This is an existing installer quirk and harmless.
+
+## Route preference (2026-11-08)
+
+Tested with the bridge on the Android tablet, the field module D96E30DD as
+the relay and the dummy 62A75130 further away.
+
+**Found:**
+- With the field module next to the bridge, the dummy (-81 to -83 dBm)
+  was sent DIRECT, which forbids relaying, and lost replies. A relay next
+  to the bridge can't help anyway: it is as far from the dummy as the
+  bridge.
+- With the field module halfway, the dummy flipped between the relay and
+  direct. Every direct copy the bridge heard refreshed the direct route,
+  and copies near -80 dBm passed the "strong" test. The bridge also
+  reported the route of whichever reply copy arrived first; a VIA target's
+  own transmission is often heard directly before the relay forwards it.
+
+**Now** (`MeshBridge` in `mesh.py`, tests in `scripts/test_mesh_routes.py`):
+- `MESH_ROUTE_DIRECT_DBM` is -80. A weak direct link with no known relay
+  floods instead of going DIRECT, so any module can carry it.
+- **Preferred route:** a route that delivered sticks until a delivery on it
+  fails. A relay becomes preferred when it carries a reply while the
+  direct link is weak or silent. Weaker or stale direct copies don't
+  change it; a direct copy at `MESH_ROUTE_CLOSE_DBM` (-60) or stronger
+  drops a relay preference.
+- **Retries:** the chosen route once, then floods.
+- **Reported route:** the route the bridge chose. A flood still reports the
+  path of the first reply copy.
+
+**Result on the tablet:** 73 of 73 deliveries to the dummy went through
+D96E30DD on the first attempt (none direct, flooded or failed). The app's
+experimental Mesh page shows the topology.
+
+**Bench setting:** `MESH_BENCH_DEAF_TO` (bridge or node config, a tuple of
+uids) makes a node ignore copies sent straight from those nodes, to force
+a relay on a desk. Leave it out of show configs.
+
+**Updating the bridge from the tablet:** an update stays on trial until an
+app session confirms it. If the app can't reconnect and the dongle loses
+power first, it rolls back to the previous bundle without saying so.
 
 ## Phase 2 results (2026-11-06)
 

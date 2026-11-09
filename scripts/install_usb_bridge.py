@@ -7,6 +7,31 @@ import serial
 import raw_micropython_upload as raw
 
 
+INTERFACE_SETTINGS = (b'ARM_SWITCH_PIN', b'STATUS_LED_PIN', b'STATUS_LED_COUNT',
+                      b'STATUS_LED_ORDER', b'STATUS_LED_TIMING_NS',
+                      b'STATUS_LED_POWER_PIN', b'STATUS_LED_POWER_ON_VALUE')
+
+
+def prepare_master_config(device, repository):
+    """Keep the bridge's own settings and enable master mode once. A bridge
+    whose switch and LED pins are both unset takes the whole switch/LED block
+    from the repository config; a bridge with its own pins keeps its block."""
+    def setting(line):
+        name, _, value = line.partition(b'=')
+        return name.strip(), value.split(b'#')[0].strip()
+    lines = [line for line in device.splitlines()
+             if setting(line)[0] != b'MASTER_ENABLED']
+    own = dict(setting(line) for line in lines if b'=' in line)
+    if all(own.get(name, b'None') == b'None' for name in (b'ARM_SWITCH_PIN', b'STATUS_LED_PIN')):
+        lines = [line for line in lines if setting(line)[0] not in INTERFACE_SETTINGS]
+        lines += [line for line in repository.splitlines()
+                  if setting(line)[0] in INTERFACE_SETTINGS]
+    text = b'\n'.join(line.rstrip() for line in lines).strip()
+    while b'\n\n\n' in text:
+        text = text.replace(b'\n\n\n', b'\n\n')
+    return text + b'\nMASTER_ENABLED = True\n'
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", required=True)
@@ -64,7 +89,8 @@ def main():
                 content = (original_config.read_bytes() if original_config.exists()
                            else copies['nrf_bridge_config.py'].read_bytes())
                 prepared_config = backup / 'prepared_master_config.py'
-                prepared_config.write_bytes(content + b'\nMASTER_ENABLED = True\n')
+                prepared_config.write_bytes(prepare_master_config(
+                    content, (root / 'main/nrf_bridge_config_usb.py').read_bytes()))
                 copies['nrf_bridge_config.py'] = prepared_config
             touched = True
             # Reclaim all owned source destinations before writing a bundled image.

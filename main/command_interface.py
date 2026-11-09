@@ -2,7 +2,8 @@ import bridge_radio
 
 
 class CommandInterface:
-    def __init__(self, config, pin_factory=None, led_write=None, clock=None, difference=None):
+    def __init__(self, config, pin_factory=None, led_write=None, clock=None, difference=None,
+                 output_factory=None):
         if clock is None:
             import time
             clock = time.ticks_ms
@@ -17,6 +18,12 @@ class CommandInterface:
             self.led_count = 0
         self.order = getattr(config, "STATUS_LED_ORDER", "RGB")
         self.timing = getattr(config, "STATUS_LED_TIMING_NS", None)
+        # Optional GPIO that switches the LED supply (on the nice!nano, P0.13
+        # drives the VCC pin's switch: high = on). It is driven on only when
+        # the LED output is valid; otherwise it is left untouched.
+        self.power_pin = getattr(config, "STATUS_LED_POWER_PIN", None)
+        self.power_on = 1 if getattr(config, "STATUS_LED_POWER_ON_VALUE", 1) else 0
+        self.power = None
         self.timeout = 3000
         self.switch = 0
         self.led_status = 0
@@ -36,7 +43,7 @@ class CommandInterface:
         # firmware) and the tick of the last RF keepalive sent.
         self.module_arm = None
         self.keepalive_at = None
-        for name, fault in (("switch_pin", 1), ("led_pin", 2)):
+        for name, fault in (("switch_pin", 1), ("led_pin", 2), ("power_pin", 2)):
             number = getattr(self, name)
             if number is not None and (type(number) is not int or number < 0 or number > 47):
                 setattr(self, name, None)
@@ -54,7 +61,10 @@ class CommandInterface:
                 self.faults |= 1
         if self.led_pin is not None:
             try:
-                valid = (self.led_pin != self.switch_pin and sorted(self.order) == ["B", "G", "R"] and
+                valid = (self.led_pin != self.switch_pin and
+                         (self.power_pin is None or
+                          self.power_pin not in (self.led_pin, self.switch_pin)) and
+                         sorted(self.order) == ["B", "G", "R"] and
                          self.timing is not None and len(self.timing) == 4 and
                          all(type(value) is int and 100 <= value <= 5000 for value in self.timing))
             except Exception:
@@ -67,6 +77,15 @@ class CommandInterface:
                 self.faults |= 2
             else:
                 self.led_status = 1
+        if self.led_status == 1 and self.power_pin is not None:
+            try:
+                if output_factory is None:
+                    from machine import Pin
+                    output_factory = lambda number, value: Pin(number, Pin.OUT, value=value)
+                self.power = output_factory(self.power_pin, self.power_on)
+            except Exception:
+                self.led_status = 2
+                self.faults |= 2
 
     def heartbeat(self, payload):
         if len(payload) != 4:
