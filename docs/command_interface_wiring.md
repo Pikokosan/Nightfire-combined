@@ -18,6 +18,10 @@ directly. Bench findings: colour order is GRB, and the WS2812B datasheet
 timing with a 400 ns "0" pulse read every bit as 1 (all pixels white); a
 250 ns "0" pulse decodes correctly.
 
+On 2026-11-09 the bench bridge's LEDs were changed to WS2811s, which need RGB
+order and timing `(150, 1100, 550, 700)` (250 ns read as all white). For any
+other LED type, see `docs/bridge_status_leds.md`.
+
 ## Proposed connections
 
 These are nRF GPIO numbers used by MicroPython, not numbered Pro Micro pads.
@@ -73,14 +77,14 @@ limit to determine the power supply's required capacity.
 
 ## Firmware setup
 
-`main/nrf_bridge_config_usb.py` now contains the bench wiring:
+`main/configs/bridge_usb.py` now contains the bench wiring:
 
 ```python
 ARM_SWITCH_PIN = 6
 STATUS_LED_PIN = 8
 STATUS_LED_COUNT = 4
-STATUS_LED_ORDER = "GRB"
-STATUS_LED_TIMING_NS = (250, 1000, 800, 450)
+STATUS_LED_ORDER = "RGB"                       # WS2811; "GRB" for WS2812B
+STATUS_LED_TIMING_NS = (150, 1100, 550, 700)   # WS2811; (250, 1000, 800, 450) for WS2812B
 STATUS_LED_POWER_PIN = 13
 STATUS_LED_POWER_ON_VALUE = 1
 ```
@@ -147,7 +151,7 @@ does not claim to disarm field modules on timeout.
 2 last TX failed), interval (2 bytes), age since last successful TX (2 bytes,
 65535 if never sent), successful TX count (4 bytes), failure count (4 bytes).
 All multibyte values are big-endian. Broadcast TX success does not acknowledge
-receipt by any field module. `scripts/probe_master_keepalive.py --port COM12`
+receipt by any field module. `scripts/diagnostics/probe_master_keepalive.py --port COM12`
 checks the cadence and verifies that the count stops advancing after host loss.
 
 Firmware 0.3.2 permits only the unique-address SET_GROUP (0x31) configuration

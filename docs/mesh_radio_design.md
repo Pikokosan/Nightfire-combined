@@ -29,7 +29,7 @@ Out of scope for now:
 
 | Piece | Current behaviour |
 |---|---|
-| Radio (`nrf52840/native/nrf_radio/nrf_radio.c`) | nRF proprietary 1 Mbit, 252-byte max payload, whitening, hardware CRC, `last_rssi()`, CCA in `send()`. Base address `0x67676767`. |
+| Radio (`firmware/micropython/native/nrf_radio/nrf_radio.c`) | nRF proprietary 1 Mbit, 252-byte max payload, whitening, hardware CRC, `last_rssi()`, CCA in `send()`. Base address `0x67676767`. |
 | Radio payload | `network_id(2) \| seq(1) \| NFCP frame`. The seq byte is detected by a heuristic (`payload[2] != 0xFF and payload[3] == 0xFF`). |
 | Duplicates (`module_link.py`) | Kept for 1.5 s, 16 entries, keyed on `(seq, frame type, src, target, cmd, first 16 data bytes)`. |
 | Module TX | Every frame is sent 3 times, 20 ms apart. |
@@ -263,8 +263,8 @@ DISCOVER is a class F flood carrying the nonce, as today.
 
 ## Implementation plan
 
-**Phase 0: a PC mesh simulator.** Done: `scripts/mesh_sim.py` with the
-scenarios in `scripts/mesh_scenarios.py`. See "Phase 0 baseline" below.
+**Phase 0: a PC mesh simulator.** Done: `scripts/sim/mesh_sim.py` with the
+scenarios in `scripts/sim/mesh_scenarios.py`. See "Phase 0 baseline" below.
 
 **Phase 1: frame format and plain flooding.** Built on branch `Mesh` and
 checked in the simulator; **not yet run on hardware**. See "Phase 1
@@ -410,17 +410,17 @@ results" below.
 | `main/nrf_bridge_main.py`, `main/nrf_usb_monitor_main.py` | `MeshBridge`, faster polling. | Route cache, reliable send (3). |
 | `main/bridge_radio.py` | | New USB command and fields (3). |
 | Field and USB bundlers, dummy/bridge/OTA scripts | Include `mesh.py`. | |
-| `scripts/firmware_trace_harness.py` | Delivers mesh frames. | |
-| `scripts/mesh_sim.py`, `mesh_scenarios.py` | Decode mesh frames; `deep3` scenario. | |
+| `scripts/sim/firmware_trace_harness.py` | Delivers mesh frames. | |
+| `scripts/sim/mesh_sim.py`, `mesh_scenarios.py` | Decode mesh frames; `deep3` scenario. | |
 | `apps/nightfire_controller` | Unchanged. | Use reliable send; show hops and route (3). |
-| `main/PC_multi_module_emulator.py`, bench scripts that use the radio directly (`scripts/test_nrf_*.py`, `scripts/test_master_bridge_*`, `scripts/test_nrf_to_master_bridge_raw.py`, `scripts/diagnostics/read_nrf_radio_stats.py`) | **Not updated: still pre-mesh.** | Update before using them against mesh firmware. |
+| `scripts/sim/PC_multi_module_emulator.py`, bench scripts that use the radio directly (`scripts/bench/test_nrf_*.py`, `scripts/bench/test_master_bridge_*`, `scripts/bench/test_nrf_to_master_bridge_raw.py`, `scripts/diagnostics/read_nrf_radio_stats.py`) | **Not updated: still pre-mesh.** | Update before using them against mesh firmware. |
 | `main/master_main.py` | Unchanged (it talks to the UART bridge). | |
 
 ## Phase 0 baseline
 
 ### The simulator
 
-`scripts/mesh_sim.py` runs the real, unmodified firmware on several
+`scripts/sim/mesh_sim.py` runs the real, unmodified firmware on several
 simulated nodes:
 - a bridge running `nrf_bridge_main.py`;
 - dummy modules running `nrf_dummy_main.py`;
@@ -429,9 +429,9 @@ simulated nodes:
 All nodes share one virtual clock and one simulated radio channel.
 
 ```
-py -3 scripts/mesh_sim.py --list
-py -3 scripts/mesh_sim.py --scenario chain --out chain.trace
-py -3 scripts/mesh_sim.py --scenario all --seed 3
+py -3 scripts/sim/mesh_sim.py --list
+py -3 scripts/sim/mesh_sim.py --scenario chain --out chain.trace
+py -3 scripts/sim/mesh_sim.py --scenario all --seed 3
 ```
 
 What it models:
@@ -687,7 +687,7 @@ the relay and the dummy 62A75130 further away.
   reported the route of whichever reply copy arrived first; a VIA target's
   own transmission is often heard directly before the relay forwards it.
 
-**Now** (`MeshBridge` in `mesh.py`, tests in `scripts/test_mesh_routes.py`):
+**Now** (`MeshBridge` in `mesh.py`, tests in `scripts/tests/test_mesh_routes.py`):
 - `MESH_ROUTE_DIRECT_DBM` is -80. A weak direct link with no known relay
   floods instead of going DIRECT, so any module can carry it.
 - **Preferred route:** a route that delivered sticks until a delivery on it
@@ -781,9 +781,9 @@ checked on the bridge:
   The modules also build their replies with the table CRC, which accounts
   for part of this.
 - **Tests:**
-  - `scripts/test_usb_bridge_transport.py`: byte and text stdin, long
+  - `scripts/tests/test_usb_bridge_transport.py`: byte and text stdin, long
     lines, partial lines, and random streams against a reference decoder.
-  - `scripts/test_bridge_frame_parser.py`: `feed_bytes()` returns the same
+  - `scripts/tests/test_bridge_frame_parser.py`: `feed_bytes()` returns the same
     frames as `feed()`.
   - The CRC table was checked against the bit loop on 2,000 random inputs.
   - `master_main.py` and other `feed()` users are unchanged.
@@ -846,7 +846,7 @@ These were measured on the module with counters loaded in RAM:
      2026-09-16 MicroPython build with a different filesystem layout. It
      was reinstalled with `install_usb_bridge.py --master --compiled`, with
      the same settings as before (its config matched
-     `nrf_bridge_config_usb.py`). The field module was already on the
+     `main/configs/bridge_usb.py`). The field module was already on the
      2026-11-05 layout and kept its files. **Back up any board on an older
      build before flashing it.**
    - **A/B test for reception** (150 pings every 100 ms, module counting
@@ -879,7 +879,7 @@ These were measured on the module with counters loaded in RAM:
      - `lcd.service()` stalls for at most 27 ms (2.1 ms on average), so the
        module is deaf about 3.5% of the time at idle.
      The smoke test passes again: 9 of 9 checks, 50 of 50 pings.
-   - **Tests:** `scripts/test_lcd1602_driver.py` checks the byte stream on an
+   - **Tests:** `scripts/tests/test_lcd1602_driver.py` checks the byte stream on an
      emulated PCF8574 + HD44780 for both pin mappings. The same emulator
      reproduces the old driver's screen exactly.
    - **Not checked:** what the physical LCD looks like. Have a look at the
@@ -899,7 +899,7 @@ These were measured on the module with counters loaded in RAM:
 - arming and firing (left to you).
 
 **Rolling back:** upload the saved files from the two `dist/*_backup_*`
-folders with `scripts/raw_micropython_upload.py`, or install from a
+folders with `scripts/lib/raw_micropython_upload.py`, or install from a
 pre-mesh checkout with the same upload scripts.
 
 ## Decisions

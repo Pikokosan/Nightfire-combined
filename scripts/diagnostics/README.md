@@ -10,4 +10,5 @@ example:
 python .\scripts\diagnostics\test_master_discover_noinfo.py --master COM21
 ```
 
-Keep stable regression tests in `scripts/` using the `test_*.py` naming pattern.
+Offline regression tests go in `scripts/tests/`; tests that drive real
+boards go in `scripts/bench/`.

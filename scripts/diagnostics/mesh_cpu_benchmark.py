@@ -8,7 +8,7 @@ code) are:
    made from firmware code).
 
 Device time divided by counted calls gives `per_call_us` for
-scripts/mesh_sim.py. The script also measures garbage-collection pauses
+scripts/sim/mesh_sim.py. The script also measures garbage-collection pauses
 and allocation per call, which set the simulator's GC model.
 
     py -3 scripts/diagnostics/mesh_cpu_benchmark.py --port COM16
@@ -29,7 +29,8 @@ import types
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 MAIN = os.path.join(ROOT, "main")
-sys.path.insert(0, os.path.join(ROOT, "scripts"))
+sys.path.insert(0, os.path.join(ROOT, "scripts", "lib"))
+sys.path.insert(0, os.path.join(ROOT, "scripts", "sim"))
 sys.path.insert(0, MAIN)
 
 FW_NAME = "<benchfw>"
@@ -294,7 +295,7 @@ def main():
         elif parts:
             extra.append(line.strip())
 
-    # Compare with the simulator's model (scripts/mesh_sim.py CpuModel), and
+    # Compare with the simulator's model (scripts/sim/mesh_sim.py CpuModel), and
     # refit both terms by least squares on the receive workloads.
     print("%-18s %10s %7s %7s %10s %7s" % ("workload", "device_us", "calls", "lines", "model_us", "error"))
     rows = []

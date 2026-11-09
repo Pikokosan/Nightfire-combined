@@ -6,7 +6,7 @@ import time
 
 import serial
 
-sys.path.insert(0, "scripts")
+sys.path.insert(0, "scripts/lib")
 import raw_micropython_upload as raw
 
 

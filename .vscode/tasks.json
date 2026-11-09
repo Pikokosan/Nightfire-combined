@@ -2,14 +2,14 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Master device: upload",
+            "label": "ESP32 master: upload",
             "type": "shell",
             "command": "powershell",
             "args": [
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                "${workspaceFolder}\\scripts\\upload_master_to_com7.ps1"
+                "${workspaceFolder}\\scripts\\install\\upload_esp32_master.ps1"
             ],
             "group": "build",
             "problemMatcher": [],
@@ -27,7 +27,7 @@
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                "${workspaceFolder}\\scripts\\upload_field_module_to_com10.ps1"
+                "${workspaceFolder}\\scripts\\install\\upload_field_module.ps1"
             ],
             "group": "build",
             "problemMatcher": [],
@@ -45,7 +45,7 @@
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                "${workspaceFolder}\\scripts\\upload_lcd_ui_test_to_com10.ps1"
+                "${workspaceFolder}\\scripts\\install\\upload_lcd_ui_test.ps1"
             ],
             "group": "build",
             "problemMatcher": [],
@@ -63,7 +63,7 @@
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                "${workspaceFolder}\\scripts\\upload_nrf_dummy.ps1"
+                "${workspaceFolder}\\scripts\\install\\upload_nrf_dummy.ps1"
             ],
             "group": "build",
             "problemMatcher": [],
@@ -81,7 +81,7 @@
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                "${workspaceFolder}\\scripts\\build_module_ota_package.ps1"
+                "${workspaceFolder}\\scripts\\build\\build_module_ota_package.ps1"
             ],
             "group": "build",
             "problemMatcher": [],
@@ -99,7 +99,7 @@
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                "${workspaceFolder}\\scripts\\build_bridge_update_package.ps1"
+                "${workspaceFolder}\\scripts\\build\\build_bridge_update_package.ps1"
             ],
             "group": "build",
             "problemMatcher": [],
@@ -114,7 +114,7 @@
             "type": "shell",
             "command": "python",
             "args": [
-                "${workspaceFolder}\\scripts\\enter_nrf_bootloader.py",
+                "${workspaceFolder}\\scripts\\install\\enter_nrf_bootloader.py",
                 "--port",
                 "COM16"
             ],

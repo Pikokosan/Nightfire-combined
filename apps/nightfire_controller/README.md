@@ -139,7 +139,7 @@ firmware command allowlist, duplicate discovery, nonce mismatches, wrong-source
 replies, missing/rejected readings, legacy fallback, disconnect cancellation,
 and 64-cue layouts on phone and tablet viewports.
 
-`scripts/probe_usb_modules.py --port COM12` provides a PC-side discovery/info/
+`scripts/lib/probe_usb_modules.py --port COM12` provides a PC-side discovery/info/
 resistance/legacy-continuity diagnostic when the emulator has released the radio.
 An unsupported legacy request may time out on current field firmware. The radio's
 RSSI value is a driver-reported sample, not a validated per-packet range metric.
@@ -168,7 +168,7 @@ flutter build apk --debug --target-platform android-arm64
 With this checkout's local tools, the equivalent from the repository root is:
 
 ```powershell
-./scripts/build_android_app.ps1 -JdkPath 'C:/Program Files/Java/jdk-23' -Check
+./scripts/android/build_android_app.ps1 -JdkPath 'C:/Program Files/Java/jdk-23' -Check
 ```
 
 The debug APK is `build/app/outputs/flutter-apk/app-debug.apk`. It is a development
@@ -200,8 +200,8 @@ From the repository root, start the tablet without USB passthrough, then keep
 the relay running in a separate terminal:
 
 ```powershell
-./scripts/start_android_tablet.ps1
-python scripts/emulator_serial_relay.py --port COM12
+./scripts/android/start_android_tablet.ps1
+python scripts/android/emulator_serial_relay.py --port COM12
 ```
 
 In the debug Android app's **Radio** view, enable **Local emulator relay**, select the relay and
@@ -220,12 +220,12 @@ The workspace AVD is `Nightfire_Tablet`, Android 16/API 36 x86-64, with a
 Google's bundled `Android USB Assistant` and `UsbAssist` drivers have been installed,
 and the `UsbAssist` service is running. The installation transcript is
 `dist/android/usb-driver-install.log`. To install them on another Windows setup,
-run `scripts/install_android_usb_passthrough.ps1` as administrator.
+run `scripts/android/install_android_usb_passthrough.ps1` as administrator.
 
 Close any existing tablet emulator and serial terminals, then run from the root:
 
 ```powershell
-./scripts/start_android_tablet.ps1 -UsbRadio
+./scripts/android/start_android_tablet.ps1 -UsbRadio
 ```
 
 The launcher derives the radio's physical USB port from its serial number and
@@ -239,7 +239,7 @@ COM12 is not available for PC tools at the same time. In Nightfire, select
 The stock emulator image did not declare `android.hardware.usb.host`, even though
 the radio appeared under `/sys/bus/usb/devices`. A development overlay was enabled
 with `adb root` / `adb remount` and the required reboot, then
-`scripts/android_usb_host_feature.xml` was installed as
+`scripts/android/android_usb_host_feature.xml` was installed as
 `/vendor/etc/permissions/android.hardware.usb.host.xml`, with mode 644 and the
 vendor file context restored. Another reboot activated the USB host manager.
 These changes apply to the virtual tablet only. A recreated or reset system
@@ -261,21 +261,24 @@ Counters and RSSI are not a test of field-module reachability.
 From the repository root, using a Python installation with `pyserial`:
 
 ```powershell
-python scripts/install_usb_bridge.py --port COM12
-python scripts/probe_usb_bridge.py --port COM12
+python scripts/install/install_usb_bridge.py --port COM12
+python scripts/lib/probe_usb_bridge.py --port COM12
 ```
 
-The installer saves existing target files under `dist/bridge_backup_<timestamp>`
-before replacing them. File replacement is needed on this board's small internal
-filesystem. Do not delete the backup. The original pre-installation COM12 firmware
-from this session is in `dist/bridge_backup_20261102_231444`; later backup folders
-contain subsequent monitor/partial-install states.
+The installer saves the bridge's existing files under
+`dist/bridge_backup_<timestamp>` before replacing them, and puts them back if
+the install fails. File replacement is needed on this board's small internal
+filesystem.
 
-To restore that original UART role using the existing uploader:
+To turn a board back into the ESP32 master's UART bridge, install that role
+from the repository:
 
 ```powershell
-python scripts/raw_micropython_upload.py --port COM12 --delete main.py --delete bridge_radio.py --delete nrf_bridge_config.py --delete usb_bridge_transport.py dist/bridge_backup_20261102_231444/main.py:main.py dist/bridge_backup_20261102_231444/bridge_radio.py:bridge_radio.py dist/bridge_backup_20261102_231444/nrf_bridge_config.py:nrf_bridge_config.py
+powershell -ExecutionPolicy Bypass -File .\scripts\install\upload_esp32_master_bridge.ps1 -Port COM12
 ```
+
+Full build and install steps for every device are in
+`docs/building_devices.md`.
 
 After installing the APK, move the radio's USB cable from the PC to the Android
 device through a data-capable USB host connection. Choose **Scan USB**, select the

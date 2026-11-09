@@ -41,7 +41,7 @@ and the normal bridge installer still installs monitor mode by default.
 To explicitly install master mode, with Python 3 and pyserial:
 
 ```powershell
-python scripts/install_usb_bridge.py --port COM12 --master
+python scripts/install/install_usb_bridge.py --port COM12 --master
 ```
 
 The connected nice!nano has a 64 KiB filesystem. Its verified deployment uses
@@ -49,8 +49,8 @@ the compact form instead, with the already-installed MicroPython 1.29 `mpy_cross
 compiler matching its MicroPython 1.29 preview firmware:
 
 ```powershell
-python scripts/install_usb_bridge.py --port COM12 --master --compiled
-python scripts/probe_usb_master_status.py --port COM12
+python scripts/install/install_usb_bridge.py --port COM12 --master --compiled
+python scripts/diagnostics/probe_usb_master_status.py --port COM12
 ```
 
 `build_usb_master_bundle.py` combines the owned modules while preserving the
@@ -67,7 +67,7 @@ The installer backs up every existing destination to a new
 radio's existing configuration and appends `MASTER_ENABLED = True`. The two new
 policy/maintenance modules are included, every file is read back, and failures
 restore the backup. The installer prints the exact backup folder; retain it for
-restoration using `scripts/raw_micropython_upload.py`.
+restoration using `scripts/lib/raw_micropython_upload.py`.
 
 ARM, FIRE, script START and STEP require an active three-second host session. If
 an ARM switch is configured, its debounced position must be ARM. Software arming
@@ -93,8 +93,8 @@ uncertain event. OTA chunks are 80 bytes so even all-`FF` data fits the escaped
 ## Build
 
 ```powershell
-./scripts/build_android_app.ps1 -JdkPath 'C:/Program Files/Java/jdk-23' -Check
-./scripts/build_android_app.ps1 -JdkPath 'C:/Program Files/Java/jdk-23' -TargetPlatform android-x64
+./scripts/android/build_android_app.ps1 -JdkPath 'C:/Program Files/Java/jdk-23' -Check
+./scripts/android/build_android_app.ps1 -JdkPath 'C:/Program Files/Java/jdk-23' -TargetPlatform android-x64
 ```
 
 The helper resolves dependencies from the existing workspace cache offline and
@@ -133,7 +133,7 @@ The build/test transcript is `dist/android/master-build.log`.
 
 The original NFCP builders generate 21 golden frame fixtures, including cue 64,
 all 64 cue bits, escaped bytes, scripts, settings and OTA. Regenerate with
-`python scripts/export_master_android_goldens.py`. Tests cover firmware command
+`python scripts/android/export_master_android_goldens.py`. Tests cover firmware command
 allowlists, CRC and malformed-frame rejection, interlock and session gating,
 watchdog retries, disarm ACK handling, offset/CRC file validation, matching arm
 ACKs, fault NACKs, cancellation, uncertain uploads, no repeated FIRE/LOAD, script
@@ -158,7 +158,7 @@ original monitor files and configuration. Keep both backup folders. Current
 firmware is `usb-master-0.4.0`, network 1234, channel 90, with the existing switch
 and LED configuration preserved (both unconfigured).
 
-`scripts/probe_usb_master_status.py` passed PONG/identity/status, four discovery
+`scripts/diagnostics/probe_usb_master_status.py` passed PONG/identity/status, four discovery
 rounds, module INFO, RF keepalive telemetry, three-second host-session expiry,
 and heartbeat recovery. Field module `0xD96E30DD` replied as group 1 with 24 cues,
 firmware `0.2.0`, battery 7805 mV/2S. Its latest INFO script status was

@@ -5,7 +5,7 @@ Nightfire firmware. The current firmware entrypoint is `main/field_main.py`.
 
 ## nRF52840 Pro Micro Test Pinout
 
-Use `main/nrf_node_config_promicro_field.py` when testing the production-style
+Use `main/configs/field_promicro.py` when testing the production-style
 field-module circuit with an nRF52840 Pro Micro or nice!nano-compatible board.
 This profile uses the same 24-cue, no-4051 continuity method as the MS88SFA
 profile. MicroPython pin numbers are the native nRF GPIO numbers.
@@ -40,7 +40,7 @@ The unassigned bottom pads are `P1.01`, `P1.02`, and `P1.07`.
 Upload the field firmware with this pinout using:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\upload_field_module_to_com10.ps1 -Port COM10 -Pinout promicro
+powershell -ExecutionPolicy Bypass -File .\scripts\install\upload_field_module.ps1 -Port COM10 -Pinout promicro
 ```
 
 To return to the production module pinout, use `-Pinout ms88sfa`.
@@ -318,9 +318,9 @@ variant because clone boards can move bottom-pad signals.
 
 The nRF field-module firmware entrypoint is `main/field_main.py`. It supports
 24 cues with the active Pro Micro and MS88SFA field-module profiles.
-Use `main/nrf_node_config_promicro_field.py` for the Pro Micro test fixture,
-`main/nrf_node_config_current_bench.py` for the older SuperMini mux fixture,
-and `main/nrf_node_config_ms88sfa_field.py` for the proposed MS88SFA
+Use `main/configs/field_promicro.py` for the Pro Micro test fixture,
+`main/configs/field_supermini_bench.py` for the older SuperMini mux fixture,
+and `main/configs/field_ms88sfa.py` for the proposed MS88SFA
 field-module mapping. The older SuperMini bench fixture remains an 18-channel
 74HC4051 test setup; the Pro Micro and MS88SFA mappings do not use those muxes.
 All continuity testing is
@@ -331,6 +331,6 @@ low-current pre-test sequence: enable `PRE_TEST`, select exactly one cue through
 the 74HC595 output bank, read `SHORT_CHECK`, then immediately clear the output
 bank and disable `PRE_TEST`. The resistance calculation should be added only
 after the exact pre-test current path is measured and calibrated. The Pro Micro
-field fixture has that calibration in `main/nrf_node_config_promicro_field.py`;
+field fixture has that calibration in `main/configs/field_promicro.py`;
 production board profiles intentionally fall back to ADC millivolts until
 their own hardware is characterized.

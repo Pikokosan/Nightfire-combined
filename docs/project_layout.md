@@ -1,66 +1,120 @@
-# Nightfire Project Layout
+# Project layout
 
-This project is organized around the firmware that runs on each device, the tools
-used to upload or test that firmware, and generated output packages.
+Where every kind of file lives, and where new ones should go. For building and
+programming devices, see `docs/building_devices.md`.
 
-## Main Firmware
+## `main/`: code that runs on the boards
 
-- `main/master_main.py` - Touchscreen master controller firmware.
-- `main/nrf_dummy_main.py` - nRF52840 dummy module firmware used for bench and RF testing.
-- `main/field_main.py` - nRF52840 field module firmware.
-- `main/nrf_bridge_main.py` - nRF52840 USB-to-radio bridge firmware.
-- `main/nfcp.py` - Shared Nightfire command protocol.
-- `main/bridge_radio.py` - Local UART/USB framing between the master or app and the bridge; table-driven CRC16 and a bulk frame parser (`feed_bytes`, tested by `scripts/test_bridge_frame_parser.py`).
-- `main/module_ota.py` - Shared module OTA transfer helper.
-- `main/mesh.py` - Mesh radio layer v1 shared by modules and both bridges: frame header, duplicate cache, non-blocking send queue, and the bridge-side `MeshBridge`.
-- `main/module_link.py` - Shared module radio link: NFCP frames over mesh frames, relaying, duplicate suppression, replies, and the ping/info/settings/OTA commands.
-- `main/module_script.py` - Shared module script engine: time sync, upload, start/stop/heartbeat, step mode and scheduler.
-- `main/module_lcd.py` - Shared module 16x2 LCD menu and debounced buttons.
-- `scripts/mesh_sim.py` + `scripts/mesh_scenarios.py` - Multi-node radio simulator: runs the real bridge, field and dummy firmware on a shared virtual radio and clock to test mesh behaviour (coverage, latency, collisions, relay failure) on a PC.
-- `scripts/diagnostics/mesh_cpu_benchmark.py` - Times the real receive path on a module over the raw REPL and fits the simulator's CPU model (re-run after changing the receive path or MicroPython build).
-- `scripts/diagnostics/mesh_hw_smoke.py` - Hardware smoke test for mesh firmware: drives the USB bridge like the app (no ARM/FIRE) and checks a field module answers over the mesh.
-- `scripts/firmware_trace_harness.py` - Runs the field or dummy firmware on a PC against fake hardware and writes a behaviour trace; compare traces before and after a firmware change.
+A board stores its files in one flat folder, so `main/` is flat too. The
+install scripts pick the files each device needs and give some of them their
+on-board name (for example the entry point becomes `main.py`).
 
-## Design Notes
+**USB bridge** (dongle for the Android app)
+- `nrf_usb_monitor_main.py`: entry point (installed as `main.py`, or bundled
+  into `usb_master_bundle.mpy` by `scripts/build/build_usb_master_bundle.py`).
+- `usb_bridge_transport.py`: the `NFUSB1` USB line envelope.
+- `usb_monitor_nfcp.py`: which module commands the bridge passes on.
+- `usb_master_control.py`: live ARM/FIRE/script control and the RF keepalive.
+- `usb_master_maintenance.py`: radio maintenance (channel scan and so on).
+- `command_interface.py`: SAFE/ARM switch and status LEDs.
 
-- `docs/mesh_radio_design.md` - Draft design for the 2-hop self-healing mesh radio layer (branch `Mesh`).
+**Field module**
+- `field_main.py`: firmware; `field_boot.py` is the `main.py` that loads the
+  compiled bundle.
+- `field_measurement.py`, `adc_scaling.py`: continuity and battery measurement.
+- `shift_register74hc595.py`, `analog_mux74hc4051.py`: output and mux drivers.
+- `field_hardware_test.py`: stand-alone hardware test (no radio).
 
-## Device Configs
+**Dummy module**
+- `nrf_dummy_main.py`: firmware; `nrf_dummy_boot.py` is the `main.py` that
+  loads it.
 
-- `main/nrf_node_config_*.py` - Per-device nRF module configs.
-- `main/nrf_bridge_config_master.py` - Bridge config used by the master radio bridge.
+**Shared by the bridge and the modules**
+- `nfcp.py`: the Nightfire command protocol.
+- `mesh.py`: mesh radio layer (frame header, duplicate filter, send queue,
+  bridge route table).
+- `bridge_radio.py`: bridge frame format and CRC (USB and UART).
+- `module_link.py`, `module_script.py`, `module_lcd.py`, `module_ota.py`,
+  `nrf_module_common.py`: module radio link, script engine, LCD menu, file
+  updates, common helpers.
+- `lcd1602_i2c.py`: 16x2 I2C LCD driver.
+- `lcd_button_ui_test.py`: stand-alone LCD and button test.
 
-## Hardware Helpers
+**ESP32 master** (older touchscreen controller, see `docs/esp32_master.md`)
+- `master_main.py`, `nrf_bridge_main.py` (its UART radio bridge),
+  `display_driver.py`, `ch422g.py`, `sdcard_driver.py`, `adafruit_trellis.py`,
+  `trellis_hardware_test.py`.
 
-- `main/field_measurement.py` - Field module continuity and measurement helpers.
-- `main/adc_scaling.py` - ADC conversion helpers.
-- `main/analog_mux74hc4051.py` - Analog mux helper.
-- `main/shift_register74hc595.py` - Shift register helper.
-- `main/lcd1602_i2c.py` - 2x16 I2C LCD driver; writes only changed characters, one I2C transaction per row, so drawing barely interrupts the radio (tested by `scripts/test_lcd1602_driver.py`).
-- `main/adafruit_trellis.py` - Trellis button/LED helper for the master.
+`main/main.py` is a placeholder; each install script supplies the real one.
 
-## Upload And Build Tools
+## `main/configs/`: device configs
 
-- `scripts/upload_*.ps1` - Firmware upload tasks.
-- `scripts/build_*.ps1` - Build and package tasks.
-- `scripts/enter_*.py` - Bootloader entry helpers.
-- `scripts/raw_micropython_upload.py` - Raw REPL upload utility used by the upload scripts.
+Installed on a board as `nrf_node_config.py` (modules) or `nrf_bridge_config.py`
+(bridges).
 
-## Tests And Diagnostics
+| File | Device |
+|---|---|
+| `bridge_usb.py` | USB bridge for the app; defaults for a new bridge |
+| `bridge_esp32_master.py` | The ESP32 master's UART bridge |
+| `field_ms88sfa.py` | Field module, MS88SFA PCB |
+| `field_promicro.py` | Field module, Pro Micro nRF52840 test board |
+| `field_supermini_bench.py` | Older SuperMini 18-channel bench fixture |
+| `dummy_lcd.py` | Dummy with LCD and buttons |
+| `dummy_plain.py` | Dummy without LCD |
+| `lcd_ui_test.py` | LCD and button test app |
 
-- `scripts/test_*.py` - Repeatable protocol and hardware tests.
-- `scripts/diagnostics/` - Short-lived or focused debug probes.
+## `firmware/`
 
-## Generated Or Local-Only Folders
+- `nrf52840/`: the Nightfire MicroPython image (`.uf2` and `.hex`) for every
+  board, and `bootloader/` for the nice!nano UF2 bootloader.
+- `micropython/`: source for rebuilding the image: the `NICENANO` board
+  definition and the `nrf_radio` C module (radio, RSSI, LED driver). Built by
+  `scripts/build/build_nrf52840_micropython.ps1`.
 
-These folders are ignored by Git and can be regenerated or are local working
-copies:
+## `scripts/`
 
-- `build/`
-- `dist/`
-- `tools/`
-- `hardware/`
-- `.codex/`
+Run every script from the repository root. See `scripts/README.md` for the
+list.
 
-Do not move active upload scripts without also updating `.vscode/tasks.json` and
-the command examples in `README.md`.
+| Folder | Contents |
+|---|---|
+| `install/` | Put firmware on boards, change bridge LEDs |
+| `build/` | Bundles, update packages, MicroPython image |
+| `tests/` | Offline unit tests (`test_*.py`), no hardware |
+| `bench/` | Tests that drive real boards |
+| `diagnostics/` | Probes and one-off checks |
+| `sim/` | Mesh simulator, firmware trace harness, PC module emulator |
+| `android/` | App build, tablet emulator, icons |
+| `lib/` | Helpers the other scripts import |
+
+## `apps/nightfire_controller/`
+
+The Android controller app (Flutter). See its `README.md`.
+
+## `docs/`
+
+| File | About |
+|---|---|
+| `building_devices.md` | Step-by-step build and programming guide |
+| `bridge_status_leds.md` | Bridge LED types and settings |
+| `command_interface_wiring.md` | Bridge switch and LED wiring, USB status protocol |
+| `field_module_pinout.md`, `field_module_lcd.md` | Field-module pins, LCD and buttons |
+| `mesh_radio_design.md` | Mesh radio design and test results |
+| `android_command_module.md`, `android_master_port.md` | App design notes |
+| `script_workspace.md`, `ui_backlog.md` | App scripting and UI plans |
+| `esp32_master.md` | The older ESP32 touchscreen master |
+
+## Not in git
+
+`build/`, `dist/`, `tools/` and `hardware/` are local only. `dist/` holds
+generated packages and the `bridge_backup_*` folders the bridge installers
+write; delete old backups when you no longer need them.
+
+## Where new files go
+
+- New board code: `main/`. If a device needs it, add it to that device's
+  install script in `scripts/install/`.
+- A new kind of device config: `main/configs/`.
+- A test that needs no hardware: `scripts/tests/test_<thing>.py`. One that
+  needs boards: `scripts/bench/`.
+- When you move a script, update `.vscode/tasks.json` and the docs that name it.

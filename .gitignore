@@ -24,4 +24,4 @@ env/
 # OS noise
 Thumbs.db
 .DS_Store
-main/pc_virtual_modules.json
+scripts/sim/pc_virtual_modules.json
