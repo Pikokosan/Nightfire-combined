@@ -7,9 +7,8 @@ import '../controller/radio_session.dart';
 import '../controller/field_module.dart';
 import '../scripts/script_document.dart';
 import 'script_timeline.dart';
-import 'control_layout_preview.dart';
 import 'simulated_upload_panel.dart';
-import 'master_controls_panel.dart';
+import 'script_runner_panel.dart';
 
 class ScriptSource {
   const ScriptSource(this.filename, this.text);
@@ -124,7 +123,15 @@ class _ScriptsPanelState extends State<ScriptsPanel> {
   Widget build(BuildContext context) {
     final session = widget.session;
     final script = _script;
-    final busy = _loading || _checking || session?.busy == true;
+    final master = session?.master;
+    // Swapping scripts mid-run would orphan the running one: Stop it first.
+    final busy =
+        _loading ||
+        _checking ||
+        session?.busy == true ||
+        master?.running == true ||
+        master?.paused == true ||
+        master?.stepping == true;
     final report = script == null
         ? null
         : ScriptReport.check(
@@ -204,11 +211,8 @@ class _ScriptsPanelState extends State<ScriptsPanel> {
               ),
             ),
           ),
-        ControlLayoutPreview(
-          modules: session?.modules.values.toList() ?? const [],
-          radioReady: session?.ready == true,
-          onOpenModule: widget.onOpenModule,
-        ),
+        const SizedBox(height: 12),
+        ScriptRunnerPanel(session: session, script: script),
         ExpansionTile(
           key: const PageStorageKey('script-help'),
           tilePadding: EdgeInsets.zero,
@@ -222,7 +226,7 @@ class _ScriptsPanelState extends State<ScriptsPanel> {
             ),
             SizedBox(height: 8),
             Text(
-              'Import a CSV, check its module assignments, then use the live controller with supported master firmware.',
+              'Load a CSV, send it to the modules, arm, then Start. Pause stops every module and resumes after the last cue that fired. STOP ALL & DISARM ends the run and disarms everything.',
               style: TextStyle(color: Colors.amber),
             ),
           ],
@@ -298,13 +302,6 @@ class _ScriptsPanelState extends State<ScriptsPanel> {
             modules: session?.modules.values.toList() ?? const [],
             radioReady: session?.ready == true,
           ),
-          if (session != null)
-            MasterControlsPanel(
-              session: session,
-              script: script,
-              scriptsOnly: true,
-              onPickingFile: widget.onPickingScriptChanged,
-            ),
           ExpansionTile(
             key: PageStorageKey('script-timeline-${script.filename}'),
             title: const Text('Timeline preview'),

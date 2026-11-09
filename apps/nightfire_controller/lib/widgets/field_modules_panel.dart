@@ -7,6 +7,7 @@ import '../protocol/nfcp_codec.dart';
 import 'cue_tile.dart';
 import 'cue_status_summary.dart';
 import 'module_battery.dart';
+import 'maintenance_tools.dart';
 import 'module_settings.dart';
 
 class FieldModulesPanel extends StatefulWidget {
@@ -109,9 +110,8 @@ class _FieldModulesPanelState extends State<FieldModulesPanel> {
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               Text('Module ${module.id}'),
-              ModuleBattery(
-                millivolts: int.tryParse(module.info['Battery mV'] ?? ''),
-              ),
+              ModuleBatteryForInfo(info: module.info),
+              if (module.rssi case final rssi?) SignalStrength(rssi: rssi),
             ],
           ),
           const SizedBox(height: 4),
@@ -121,12 +121,25 @@ class _FieldModulesPanelState extends State<FieldModulesPanel> {
           ),
         ],
       );
-      final summary = CueStatusSummary(
-        notInScript: _notInScript([module]),
-        alignment: WrapAlignment.end,
-        readings: [
-          for (var index = 0; index < module.cueCount; index++)
-            _reading(module.uid, index),
+      final summary = Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ReplyLed(
+            key: ValueKey('reply-led-${module.uid}'),
+            flash: module.replyFlash,
+            failed: module.noReply,
+          ),
+          const SizedBox(width: 8),
+          Flexible(
+            child: CueStatusSummary(
+              notInScript: _notInScript([module]),
+              alignment: WrapAlignment.end,
+              readings: [
+                for (var index = 0; index < module.cueCount; index++)
+                  _reading(module.uid, index),
+              ],
+            ),
+          ),
         ],
       );
       if (constraints.maxWidth >= 620) {
@@ -310,7 +323,10 @@ class _FieldModulesPanelState extends State<FieldModulesPanel> {
             key: ValueKey('module-card-${module.uid}'),
             child: ExpansionTile(
               key: PageStorageKey('module-${module.uid}-$_focusRevision'),
-              initiallyExpanded: true,
+              // Collapsed until opened, except the module a script finding
+              // points at.
+              initiallyExpanded:
+                  _focus != null && module == visibleModules.first,
               onExpansionChanged: (expanded) {
                 if (expanded) {
                   setState(() {
@@ -327,7 +343,12 @@ class _FieldModulesPanelState extends State<FieldModulesPanel> {
                 _focus != null && module == visibleModules.first,
               ),
               children: [
+                // The tile saves its expanded state (a bool) in PageStorage
+                // under its own key path. Without a key of their own, the
+                // scrollables inside (the group field's editor) would share
+                // that path and read the bool back as a scroll offset.
                 Padding(
+                  key: PageStorageKey('module-body-${module.uid}'),
                   padding: const EdgeInsets.all(16),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -355,13 +376,19 @@ class _FieldModulesPanelState extends State<FieldModulesPanel> {
                         }),
                       ),
                       const SizedBox(height: 16),
-                      if (_settingsTabs[module.uid] == true)
+                      if (_settingsTabs[module.uid] == true) ...[
                         ModuleSettings(
                           key: ValueKey('settings-${module.uid}'),
                           module: module,
                           session: session,
-                        )
-                      else ...[
+                        ),
+                        const Divider(height: 32),
+                        ModuleMaintenance(
+                          key: ValueKey('maintenance-${module.uid}'),
+                          session: session,
+                          module: module,
+                        ),
+                      ] else ...[
                         Wrap(
                           spacing: 12,
                           runSpacing: 8,
@@ -485,6 +512,92 @@ class _FieldModulesPanelState extends State<FieldModulesPanel> {
               ],
             ),
           ),
+      ],
+    );
+  }
+}
+
+/// A small status LED that lights green when [flash] changes (an
+/// automatic continuity reply arrived) and fades back to dark. It stays red
+/// while [failed] (the last check got no reply).
+class ReplyLed extends StatefulWidget {
+  const ReplyLed({super.key, required this.flash, this.failed = false});
+  final int flash;
+  final bool failed;
+
+  @override
+  State<ReplyLed> createState() => _ReplyLedState();
+}
+
+class _ReplyLedState extends State<ReplyLed>
+    with SingleTickerProviderStateMixin {
+  static const lit = Color(0xFF4CE65A);
+  static const red = Color(0xFFFF4D4D);
+  late final _fade = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1500),
+    value: 1,
+  );
+
+  @override
+  void didUpdateWidget(ReplyLed old) {
+    super.didUpdateWidget(old);
+    if (widget.flash != old.flash) _fade.forward(from: 0);
+  }
+
+  @override
+  void dispose() {
+    _fade.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: _fade,
+    builder: (context, _) {
+      final dark = Theme.of(context).colorScheme.outlineVariant;
+      final failed = widget.failed;
+      final glow = failed ? 1.0 : 1 - Curves.easeIn.transform(_fade.value);
+      final on = failed ? red : lit;
+      return Container(
+        width: 10,
+        height: 10,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: Color.lerp(dark, on, glow),
+          boxShadow: [
+            if (glow > 0)
+              BoxShadow(
+                color: on.withValues(alpha: 0.6 * glow),
+                blurRadius: 6,
+                spreadRadius: 1,
+              ),
+          ],
+        ),
+      );
+    },
+  );
+}
+
+/// The module's last received signal strength, next to its battery.
+class SignalStrength extends StatelessWidget {
+  const SignalStrength({super.key, required this.rssi});
+  final int rssi;
+
+  @override
+  Widget build(BuildContext context) {
+    // nRF52840 at 1 Mbps: about -94 dBm sensitivity. Leave a fade margin.
+    final color = rssi >= -70
+        ? Colors.lightGreen
+        : rssi >= -85
+        ? Colors.amber
+        : Colors.redAccent;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(Icons.signal_cellular_alt, size: 18, color: color),
+        const SizedBox(width: 4),
+        Text('$rssi dBm', style: TextStyle(color: color)),
       ],
     );
   }

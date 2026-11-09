@@ -125,8 +125,8 @@ void main() {
           ),
         ),
       );
+      // Module cards start collapsed.
       await tester.ensureVisible(find.text('Module 0x00000001'));
-      await tester.tap(find.text('Module 0x00000001'));
       await tester.pumpAndSettle();
       final card = find.byKey(const ValueKey('module-card-1'));
       expect(

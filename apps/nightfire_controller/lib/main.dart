@@ -14,17 +14,25 @@ import 'widgets/controller_navigation.dart';
 import 'widgets/scripts_panel.dart';
 import 'scripts/script_document.dart';
 import 'controller/field_module.dart';
-import 'widgets/master_controls_panel.dart';
+import 'widgets/maintenance_tools.dart';
+import 'widgets/mesh_panel.dart';
 import 'widgets/manual_fire_panel.dart';
 import 'widgets/firmware_panel.dart';
+import 'widgets/settings_panel.dart';
+import 'settings/battery_settings.dart';
 
 /// Index of the Radio tab in [ControllerNavigation.destinations].
 const kRadioSection = 3;
 
-void main() => runApp(const NightfireApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final batterySettings = await BatterySettings.load();
+  runApp(NightfireApp(batterySettings: batterySettings));
+}
 
 class NightfireApp extends StatelessWidget {
-  const NightfireApp({super.key});
+  const NightfireApp({super.key, this.batterySettings});
+  final BatterySettings? batterySettings;
   @override
   Widget build(BuildContext context) => MaterialApp(
     title: 'Nightfire',
@@ -36,6 +44,10 @@ class NightfireApp extends StatelessWidget {
       useMaterial3: true,
     ),
     home: const RadioPage(),
+    builder: (context, child) => BatterySettingsScope(
+      settings: batterySettings ?? BatterySettings(),
+      child: child!,
+    ),
   );
 }
 
@@ -303,6 +315,7 @@ class _RadioPageState extends State<RadioPage> with WidgetsBindingObserver {
                     ),
                 ],
               ),
+              RadioMaintenance(session: session),
             ],
           ],
         ),
@@ -352,7 +365,7 @@ class _RadioPageState extends State<RadioPage> with WidgetsBindingObserver {
                   const SizedBox(height: 4),
                   Text(
                     session?.master.supported == true
-                        ? 'Arm acknowledgements apply to this USB session. STOP / DISARM ALL is available in Modules, Fire and Scripts.'
+                        ? 'Arm acknowledgements apply to this USB session. STOP / DISARM ALL is available in Fire and Scripts.'
                         : 'Remote arm state is unconfirmed. Arming and firing remain disabled.',
                   ),
                 ],
@@ -383,7 +396,8 @@ class _RadioPageState extends State<RadioPage> with WidgetsBindingObserver {
                               ),
                               const SizedBox(height: 8),
                               FilledButton.icon(
-                                onPressed: () => setState(() => _section = kRadioSection),
+                                onPressed: () =>
+                                    setState(() => _section = kRadioSection),
                                 icon: const Icon(Icons.usb),
                                 label: const Text('Open radio connection'),
                               ),
@@ -395,10 +409,6 @@ class _RadioPageState extends State<RadioPage> with WidgetsBindingObserver {
                     if (session != null) ...[
                       const SizedBox(height: 16),
                       Text(session.status),
-                      MasterControlsPanel(
-                        session: session,
-                        onPickingFile: _pickingScriptChanged,
-                      ),
                       FieldModulesPanel(
                         session: session,
                         script: _loadedScript,
@@ -426,7 +436,8 @@ class _RadioPageState extends State<RadioPage> with WidgetsBindingObserver {
                       session: session,
                       pickScript: widget.pickScript,
                       onPickingScriptChanged: _pickingScriptChanged,
-                      onOpenRadio: () => setState(() => _section = kRadioSection),
+                      onOpenRadio: () =>
+                          setState(() => _section = kRadioSection),
                       onScriptChanged: (script) =>
                           setState(() => _loadedScript = script),
                       onOpenModule: (focus) => setState(() {
@@ -470,6 +481,17 @@ class _RadioPageState extends State<RadioPage> with WidgetsBindingObserver {
                       )
                     else
                       const Text('Connect the radio in Radio first.'),
+                  ]),
+                  _page('mesh', [MeshPanel(session: session)]),
+                  _page('settings', [
+                    Text(
+                      'Settings',
+                      style: Theme.of(context).textTheme.headlineLarge,
+                    ),
+                    const SizedBox(height: 8),
+                    const Text('Saved on this device'),
+                    const SizedBox(height: 16),
+                    SettingsPanel(session: session),
                   ]),
                 ],
               ),

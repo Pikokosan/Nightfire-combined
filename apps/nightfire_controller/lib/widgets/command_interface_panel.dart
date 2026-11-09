@@ -46,7 +46,7 @@ class CommandInterfacePanel extends StatelessWidget {
                 ),
               Text(
                 session.master.supported
-                    ? 'Live controls are in Modules and Scripts. ${session.master.armSummary}'
+                    ? 'Live controls are in Fire and Scripts. ${session.master.armSummary}'
                     : 'Arming and firing are disabled in this interface stage.',
               ),
             ],

@@ -27,6 +27,8 @@ class ControllerNavigation extends StatelessWidget {
       Icons.settings_input_component,
     ),
     ('Firmware', Icons.system_update_outlined, Icons.system_update),
+    ('Mesh', Icons.hub_outlined, Icons.hub),
+    ('Settings', Icons.settings_outlined, Icons.settings),
   ];
 
   @override

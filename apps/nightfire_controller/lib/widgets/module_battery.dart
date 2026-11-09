@@ -1,11 +1,25 @@
 import 'package:flutter/material.dart';
 
+import '../settings/battery_settings.dart';
+
 class ModuleBattery extends StatelessWidget {
-  const ModuleBattery({super.key, required this.millivolts});
+  const ModuleBattery({
+    super.key,
+    required this.millivolts,
+    this.packType = kDefaultPackType,
+    this.calibrated = false,
+  });
+
   final int? millivolts;
+  final String packType;
+  final bool calibrated;
+
+  int get _cells => cellCount(packType) ?? 2;
+  int get emptyMv => _cells * kEmptyCellMv;
+  int get fullMv => _cells * kFullCellMv;
   double? get level => millivolts == null || millivolts! <= 0
       ? null
-      : ((millivolts! - 6400) / 2000).clamp(0.0, 1.0);
+      : ((millivolts! - emptyMv) / (fullMv - emptyMv)).clamp(0.0, 1.0);
   int? get percent => level == null ? null : (level! * 100).round();
 
   @override
@@ -20,7 +34,9 @@ class ModuleBattery extends StatelessWidget {
         : Colors.lightGreen;
     final label = value == null
         ? 'Battery voltage unavailable'
-        : 'Battery ${(millivolts! / 1000).toStringAsFixed(2)} V • $percent% voltage estimate • 6.4–8.4 V scale';
+        : 'Battery ${(millivolts! / 1000).toStringAsFixed(2)} V • $percent% voltage estimate • '
+              '$packType ${(emptyMv / 1000).toStringAsFixed(1)}–${(fullMv / 1000).toStringAsFixed(1)} V scale'
+              '${calibrated ? ' • calibrated' : ''}';
     return Semantics(
       label: label,
       excludeSemantics: true,
@@ -57,12 +73,31 @@ class ModuleBattery extends StatelessWidget {
               ),
             const SizedBox(width: 6),
             Text(
-              value == null ? '—' : '$percent%',
+              value == null
+                  ? '—'
+                  : '$percent% • ${(millivolts! / 1000).toStringAsFixed(2)} V',
               style: TextStyle(color: color, fontSize: 14),
             ),
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Battery indicator for a module's INFO fields, using the app's battery
+/// settings for that module's firmware target.
+class ModuleBatteryForInfo extends StatelessWidget {
+  const ModuleBatteryForInfo({super.key, required this.info});
+  final Map<String, String> info;
+
+  @override
+  Widget build(BuildContext context) {
+    final reading = BatterySettingsScope.of(context).read(info);
+    return ModuleBattery(
+      millivolts: reading.millivolts,
+      packType: reading.packType,
+      calibrated: reading.calibrated,
     );
   }
 }

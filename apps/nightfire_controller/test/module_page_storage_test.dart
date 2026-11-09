@@ -6,6 +6,8 @@ import 'package:nightfire_controller/widgets/field_modules_panel.dart';
 
 import 'module_diagnostics_test.dart' show FieldRadio;
 
+import 'module_test_helpers.dart';
+
 void main() {
   testWidgets(
     'Scrolling and switching module tabs keeps expansion state separate from scroll offsets',
@@ -31,6 +33,7 @@ void main() {
           ),
         ),
       );
+      await openModules(tester);
       await tester.drag(find.byType(ListView), const Offset(0, -350));
       await tester.pumpAndSettle();
       expect(

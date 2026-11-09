@@ -33,13 +33,26 @@ class FieldModule {
   ModuleRoute? route;
   int? relay;
 
+  /// Delivered requests by the route the reply took, and failed ones (mesh
+  /// bridges only). Shown on the Mesh page.
+  final routeCounts = <ModuleRoute, int>{};
+  int failedDeliveries = 0;
+
+  /// The last delivery: attempts used, when it ended, and whether it failed.
+  int? attempts;
+  DateTime? routeAt;
+  bool lastDeliveryFailed = false;
+
   /// "Direct", "Via 0x…", or "Flooded", once known.
   String? get routeText => switch (route) {
     ModuleRoute.direct => 'Direct',
     ModuleRoute.relayed =>
       'Via 0x${(relay ?? 0).toRadixString(16).padLeft(8, '0').toUpperCase()}',
     ModuleRoute.flooded => 'Flooded',
-    null => hops == null ? null : (hops == 0 ? 'Direct' : '$hops hop${hops == 1 ? '' : 's'}'),
+    null =>
+      hops == null
+          ? null
+          : (hops == 0 ? 'Direct' : '$hops hop${hops == 1 ? '' : 's'}'),
   };
   Map<String, String> info = {};
   int? get scriptId {
@@ -56,4 +69,12 @@ class FieldModule {
   DateTime? outputStatusAt;
   DateTime? measuredAt;
   String? error;
+
+  /// Bumped when an automatic continuity reply arrives; the module card
+  /// flashes green on each change.
+  int replyFlash = 0;
+
+  /// The last continuity check got no reply; its light shows red until a
+  /// check succeeds.
+  bool noReply = false;
 }

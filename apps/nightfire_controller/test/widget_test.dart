@@ -9,6 +9,8 @@ import 'package:nightfire_controller/widgets/controller_navigation.dart';
 
 import 'module_diagnostics_test.dart' show FieldRadio;
 
+import 'module_test_helpers.dart';
+
 void main() {
   testWidgets(
     'Dashboard searches modules and filters cues without renumbering',
@@ -31,6 +33,7 @@ void main() {
           ),
         ),
       );
+      await openModules(tester);
       expect(find.text('2 modules • 6 cues'), findsOneWidget);
       expect(find.text('2 Unmeasured'), findsNWidgets(2));
       expect(
@@ -97,8 +100,12 @@ void main() {
           ),
         ),
       );
+      await openModules(tester);
       expect(find.text('Cue 64 • Connected'), findsOneWidget);
-      expect(find.textContaining('Group 1 • Script: Not loaded'), findsOneWidget);
+      expect(
+        find.textContaining('Group 1 • Script: Not loaded'),
+        findsOneWidget,
+      );
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
       session.dispose();
@@ -171,6 +178,7 @@ void main() {
         ),
       ),
     );
+    await openModules(tester);
     await tester.ensureVisible(
       find.widgetWithText(ChoiceChip, 'Short / invalid'),
     );

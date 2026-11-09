@@ -212,9 +212,7 @@ class _GroupCueOverviewState extends State<GroupCueOverview>
                 'Module ${module.id}',
                 style: Theme.of(context).textTheme.titleMedium,
               ),
-              ModuleBattery(
-                millivolts: int.tryParse(module.info['Battery mV'] ?? ''),
-              ),
+              ModuleBatteryForInfo(info: module.info),
             ],
           ),
           Text(

@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../protocol/bridge_codec.dart';
 import '../protocol/nfcp_codec.dart';
@@ -38,6 +40,7 @@ class RadioSession extends ChangeNotifier {
         notifyListeners();
       },
     );
+    unawaited(_loadPreferences());
   }
   final RadioTransport transport;
   late final MasterController master = MasterController(this);
@@ -78,6 +81,43 @@ class RadioSession extends ChangeNotifier {
   int _sequence = 0;
   bool busy = false;
   String? continuityProgress;
+
+  /// After discovery, each heartbeat checks the continuity of one random
+  /// discovered module while nothing is armed, running or busy. Saved on
+  /// this device (Settings tab).
+  static const autoContinuityKey = 'auto_continuity_v1';
+  bool _autoContinuity = true;
+  bool get autoContinuity => _autoContinuity;
+  set autoContinuity(bool enabled) {
+    if (_autoContinuity == enabled) return;
+    _autoContinuity = enabled;
+    notifyListeners();
+    unawaited(_savePreferences());
+  }
+
+  Future<void> _loadPreferences() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getBool(autoContinuityKey);
+      if (saved != null && !_disposed && saved != _autoContinuity) {
+        _autoContinuity = saved;
+        notifyListeners();
+      }
+    } catch (_) {
+      // No storage (tests): keep the default.
+    }
+  }
+
+  Future<void> _savePreferences() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(autoContinuityKey, _autoContinuity);
+    } catch (_) {}
+  }
+
+  Future<void>? _autoCheck;
+  final _random = math.Random();
+  bool get autoContinuityRunning => _autoCheck != null;
   bool ready = false;
   String status = 'Connect the radio using a USB data cable.';
   Map<String, String> values = {};
@@ -271,9 +311,21 @@ class RadioSession extends ChangeNotifier {
           ).then((answer) {
             final delivery = Delivery.parse(answer.payload);
             final module = modules[uid];
-            if (delivery != null && delivery.delivered && module != null) {
-              module.route = delivery.route;
-              module.relay = delivery.relay;
+            if (delivery != null && module != null) {
+              module.attempts = delivery.attempts;
+              module.routeAt = DateTime.now();
+              module.lastDeliveryFailed = !delivery.delivered;
+              if (delivery.delivered) {
+                module.route = delivery.route;
+                module.relay = delivery.relay;
+                module.routeCounts.update(
+                  delivery.route,
+                  (count) => count + 1,
+                  ifAbsent: () => 1,
+                );
+              } else {
+                module.failedDeliveries++;
+              }
             }
             if (delivery != null && !delivery.delivered) {
               throw TimeoutException(
@@ -305,8 +357,9 @@ class RadioSession extends ChangeNotifier {
 
   Future<void> discoverModules() async {
     if (busy || !canQueryModules) return;
-    final epoch = _epoch;
     busy = true;
+    await waitForAutoContinuity();
+    final epoch = _epoch;
     for (final module in modules.values) {
       module.seenInScan = false;
     }
@@ -363,8 +416,9 @@ class RadioSession extends ChangeNotifier {
         'Group $group is already assigned to another discovered module.',
       );
     }
-    final epoch = _epoch;
     busy = true;
+    await waitForAutoContinuity();
+    final epoch = _epoch;
     module.error = null;
     status = 'Saving group $group on ${module.id}…';
     notifyListeners();
@@ -431,10 +485,10 @@ class RadioSession extends ChangeNotifier {
   Future<void> readModule(int uid, {bool resistance = false}) async {
     final module = modules[uid];
     if (busy || !canQueryModules || module == null) return;
-    final epoch = _epoch;
     busy = true;
     try {
-      await _readModule(uid, epoch, resistance: resistance);
+      await waitForAutoContinuity();
+      await _readModule(uid, _epoch, resistance: resistance);
     } finally {
       busy = false;
       notifyListeners();
@@ -443,11 +497,12 @@ class RadioSession extends ChangeNotifier {
 
   Future<void> checkAllContinuity() async {
     if (busy || !canQueryModules || modules.isEmpty) return;
+    busy = true;
+    await waitForAutoContinuity();
     final epoch = _epoch;
     final uids = modules.keys.toList()..sort();
     var updated = 0;
     var failed = 0;
-    busy = true;
     try {
       for (var index = 0; index < uids.length; index++) {
         if (epoch != _epoch || !canQueryModules) return;
@@ -505,6 +560,7 @@ class RadioSession extends ChangeNotifier {
             ? ResistanceSnapshot.parseContinuity(reply.data, module.cueCount)
             : ResistanceSnapshot.parse(reply.data, module.cueCount);
         module.measuredAt = DateTime.now();
+        module.noReply = false;
       } else {
         module.info = moduleInfo(reply.data);
       }
@@ -515,6 +571,7 @@ class RadioSession extends ChangeNotifier {
       if (epoch == _epoch) {
         module.error = '$error';
         status = '$error';
+        if (resistance && error is TimeoutException) module.noReply = true;
       }
       return false;
     } finally {
@@ -612,15 +669,12 @@ class RadioSession extends ChangeNotifier {
         await master.emergencyStop();
       }
       if (interfaceStatus!.supportsMasterHeartbeat) {
-        final keepalive = await _request(
-          0x19,
-          const [],
-          heartbeatReplyTimeout,
-        );
+        final keepalive = await _request(0x19, const [], heartbeatReplyTimeout);
         if (epoch != _epoch) return;
         masterHeartbeatStatus = MasterHeartbeatStatus.parse(keepalive.payload);
       }
       notifyListeners();
+      _startAutoContinuity();
     } on TimeoutException catch (error) {
       if (epoch != _epoch) return;
       heartbeatMisses++;
@@ -633,6 +687,55 @@ class RadioSession extends ChangeNotifier {
       await _heartbeatLost(epoch, error);
     } finally {
       _heartbeatInFlight = false;
+    }
+  }
+
+  /// Completes once no automatic continuity check is in flight.
+  Future<void> waitForAutoContinuity() async {
+    while (_autoCheck != null) {
+      await _autoCheck;
+    }
+  }
+
+  void _startAutoContinuity() {
+    if (!autoContinuity ||
+        _autoCheck != null ||
+        busy ||
+        !canQueryModules ||
+        master.stopping ||
+        _discoverNonce != null ||
+        // The operator is about to arm: keep the radio free for it.
+        interfaceStatus?.switchPosition == 2) {
+      return;
+    }
+    final candidates = modules.values
+        .where((module) => module.seenInScan)
+        .toList();
+    if (candidates.isEmpty) return;
+    final module = candidates[_random.nextInt(candidates.length)];
+    final check = _autoContinuityCheck(module, _epoch);
+    _autoCheck = check;
+    check.whenComplete(() {
+      if (identical(_autoCheck, check)) _autoCheck = null;
+    });
+  }
+
+  Future<void> _autoContinuityCheck(FieldModule module, int epoch) async {
+    try {
+      final reply = await _queryModule(module.uid, 0x24, 0x25);
+      if (epoch != _epoch) return;
+      module.resistance = ResistanceSnapshot.parse(reply.data, module.cueCount);
+      module.measuredAt = DateTime.now();
+      module.error = null;
+      module.noReply = false;
+      module.replyFlash++;
+    } catch (error) {
+      if (epoch == _epoch && !master.stopping) {
+        module.error = 'Automatic continuity check: $error';
+        if (error is TimeoutException) module.noReply = true;
+      }
+    } finally {
+      notifyListeners();
     }
   }
 

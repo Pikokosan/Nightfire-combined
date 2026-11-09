@@ -15,6 +15,17 @@ class MasterController {
   bool interrupted = false;
   bool stopping = false;
   int stepIndex = 0;
+
+  /// Script time a paused run resumes from; null unless paused.
+  int? pausedAtMs;
+
+  /// Events a pause found unfired before its resume point; they are skipped.
+  int skippedOnPause = 0;
+
+  /// True once a run fired its last event and was confirmed.
+  bool completed = false;
+  int _runOffsetMs = 0;
+  bool get paused => pausedAtMs != null;
   String status = 'Master bridge firmware is required for live controls.';
   Timer? _scriptTimer;
   final Stopwatch _clock = Stopwatch()..start();
@@ -39,6 +50,7 @@ class MasterController {
       if (lastFire?.uid == uid) lastFire = null;
     }
   }
+
   int get ticks => _clock.elapsedMilliseconds & 0x3fffffff;
   int get elapsedMs => running ? _clock.elapsedMilliseconds - _startMs : 0;
   bool get supported =>
@@ -59,6 +71,8 @@ class MasterController {
     scriptId = null;
     running = false;
     stepping = false;
+    pausedAtMs = null;
+    completed = false;
     interrupted = true;
     status = 'Session ended. Remote arm state is unknown.';
   }
@@ -77,12 +91,15 @@ class MasterController {
     if (!supported || session.busy || stopping || (interrupted && !recovery)) {
       return false;
     }
+    session.busy = true;
     final epoch = session._epoch;
     if (recovery) interrupted = false;
-    session.busy = true;
     status = '$label…';
     session.notifyListeners();
     try {
+      // A background continuity check may hold the module reply slot.
+      await session.waitForAutoContinuity();
+      _check(epoch);
       await body(epoch);
       _check(epoch);
       status = '$label complete';
@@ -245,7 +262,10 @@ class MasterController {
   });
 
   /// Disarms every known module with a per-module acknowledgement.
-  Future<bool> disarmAll() => _operation('Disarm all modules', (epoch) async {
+  Future<bool> disarmAll() =>
+      _operation('Disarm all modules', _disarmEverything, recovery: true);
+
+  Future<void> _disarmEverything(int epoch) async {
     final targets = {
       ...armed,
       ...session.modules.values.where((m) => m.seenInScan).map((m) => m.uid),
@@ -257,7 +277,24 @@ class MasterController {
       await _broadcast(0x11, epoch);
     }
     await _forEachModule(targets, epoch, 'DISARM', _disarmOne);
-  }, recovery: true);
+  }
+
+  /// A finished run leaves no module armed: every module is disarmed and
+  /// each one confirms it, as Disarm does.
+  Future<void> _finishRun() async {
+    _scriptTimer?.cancel();
+    _scriptTimer = null;
+    running = false;
+    pausedAtMs = null;
+    completed = true;
+    if (await disarmAll()) {
+      status = 'Script complete; all modules disarmed';
+    } else {
+      await emergencyStop();
+      status = 'Script complete; DISARM not confirmed for every module. Press Disarm.';
+    }
+    session.notifyListeners();
+  }
 
   /// Stop/disarm interrupts uploads, queries and pending actuation immediately.
   /// Broadcast acceptance is never presented as a remote acknowledgement.
@@ -273,6 +310,7 @@ class MasterController {
     _scriptTimer?.cancel();
     running = false;
     stepping = false;
+    pausedAtMs = null;
     armed.clear();
     _clearFired();
     final pending = session._modulePending;
@@ -299,6 +337,21 @@ class MasterController {
         : 'STOP/DISARM transmission incomplete: $failure';
     stopping = false;
     session.notifyListeners();
+  }
+
+  /// Arms only the modules that hold the uploaded script.
+  Future<bool> armScriptModules() =>
+      _operation('Arm script modules', (epoch) async {
+        if (uploaded.isEmpty) {
+          throw StateError('Send the script to modules first');
+        }
+        await _forEachModule(uploaded.keys, epoch, 'ARM', _armOne);
+      });
+
+  /// Operator STOP ALL followed by a confirmed per-module disarm.
+  Future<bool> stopAllAndDisarm() async {
+    await emergencyStop();
+    return disarmAll();
   }
 
   Future<bool> disarmModule(int uid) => _operation(
@@ -440,6 +493,13 @@ class MasterController {
         session.modules[uid]!.resistance = null;
       });
 
+  /// Lead time before a synchronized start: a base plus a share per module.
+  int startLeadMs = 2000;
+  int startLeadPerModuleMs = 4000;
+
+  /// Whole-module upload attempts (each restarts with CLEAR).
+  static const uploadAttempts = 3;
+
   Future<bool> uploadScript(
     ScriptDocument script,
   ) => _operation('Upload script', (epoch) async {
@@ -472,36 +532,57 @@ class MasterController {
     uploaded.clear();
     _scriptStartSequence.clear();
     document = null;
+    pausedAtMs = null;
+    completed = false;
     scriptId = (ticks % 65535) + 1;
     try {
       for (final module in plan.entries) {
         final entries =
             module.value.entries.map((e) => (e.key, e.value)).toList()
               ..sort((a, b) => a.$1.compareTo(b.$1));
-        await _ack(module.key, 0x70, epoch, bigEndian(scriptId!, 2));
-        for (var offset = 0; offset < entries.length; offset += 3) {
-          final end = (offset + 3).clamp(0, entries.length);
-          // The field appends LOAD chunks without deduplication: never retry.
-          await _ack(
-            module.key,
-            0x71,
-            epoch,
-            [],
-            scriptChunk(
-              module.key,
-              scriptId!,
-              offset ~/ 3,
-              entries.sublist(offset, end),
-            ),
-          );
-          status =
-              'Upload ${session.modules[module.key]!.id}: $end/${entries.length}';
-          session.notifyListeners();
+        late Map<String, String> info;
+        for (var attempt = 1; ; attempt++) {
+          try {
+            // CLEAR empties the module's list, so a lost reply restarts the
+            // whole module from here. A LOAD chunk is never resent on its
+            // own: the field appends chunks without deduplication.
+            await _ack(module.key, 0x70, epoch, bigEndian(scriptId!, 2));
+            await Future<void>.delayed(updateSettle);
+            for (var offset = 0; offset < entries.length; offset += 3) {
+              final end = (offset + 3).clamp(0, entries.length);
+              await _ack(
+                module.key,
+                0x71,
+                epoch,
+                [],
+                scriptChunk(
+                  module.key,
+                  scriptId!,
+                  offset ~/ 3,
+                  entries.sublist(offset, end),
+                ),
+              );
+              // Let the field finish repeating its ACK before the next frame.
+              await Future<void>.delayed(updateSettle);
+              status =
+                  'Upload ${session.modules[module.key]!.id}: $end/${entries.length}';
+              session.notifyListeners();
+            }
+            info = moduleInfo(
+              (await session._queryModule(module.key, 0x52, 0x53)).data,
+            );
+            break;
+          } on TimeoutException {
+            _check(epoch);
+            if (attempt >= uploadAttempts) rethrow;
+            status =
+                'Upload ${session.modules[module.key]!.id}: reply lost, '
+                'restarting (try ${attempt + 1}/$uploadAttempts)';
+            session.notifyListeners();
+            await Future<void>.delayed(updateSettle);
+          }
         }
         uploaded[module.key] = entries;
-        final info = moduleInfo(
-          (await session._queryModule(module.key, 0x52, 0x53)).data,
-        );
         _check(epoch);
         final reported = info['Script'] ?? '';
         final idText = scriptId!.toRadixString(16).padLeft(4, '0');
@@ -528,6 +609,8 @@ class MasterController {
     final targets = uploaded.keys.toList();
     document = null;
     uploaded.clear();
+    pausedAtMs = null;
+    completed = false;
     for (final uid in targets) {
       await _ack(uid, 0x70, epoch, [0, 0]);
     }
@@ -550,15 +633,18 @@ class MasterController {
           throw StateError('Upload and arm every script module first');
         }
         stepIndex = eventTimes.indexWhere((time) => time >= offsetMs);
+        completed = false;
         if (step) {
+          pausedAtMs = null;
           stepping = true;
           return;
         }
+        _runOffsetMs = offsetMs;
         for (var i = 0; i < 3; i++) {
           await _broadcast(0x75, epoch, bigEndian(ticks, 4));
         }
         // All modules receive one shared absolute start, allowing ACK latency.
-        final delay = 2000 + uploaded.length * 4000;
+        final delay = startLeadMs + uploaded.length * startLeadPerModuleMs;
         if (delay > 60000) {
           throw StateError('Too many modules for a synchronized start');
         }
@@ -590,6 +676,8 @@ class MasterController {
               throw StateError('Field module did not confirm script start');
             }
           }
+          pausedAtMs = null;
+          skippedOnPause = 0;
         } catch (_) {
           await emergencyStop();
           rethrow;
@@ -607,19 +695,23 @@ class MasterController {
       if (elapsedMs > eventTimes.last + 1000) {
         for (final module in uploaded.entries) {
           final output = await _outputStatus(module.key, epoch);
+          // A run started at an offset only fires the events from there on.
+          final remaining = module.value
+              .where((entry) => entry.$1 >= _runOffsetMs)
+              .length;
           final expected =
               ((_scriptStartSequence[module.key] ?? output.fireSequence) +
-                  module.value.length) &
+                  remaining) &
               0xffffffff;
           if (output.fireSequence != expected ||
-              output.lastFireMask != module.value.last.$2) {
+              (remaining > 0 && output.lastFireMask != module.value.last.$2)) {
             throw StateError(
               '${session.modules[module.key]!.id} did not confirm every script output',
             );
           }
         }
-        await emergencyStop();
-        status = 'Script outputs confirmed; STOP/DISARM sent';
+        await _finishRun();
+        return;
       }
       session.notifyListeners();
     } catch (error) {
@@ -631,6 +723,93 @@ class MasterController {
       _heartbeatBusy = false;
     }
   }
+
+  /// Stops every script module's scheduler while leaving it armed: STOP is
+  /// broadcast first so all modules halt together, then each one confirms.
+  Future<void> _haltScript(int epoch) async {
+    _scriptTimer?.cancel();
+    _scriptTimer = null;
+    while (_heartbeatBusy) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    try {
+      final stop = bigEndian(scriptId!, 2);
+      for (var i = 0; i < 3; i++) {
+        await _broadcast(0x73, epoch, stop);
+      }
+      for (final uid in uploaded.keys) {
+        await _ack(uid, 0x73, epoch, stop);
+      }
+    } catch (_) {
+      await emergencyStop();
+      rethrow;
+    }
+  }
+
+  /// Pauses a timed run. Each module's fire counter says exactly which events
+  /// it fired, so the resume point always lies after every fired event: a
+  /// resumed run never fires an event twice.
+  Future<bool> pauseScript() => _operation('Pause script', (epoch) async {
+    if (!running) throw StateError('No script is running');
+    await _haltScript(epoch);
+    final stoppedAt = elapsedMs;
+    running = false;
+    var after = _runOffsetMs; // resume no earlier than this
+    var before = 1 << 31; // nor later than the first unfired event
+    final unfired = <int>[];
+    try {
+      for (final module in uploaded.entries) {
+        final output = await _outputStatus(module.key, epoch);
+        final events = module.value;
+        var first = events.indexWhere((entry) => entry.$1 >= _runOffsetMs);
+        if (first < 0) first = events.length;
+        final fired =
+            (output.fireSequence -
+                (_scriptStartSequence[module.key] ?? output.fireSequence)) &
+            0xffffffff;
+        final next = first + fired;
+        if (next > events.length) {
+          throw StateError(
+            '${session.modules[module.key]!.id} reported more outputs than scheduled',
+          );
+        }
+        if (next > first) after = math.max(after, events[next - 1].$1 + 1);
+        if (next < events.length) before = math.min(before, events[next].$1);
+        unfired.addAll(events.skip(next).map((entry) => entry.$1));
+      }
+    } catch (_) {
+      await emergencyStop();
+      rethrow;
+    }
+    final resume = after <= before ? stoppedAt.clamp(after, before) : after;
+    skippedOnPause = unfired.where((time) => time < resume).length;
+    if (unfired.every((time) => time < resume)) {
+      // Nothing left to resume: the run is over, so disarm as on completion.
+      completed = true;
+      pausedAtMs = null;
+      try {
+        await _disarmEverything(epoch);
+      } catch (_) {
+        await emergencyStop();
+        rethrow;
+      }
+      return;
+    }
+    pausedAtMs = resume;
+  });
+
+  /// Ends the run (timed, paused or stepped) without disarming; Start then
+  /// begins again from the first event.
+  Future<bool> stopScript() => _operation('Stop script', (epoch) async {
+    if (!running && !paused && !stepping) {
+      throw StateError('No script is running');
+    }
+    if (running) await _haltScript(epoch);
+    running = false;
+    stepping = false;
+    pausedAtMs = null;
+    skippedOnPause = 0;
+  });
 
   Future<bool> nextStep() => _operation('Step event', (epoch) async {
     final times = eventTimes;
@@ -778,8 +957,14 @@ class MasterController {
       for (var attempt = 1; ; attempt++) {
         _checkUpdate(epoch);
         try {
-          await _ack(uid, 0x62, epoch, bigEndian(transfer, 2), null,
-              updateAckTimeout);
+          await _ack(
+            uid,
+            0x62,
+            epoch,
+            bigEndian(transfer, 2),
+            null,
+            updateAckTimeout,
+          );
           break;
         } on TimeoutException {
           endReplyLost = true;
