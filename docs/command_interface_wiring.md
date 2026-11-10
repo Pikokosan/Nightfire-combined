@@ -60,11 +60,37 @@ References:
 - https://nicekeyboards.com/docs/nice-nano/
 - https://www.ti.com/lit/ds/symlink/sn74ahct125.pdf
 
+## ARM key safety latch (usb-master-0.4.3+)
+
+The ARM key must be turned to SAFE before it can arm anything:
+
+- **At power-on:** if the key is already on ARM when the bridge starts, the
+  bridge latches. Pixel 1 flashes yellow.
+- **When the app connects:** a new app session latches the same way if the
+  key is on ARM. A new session is a new heartbeat tag (the app picks one on
+  every connect, so a quick reconnect counts) or a session that expired
+  (more than 3 s without app heartbeats) and comes back.
+- **While latched,** the bridge treats the key as SAFE: it refuses ARM, FIRE,
+  START and STEP, and reports fault bit 32. The app shows a "Turn the ARM key
+  off" popup and disables its Arm buttons. The popup can be hidden, but arming
+  stays blocked.
+- **Turning the key to SAFE** (a reading steady for 50 ms) clears the latch.
+  Turning it back to ARM then works normally.
+
+Check it on a bridge with
+`py -3 scripts/diagnostics/probe_arm_key_latch.py --port COM12 --try-arm`. It
+holds an app-style session, prints the switch and latch, and asks the bridge to
+ARM a module UID that doesn't exist, to show whether ARM is accepted or refused.
+
+The app also latches by itself when its first status after connecting shows
+the key on ARM, so older bridge firmware gets the popup and the app-side
+block too (but not the yellow light or the bridge-side refusal).
+
 ## Four status pixels
 
 | Pixel | Purpose | Behavior |
 | --- | --- | --- |
-| 1 | ARM switch | Green = SAFE; red = ARM; flashing amber = switch fault or unsettled reading; off = no switch configured |
+| 1 | ARM switch | Green = SAFE; red = ARM; **flashing yellow = ARM key was on at power-on or when the app connected (turn it to SAFE)**; flashing amber = switch fault or unsettled reading; off = no switch configured |
 | 2 | Field module arm state | Green = nothing armed through this bridge, or every armed module ACKed a unique DISARM; red = a module may be armed; amber = DISARM sent without per-module confirmation (STOP broadcast), or the bridge is holding the RF keepalive so modules can self-disarm after host loss; amber without master firmware |
 | 3 | Heartbeats | Steady blue while the app's host heartbeat is current; brief green blink on each RF keepalive sent to the field (every 2.5 s); off without an app session |
 | 4 | Fault | Flashing red for session expiry, radio failure, RF keepalive failure or interface faults |
@@ -128,7 +154,7 @@ Existing AA55/CRC bridge frames remain inside the `NFUSB1` USB envelope.
 | 2 | Switch: unknown=0, SAFE position=1, ARM position=2 |
 | 3 | LEDs: disabled=0, ready=1, config/output fault=2, native driver missing=3 |
 | 4 | Host session: none=0, active=1, expired=2 |
-| 5 | Fault bits: switch=1, LED=2, host expired=4, radio unavailable=8, RF heartbeat TX failure=16 |
+| 5 | Fault bits: switch=1, LED=2, host expired=4, radio unavailable=8, RF heartbeat TX failure=16, ARM key latched=32 (usb-master-0.4.3+, see below) |
 | 6–7 | Host heartbeat age, big-endian milliseconds; 65535 if absent/saturated |
 | 8–9 | Host timeout, big-endian milliseconds (3000) |
 | 10 | Switch GPIO, 255 if unconfigured |

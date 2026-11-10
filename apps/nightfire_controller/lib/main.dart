@@ -16,6 +16,7 @@ import 'scripts/script_document.dart';
 import 'controller/field_module.dart';
 import 'widgets/maintenance_tools.dart';
 import 'widgets/mesh_panel.dart';
+import 'widgets/arm_key_dialog.dart';
 import 'widgets/manual_fire_panel.dart';
 import 'widgets/firmware_panel.dart';
 import 'widgets/settings_panel.dart';
@@ -143,7 +144,30 @@ class _RadioPageState extends State<RadioPage> with WidgetsBindingObserver {
   }
 
   void _update() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    setState(() {});
+    _syncArmKeyDialog();
+  }
+
+  bool _armKeyDialogOpen = false;
+  // Set when the operator hides the dialog; cleared once the lockout ends,
+  // so the next lockout shows it again.
+  bool _armKeyDialogHidden = false;
+
+  void _syncArmKeyDialog() {
+    final session = _session;
+    final lockout = session != null && session.ready && session.armKeyLockout;
+    if (!lockout) _armKeyDialogHidden = false;
+    if (!lockout || _armKeyDialogOpen || _armKeyDialogHidden) return;
+    _armKeyDialogOpen = true;
+    showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => ArmKeyDialog(session: session),
+    ).then((hidden) {
+      _armKeyDialogOpen = false;
+      if (hidden == true) _armKeyDialogHidden = true;
+    });
   }
 
   Future<void> _scan() async {

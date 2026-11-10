@@ -84,7 +84,7 @@ class _ManualFirePanelState extends State<ManualFirePanel> {
               runSpacing: 8,
               children: [
                 FilledButton.icon(
-                  onPressed: idle && modules.isNotEmpty
+                  onPressed: idle && master.canArm && modules.isNotEmpty
                       ? () => _run(master.armAll)
                       : null,
                   icon: const Icon(Icons.lock_open),
@@ -161,7 +161,7 @@ class _ManualFirePanelState extends State<ManualFirePanel> {
                   spacing: 8,
                   children: [
                     TextButton.icon(
-                      onPressed: idle && !moduleArmed
+                      onPressed: idle && master.canArm && !moduleArmed
                           ? () => _run(() => master.armModule(module.uid))
                           : null,
                       icon: const Icon(Icons.lock_open, size: 18),

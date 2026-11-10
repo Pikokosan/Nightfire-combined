@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../controller/radio_session.dart';
+import '../protocol/interface_status.dart';
 
 class CommandInterfacePanel extends StatelessWidget {
   const CommandInterfacePanel({super.key, required this.session});
@@ -25,8 +26,13 @@ class CommandInterfacePanel extends StatelessWidget {
               )
             else ...[
               Text(
-                'Physical switch: ${session.master.supported && status.switchPosition == 2 ? "ARM position" : status.switchText}',
+                'Physical switch: ${session.master.supported && status.switchPosition == 2 && !session.armKeyLockout ? "ARM position" : status.switchText}',
               ),
+              if (session.armKeyLockout)
+                const Text(
+                  'ARM key was on at start-up • turn it to SAFE to allow arming',
+                  style: TextStyle(color: Colors.amber),
+                ),
               Text('Status LEDs: ${status.ledText}'),
               Text('${status.sessionText} • ${status.timeoutMs} ms timeout'),
               if (session.masterHeartbeatStatus case final heartbeat?) ...[
@@ -39,7 +45,7 @@ class CommandInterfacePanel extends StatelessWidget {
                 const Text(
                   'RF heartbeat status unavailable • radio firmware update required.',
                 ),
-              if (status.faults != 0)
+              if (status.faults & ~InterfaceStatus.keyLatchedFault != 0)
                 const Text(
                   'Interface fault • inspect wiring and connection',
                   style: TextStyle(color: Colors.amber),

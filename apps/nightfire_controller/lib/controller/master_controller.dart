@@ -56,6 +56,11 @@ class MasterController {
   bool get supported =>
       session.ready && isMasterFirmware(session.values['Firmware']);
   bool get available => supported && !session.busy && !interrupted && !stopping;
+
+  /// Arming also waits for the ARM key lockout to clear.
+  bool get canArm => available && !session.armKeyLockout;
+  static const armKeyLockoutMessage =
+      'The ARM key was on when the radio connected. Turn it to SAFE first.';
   String get armSummary => armed.isEmpty
       ? 'ARM STATE UNKNOWN'
       : '${armed.length} module(s): ARM acknowledged';
@@ -187,6 +192,7 @@ class MasterController {
 
   Future<void> _armOne(int uid, int epoch) async {
     final module = session.modules[uid];
+    if (session.armKeyLockout) throw StateError(armKeyLockoutMessage);
     if (module == null || !module.seenInScan || running || stepping) {
       throw StateError('Discover this module before arming');
     }
@@ -252,6 +258,7 @@ class MasterController {
 
   /// Arms every discovered module (the master's single ARM toggle).
   Future<bool> armAll() => _operation('Arm all modules', (epoch) async {
+    if (session.armKeyLockout) throw StateError(armKeyLockoutMessage);
     final targets = session.modules.values
         .where((m) => m.seenInScan)
         .map((m) => m.uid);
@@ -342,6 +349,7 @@ class MasterController {
   /// Arms only the modules that hold the uploaded script.
   Future<bool> armScriptModules() =>
       _operation('Arm script modules', (epoch) async {
+        if (session.armKeyLockout) throw StateError(armKeyLockoutMessage);
         if (uploaded.isEmpty) {
           throw StateError('Send the script to modules first');
         }

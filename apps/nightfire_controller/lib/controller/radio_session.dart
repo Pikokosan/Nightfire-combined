@@ -72,6 +72,25 @@ class RadioSession extends ChangeNotifier {
           isMasterFirmware(values['Firmware']));
   InterfaceStatus? interfaceStatus;
   MasterHeartbeatStatus? masterHeartbeatStatus;
+
+  /// Safety lockout: the bridge's ARM key was on when the app connected (or
+  /// when the bridge powered up) and has not been turned to SAFE since.
+  /// Arming is refused while it is set. The bridge reports it itself
+  /// (usb-master-0.4.3+); the app also latches it from the first status
+  /// after connecting, so older bridge firmware is covered too.
+  bool get armKeyLockout =>
+      _armKeyLatch || interfaceStatus?.armKeyLatched == true;
+  bool _armKeyLatch = false;
+
+  void _updateArmKeyLatch(InterfaceStatus status, bool firstStatus) {
+    if (status.switchPin == null) {
+      _armKeyLatch = false;
+    } else if (status.switchPosition == 1) {
+      _armKeyLatch = false;
+    } else if (firstStatus && status.switchPosition == 2) {
+      _armKeyLatch = true;
+    }
+  }
   Timer? _heartbeatTimer;
   bool _heartbeatInFlight = false;
   int _hostSession = 0;
@@ -135,6 +154,7 @@ class RadioSession extends ChangeNotifier {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     interfaceStatus = null;
+    _armKeyLatch = false;
     masterHeartbeatStatus = null;
     _discoverNonce = null;
     final groupReadback = _groupReadback;
@@ -661,7 +681,9 @@ class RadioSession extends ChangeNotifier {
       final reply = await _request(0x17, const [], heartbeatReplyTimeout);
       if (epoch != _epoch) return;
       heartbeatMisses = 0;
+      final firstStatus = interfaceStatus == null;
       interfaceStatus = InterfaceStatus.parse(reply.payload);
+      _updateArmKeyLatch(interfaceStatus!, firstStatus);
       if (master.supported &&
           master.armed.isNotEmpty &&
           interfaceStatus!.switchPin != null &&

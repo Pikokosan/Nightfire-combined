@@ -11,6 +11,7 @@ import 'module_diagnostics_test.dart' show FieldRadio;
 /// field module replies of [FieldRadio].
 class HeartbeatRadio extends FieldRadio {
   int switchPosition = 1; // SAFE
+  int faults = 0;
   int heartbeats = 0;
 
   @override
@@ -26,7 +27,7 @@ class HeartbeatRadio extends FieldRadio {
     } else if (request.command == 0x17) {
       // version, caps (switch + actuation-disabled), switch, leds, session,
       // faults, age, timeout, switch pin, led pin, pixels, rejected.
-      payload = [1, 9, switchPosition, 0, 1, 0, 0, 0, 11, 184, 6, 255, 4, 0, 0];
+      payload = [1, 9, switchPosition, 0, 1, faults, 0, 0, 11, 184, 6, 255, 4, 0, 0];
     }
     if (payload == null) {
       // FieldRadio decodes the same (complete) line again.

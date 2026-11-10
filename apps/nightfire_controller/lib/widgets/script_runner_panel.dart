@@ -119,6 +119,8 @@ class _ScriptRunnerPanelState extends State<ScriptRunnerPanel> {
         ? 'Stopped. Press Disarm to confirm every module is safe.'
         : !sent
         ? 'Send the script to the modules.'
+        : !allArmed && session?.armKeyLockout == true
+        ? 'Turn the ARM key to SAFE, then arm the script modules.'
         : !allArmed
         ? 'Arm the script modules.'
         : null;
@@ -137,6 +139,7 @@ class _ScriptRunnerPanelState extends State<ScriptRunnerPanel> {
     final canStop = active && !busy && !master!.stopping;
     final canArm =
         supported &&
+        session?.armKeyLockout != true &&
         !busy &&
         !interrupted &&
         sent &&

@@ -51,6 +51,80 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(interface.switch, 0)
         self.assertTrue(interface.faults & 1)
 
+    def settle(self, interface, raw):
+        self.pin.raw = raw
+        interface.poll(True)
+        self.now += 60
+        interface.poll(True)
+
+    def test_key_on_at_power_on_latches_until_turned_to_safe(self):
+        interface = self.make(ARM_SWITCH_PIN=6, STATUS_LED_PIN=8, STATUS_LED_TIMING_NS=(150, 1100, 550, 700))
+        self.settle(interface, 0)                       # ARM at power-on
+        self.assertEqual(interface.switch, 2)
+        self.assertTrue(interface.key_latched())
+        self.assertEqual(interface.arm_switch(), 1)     # ARM/FIRE refused
+        self.assertTrue(interface.payload()[5] & 32)
+        # Pixel 1 flashes yellow; the fault pixel stays dark for the latch.
+        self.now = 1000
+        interface.poll(True)
+        self.assertEqual(self.writes[-1][1][:3], bytes(interface.YELLOW))
+        self.assertEqual(self.writes[-1][1][9:], b"\x00\x00\x00")
+        self.now = 1500
+        interface.poll(True)
+        self.assertEqual(self.writes[-1][1][:3], b"\x00\x00\x00")
+        # SAFE clears the latch; turning the key back to ARM then counts.
+        self.settle(interface, 1)
+        self.assertFalse(interface.key_latched())
+        self.assertFalse(interface.payload()[5] & 32)
+        self.settle(interface, 0)
+        self.assertEqual(interface.arm_switch(), 2)
+        self.assertFalse(interface.key_latched())
+
+    def test_key_on_when_the_app_connects_latches(self):
+        interface = self.make(ARM_SWITCH_PIN=6)
+        self.settle(interface, 1)
+        self.settle(interface, 0)                       # ARM before any app session
+        self.assertEqual(interface.arm_switch(), 2)
+        interface.heartbeat(b"1234")                    # the app connects
+        interface.poll(True)
+        self.assertTrue(interface.key_latched())
+        self.assertEqual(interface.arm_switch(), 1)
+        # Further heartbeats of the same session don't re-latch after SAFE.
+        self.settle(interface, 1)
+        self.settle(interface, 0)
+        interface.heartbeat(b"1234")
+        interface.poll(True)
+        self.assertEqual(interface.arm_switch(), 2)
+        # A different app session within the 3 s timeout is a new connection.
+        interface.heartbeat(b"9999")
+        interface.poll(True)
+        self.assertEqual(interface.arm_switch(), 1)
+        self.settle(interface, 1)
+        self.settle(interface, 0)
+        self.assertEqual(interface.arm_switch(), 2)
+        # So is a session that expired and comes back.
+        self.now += 3001
+        interface.poll(True)
+        interface.heartbeat(b"9999")
+        interface.poll(True)
+        self.assertEqual(interface.arm_switch(), 1)
+
+    def test_key_safe_at_power_on_does_not_latch(self):
+        interface = self.make(ARM_SWITCH_PIN=6)
+        self.settle(interface, 1)
+        interface.heartbeat(b"1234")
+        interface.poll(True)
+        self.assertFalse(interface.key_latched())
+        self.settle(interface, 0)
+        self.assertEqual(interface.arm_switch(), 2)
+
+    def test_no_switch_means_no_latch(self):
+        interface = self.make()
+        interface.heartbeat(b"1234")
+        interface.poll(True)
+        self.assertIsNone(interface.arm_switch())
+        self.assertFalse(interface.payload()[5] & 32)
+
     def test_heartbeat_expires_and_invalid_message_does_not_renew_it(self):
         interface = self.make()
         self.assertTrue(interface.heartbeat(b"1234"))

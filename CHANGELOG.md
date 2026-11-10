@@ -13,24 +13,46 @@ installers), **Hardware**.
 
 | Part | Version | Note |
 |---|---|---|
-| Bridge | usb-master-0.4.2 | The 2026-11-08 routing changes did not raise the version, so the app can't tell those builds apart. Raise it with the next bridge change. |
+| Bridge | usb-master-0.4.3 | ARM key safety latch. Bundle 24,654 bytes. |
 | Field | field-module 0.3.0 | |
 | Dummy | nrf-dummy 0.2.0 | |
 | App | 0.4.0 (build 4) | |
 
 ## Unreleased
 
-### Tools
-- **Added:** `scripts/install/set_bridge_leds.py`: shows a bridge's LED
-  settings, lights a red/green/blue/white test pattern with chosen colour
-  order and timing, and saves them on the bridge. Presets for WS2812B,
-  WS2811 (800 kHz and 400 kHz) and SK6812.
+### Bridge usb-master-0.4.3
+- **Added:** ARM key safety latch. If the key is on ARM when the bridge
+  powers up or when the app connects, the bridge refuses ARM/FIRE/START/STEP
+  until the key has been turned to SAFE. Pixel 1 flashes yellow meanwhile,
+  and status fault bit 32 reports it (the red fault pixel ignores this bit).
+  A reconnect with a new session tag counts as a new connection, even within
+  the 3 s timeout. Checked on the COM12 bench bridge: power-on on ARM
+  (yellow, ARM refused), key to SAFE then ARM (ARM accepted), quick
+  reconnect on ARM (latched again).
 
-### Bridge
+### Tools
+- **Added:** `scripts/diagnostics/probe_arm_key_latch.py`: watch the latch and
+  test whether the bridge accepts ARM (to a UID that doesn't exist).
+
+### App
+- **Added:** "Turn the ARM key off" popup while the latch is set; Arm buttons
+  are disabled and arming refuses with the reason. It closes by itself when
+  the key reaches SAFE, and can be hidden (arming stays blocked). The app
+  also latches from its own first status, covering older bridge firmware.
+
+## 2026-11-09
+
+### Bridge — `52d2964`
 - **Changed:** the COM12 bench bridge's LEDs are now WS2811s. They showed all
   white with the WS2812B settings (250 ns T0H read as 1). Now RGB order and
   timing (150, 1100, 550, 700); the test pattern was correct. The repository
   default (`main/configs/bridge_usb.py`) is the same.
+
+### Tools — `52d2964`
+- **Added:** `scripts/install/set_bridge_leds.py`: shows a bridge's LED
+  settings, lights a red/green/blue/white test pattern with chosen colour
+  order and timing, and saves them on the bridge. Presets for WS2812B,
+  WS2811 (800 kHz and 400 kHz) and SK6812.
 - **Changed:** `flash_nrf52840_uf2.ps1` now flashes the repository's prebuilt
   image by default and finds the bootloader drive by itself.
 - **Changed:** files reorganised (no firmware behaviour change; offline tests,
@@ -47,7 +69,7 @@ installers), **Hardware**.
     `firmware/micropython/`;
   - removed: unused `nrf_node_config_com15*.py`, `1v8broken.hex`.
 
-### Docs
+### Docs — `52d2964`
 - **Added:** `docs/building_devices.md`, step-by-step build and programming
   guide for the bridge, field module, dummy and app.
 - **Added:** `docs/bridge_status_leds.md`: LED settings, presets, and how to

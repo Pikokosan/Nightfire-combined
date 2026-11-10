@@ -69,7 +69,7 @@ while True:
                     command = bridge_radio.CMD_PONG
                     payload = b""
                 elif command == bridge_radio.CMD_GET_INFO:
-                    version = b"usb-master-0.4.2" if master else b"usb-monitor-0.3.3"   # mesh: reliable delivery
+                    version = b"usb-master-0.4.3" if master else b"usb-monitor-0.3.3"   # mesh: reliable delivery
                     payload = (bridge_radio.int_to_be(nrf_radio.device_id32(), 4) +
                                b"\x00\x00" + bridge_radio.int_to_be(network, 2) +
                                bytes([len(version)]) + version)
@@ -92,7 +92,7 @@ while True:
                     payload = keepalive.payload()
                 elif command == bridge_radio.CMD_SEND_NFCP_RELIABLE and len(frame.payload) > 6 and (
                     master.permit(frame.payload[6:], interface.session_state() == 1,
-                                  interface.switch if interface.input is not None else None)
+                                  interface.arm_switch())
                     if master else decode_query(frame.payload[6:], interface.session_state() == 1)
                 ):
                     # Answered from bridge_mesh.poll() when the delivery ends.
@@ -104,7 +104,7 @@ while True:
                     payload = None
                 elif command == bridge_radio.CMD_SEND_NFCP and (
                     master.permit(frame.payload, interface.session_state() == 1,
-                                  interface.switch if interface.input is not None else None)
+                                  interface.arm_switch())
                     if master else decode_query(frame.payload, interface.session_state() == 1)
                 ):
                     if bridge_mesh.send_frame(network, bytes(frame.payload), host_rx_us):
@@ -160,7 +160,7 @@ while True:
         if master:
             master.network = network
             master.poll(interface.session_state() == 1, radio_ready,
-                        interface.switch if interface.input is not None else None)
+                        interface.arm_switch())
             if interface.session_state() != 1:
                 maintenance.abort()
         keepalive.poll(interface.session_state() == 1 and not (master and master.needs_rearm), radio_ready)

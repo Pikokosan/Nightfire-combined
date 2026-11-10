@@ -21,6 +21,12 @@ class InterfaceStatus {
   bool get supportsMasterHeartbeat => capabilities & 16 != 0;
   bool get supportsGroupSettings => capabilities & 32 != 0;
 
+  /// Fault bit 32 (usb-master-0.4.3+): the ARM key was on when the bridge
+  /// powered up or the app connected, and has not been turned to SAFE since.
+  /// The bridge refuses ARM and FIRE until it is.
+  static const keyLatchedFault = 32;
+  bool get armKeyLatched => faults & keyLatchedFault != 0;
+
   static InterfaceStatus parse(List<int> data) {
     if (data.length != 15 ||
         data[0] != 1 ||
@@ -46,6 +52,7 @@ class InterfaceStatus {
   }
 
   String get switchText => switch (switchPosition) {
+    2 when armKeyLatched => 'ARM position at start-up • turn to SAFE',
     1 => 'SAFE position',
     2 => 'ARM position • controls disabled',
     _ => switchPin == null ? 'Not configured' : 'Unknown / changing',

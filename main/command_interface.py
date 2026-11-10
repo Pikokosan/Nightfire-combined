@@ -35,6 +35,10 @@ class CommandInterface:
         self.input = None
         self.candidate = None
         self.changed_at = self.clock()
+        # Safety latch: the ARM key must be seen in SAFE after power-on and
+        # after each new app session before it can arm anything. Set here and
+        # in heartbeat(); cleared by poll() once the switch settles on SAFE.
+        self.need_safe = True
         self.led_write = led_write
         self.last_colors = None
         self.keepalive_supported = False
@@ -90,9 +94,26 @@ class CommandInterface:
     def heartbeat(self, payload):
         if len(payload) != 4:
             return False
+        if self.session_state() != 1 or bytes(payload) != self.session_id:
+            # A new app session (the app picks a new tag on every connect, so
+            # a quick reconnect counts too): the key has to go through SAFE
+            # again.
+            self.need_safe = True
         self.session_id = bytes(payload)
         self.last_host = self.clock()
         return True
+
+    def key_latched(self):
+        """True while the ARM key was on at power-on or app connect and has
+        not been turned to SAFE since."""
+        return self.input is not None and self.need_safe and self.switch == 2
+
+    def arm_switch(self):
+        """The switch position that may permit ARM/FIRE: None without a
+        switch, and SAFE while the key is latched."""
+        if self.input is None:
+            return None
+        return 1 if self.need_safe else self.switch
 
     def session_state(self):
         if self.last_host is None:
@@ -119,12 +140,15 @@ class CommandInterface:
                     self.switch = 0
                 elif self.difference(now, self.changed_at) >= 50:
                     self.switch = value
+                    if value == 1:
+                        self.need_safe = False
                 self.faults &= ~1
             except Exception:
                 self.switch = 0
                 self.faults |= 1
         session = self.session_state()
-        self.faults = (self.faults & ~12) | (4 if session == 2 else 0) | (0 if radio_ready else 8)
+        self.faults = ((self.faults & ~44) | (4 if session == 2 else 0) | (0 if radio_ready else 8) |
+                       (32 if self.key_latched() else 0))
         if self.led_status != 1:
             return
         colors = self.colors(now, session)
@@ -143,7 +167,9 @@ class CommandInterface:
     RED = (12, 0, 0)
     AMBER = (10, 5, 0)
     BLUE = (0, 0, 12)
+    YELLOW = (10, 9, 0)
     OFF = (0, 0, 0)
+    KEY_LATCHED = 32   # fault bit: ARM key on at power-on/connect
     KEEPALIVE_BLINK_MS = 150
 
     def colors(self, now, session):
@@ -151,6 +177,8 @@ class CommandInterface:
         flash = (now // 500) % 2 == 0
         if self.input is None:
             switch = self.OFF
+        elif self.key_latched():
+            switch = self.YELLOW if flash else self.OFF
         elif self.switch == 1:
             switch = self.GREEN
         elif self.switch == 2:
@@ -170,7 +198,8 @@ class CommandInterface:
             heartbeat = self.GREEN
         else:
             heartbeat = self.BLUE
-        fault = self.RED if self.faults and flash else self.OFF
+        # The key latch has its own yellow pixel 1; it is not a fault light.
+        fault = self.RED if self.faults & ~self.KEY_LATCHED and flash else self.OFF
         return [switch, modules, heartbeat, fault]
 
     def payload(self):
