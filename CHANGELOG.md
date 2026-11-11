@@ -22,6 +22,12 @@ installers), **Hardware**.
 
 ## 2026-11-10
 
+### Tools — `PENDING`
+- **Fixed:** the armed resistance scan tests stubbed the old
+  `script_running` flag; the field firmware checks the shared script
+  engine's `script.running`. Added a test that a running script blocks the
+  scan. All offline tests pass.
+
 ### Field — `b9c64cd`
 - **Changed:** buttons are read active high with no internal pull-up: on
   the production boards they pass through an inverting 74HC14
@@ -52,8 +58,7 @@ installers), **Hardware**.
   keypad/LED test); `scripts/diagnostics/capture_field_console.py` and
   `probe_radio_io_api.py`; offline tests for the manual fire viewport,
   offline cues and the in-memory device database; more field resistance
-  tests (one, the armed scan, still fails: `script` isn't set up in the
-  test namespace).
+  tests.
 
 ### Docs — `b9c64cd`
 - **Changed:** field LCD and pinout docs describe the 74HC14 button inputs;

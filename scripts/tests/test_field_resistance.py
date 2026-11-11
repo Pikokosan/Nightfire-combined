@@ -108,7 +108,7 @@ class ArmedResistanceMeasurementTests(unittest.TestCase):
         namespace = {
             "ARMED": armed,
             "fire_out_mask": fire_mask,
-            "script_running": script_running,
+            "script": SimpleNamespace(running=script_running),
             "set_armed_outputs": lambda value: calls.append(("armed", value)),
             "disable_measurement_frontend": lambda: calls.append(("disable", None)),
         }
@@ -130,6 +130,12 @@ class ArmedResistanceMeasurementTests(unittest.TestCase):
 
     def test_scan_is_blocked_during_an_active_fire_pulse(self):
         namespace, calls = self.make_namespace(armed=True, fire_mask=1)
+        with self.assertRaises(RuntimeError):
+            namespace["begin_resistance_measurement"]()
+        self.assertEqual(calls, [])
+
+    def test_scan_is_blocked_while_a_script_runs(self):
+        namespace, calls = self.make_namespace(armed=True, script_running=True)
         with self.assertRaises(RuntimeError):
             namespace["begin_resistance_measurement"]()
         self.assertEqual(calls, [])
