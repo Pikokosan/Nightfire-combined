@@ -11,6 +11,10 @@ BOARD_PINOUT = "promicro"
 PRE_TEST_PIN = 2            # Board D19 / P0.02 / AIN0
 ARM_CONTROL_PIN = 9         # Board D10 / P0.09, active high
 ARM_CONTROL_ACTIVE_VALUE = 1
+ARM_VOLTAGE_CHECK_ENABLED = True
+ARM_VOLTAGE_CHECK_SETTLE_MS = 50
+ARM_VOLTAGE_CHECK_MIN_MV = 500
+ARM_VOLTAGE_CHECK_SAMPLES = 16
 SAFE_LED_PIN = 11           # Board D7  / P0.11
 ARM_LED_PIN = 24            # Board D5  / P0.24
 UP_BUTTON_PIN = 45          # Board D15 / P1.13
@@ -18,6 +22,9 @@ DOWN_BUTTON_PIN = 47        # Board D18 / P1.15
 OK_FWD_BUTTON_PIN = 43      # Board D14 / P1.11
 OK_BUTTON_PIN = OK_FWD_BUTTON_PIN
 BACK_BUTTON_PIN = 10        # Board D16 / P0.10
+# Buttons pass through an inverting 74HC14 and are active high at the nRF.
+BUTTON_ACTIVE_VALUE = 1
+BUTTON_INTERNAL_PULL_UP = False
 BATT_CHECK_PIN = 29         # Board D20 / P0.29 / AIN5
 BATTERY_ADC_ENABLED = True
 BATTERY_PACK_TYPE = "2S"
@@ -61,6 +68,7 @@ CHANNEL_OPEN_MIN_FRACTION = 0.23
 # Measured on the Pro Micro field fixture using known loads. Points are
 # (SHORT_CHECK ADC millivolts, deci-ohms): 0.0, 2.0, 4.7, and 22 ohms.
 RESISTANCE_CALIBRATION_POINTS = ((26, 0), (158, 20), (442, 47), (1228, 220))
+RESISTANCE_SHORT_MAX_DECI_OHM = 0
 
 CUE_COUNT = 24
 CHANNEL_SENSE_DIVIDER_RATIO = 22.0 / 122.0

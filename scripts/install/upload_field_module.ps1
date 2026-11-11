@@ -56,7 +56,7 @@ function Compile-Mpy {
     $NativeCompiler = Get-Command "mpy-cross" -ErrorAction SilentlyContinue
     if ($NativeCompiler) {
         try {
-            & $NativeCompiler.Source -o $Output $Source
+            & $NativeCompiler.Source -O3 -o $Output $Source
             if ($LASTEXITCODE -eq 0) {
                 return
             }
@@ -68,7 +68,7 @@ function Compile-Mpy {
 
     $SourceWsl = Convert-ToWslPath $Source
     $OutputWsl = Convert-ToWslPath $Output
-    & wsl.exe -- sh -lc 'compiler=$(command -v mpy-cross || printf "%s" "$HOME/.local/bin/mpy-cross"); exec "$compiler" "$@"' sh -o $OutputWsl $SourceWsl
+    & wsl.exe -- sh -lc 'compiler=$(command -v mpy-cross || printf "%s" "$HOME/.local/bin/mpy-cross"); exec "$compiler" "$@"' sh -O3 -o $OutputWsl $SourceWsl
     if ($LASTEXITCODE -ne 0) {
         throw "mpy-cross failed. Install mpy-cross 1.29 in Windows or WSL."
     }
@@ -95,6 +95,7 @@ function Wait-SerialPort {
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 $BundleSource = Join-Path $BuildDir "field_main_bundle.py"
 $BundleMpy = Join-Path $BuildDir "field_main.mpy"
+$ConfigMpy = Join-Path $BuildDir "nrf_node_config.mpy"
 
 & $Python $BundleBuilder --main-dir (Join-Path $Root "main") --output $BundleSource
 if ($LASTEXITCODE -ne 0) {
@@ -102,6 +103,10 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Compile-Mpy $BundleSource $BundleMpy
+
+if ($ConfigPath) {
+    Compile-Mpy $ConfigPath $ConfigMpy
+}
 
 $CleanupArgs = @(
     $Uploader,
@@ -135,11 +140,15 @@ $CleanupArgs = @(
     "--delete", "lcd1602_i2c.mpy",
     "--delete", "nrf_dummy_main.py",
     "--delete", "nrf_dummy_main.mpy",
-    "--delete", "bridge_radio.py"
+    "--delete", "bridge_radio.py",
+    "--delete", "field_hardware_test.py"
 )
 
 if ($ConfigPath) {
-    $CleanupArgs += @("--delete", "nrf_node_config.py")
+    $CleanupArgs += @(
+        "--delete", "nrf_node_config.py",
+        "--delete", "nrf_node_config.mpy"
+    )
 }
 
 $UploadArgs = @(
@@ -151,7 +160,7 @@ $UploadArgs = @(
 )
 
 if ($ConfigPath) {
-    $UploadArgs += @("$($ConfigPath):nrf_node_config.py")
+    $UploadArgs += @("$($ConfigMpy):nrf_node_config.mpy")
 }
 
 Push-Location $Root

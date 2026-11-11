@@ -22,7 +22,45 @@ installers), **Hardware**.
 
 ## 2026-11-10
 
-### App — `PENDING`
+### Field — `PENDING`
+- **Changed:** buttons are read active high with no internal pull-up: on
+  the production boards they pass through an inverting 74HC14
+  (`BUTTON_ACTIVE_VALUE`, `BUTTON_INTERNAL_PULL_UP` in both field configs).
+- **Added:** arm voltage check settings in both field configs (enabled,
+  50 ms settle, 500 mV minimum, 16 samples).
+- **Changed:** a cue counts as shorted only at 0.0 ohm
+  (`RESISTANCE_SHORT_MAX_DECI_OHM = 0`, field configs and ESP32 master).
+- **Changed:** `upload_field_module.ps1` compiles with `mpy-cross -O3`,
+  installs the node config as `nrf_node_config.mpy`, and removes a leftover
+  `field_hardware_test.py`.
+
+### ESP32 master — `PENDING`
+- **Added:** the manual fire grid shows every cue of the largest module and
+  scrolls; the Trellis keypad and its LEDs follow the visible 16 cues.
+- **Changed:** manual fire debounce is per module and cue. Trellis presses
+  rely on the key scanner's release-gated debounce, so quick presses on
+  different keys are no longer dropped; LVGL and LED updates stay out of
+  the key-read path.
+- **Changed:** the module database is kept in memory only, and the old
+  `nfcp_devices.json` is deleted at boot.
+- **Changed:** the continuity page shows NO COMM for a module that has
+  gone offline instead of its last readings.
+
+### Tools — `PENDING`
+- **Added:** `main/trellis_hardware_test.py` and
+  `scripts/install/upload_trellis_test.ps1` (standalone 4x4 Trellis
+  keypad/LED test); `scripts/diagnostics/capture_field_console.py` and
+  `probe_radio_io_api.py`; offline tests for the manual fire viewport,
+  offline cues and the in-memory device database; more field resistance
+  tests (one, the armed scan, still fails: `script` isn't set up in the
+  test namespace).
+
+### Docs — `PENDING`
+- **Changed:** field LCD and pinout docs describe the 74HC14 button inputs;
+  UI backlog notes the battery settings that are done; removed a reference
+  to an example script file that doesn't exist.
+
+### App — `506fea1`
 - **Changed:** the bar at the top shows the whole system's arm state instead
   of the app's arm acknowledgements: SYSTEM SAFE (green), COMMAND MODULE ARMED
   (orange, key on ARM), SYSTEM ARMED • n modules (red, key on ARM and modules

@@ -142,9 +142,6 @@ Results describe snapshots. Even an error-free result is not remote arm
 confirmation, authorization to fire or validation of timing execution, audio/DMX,
 script upload capacity or firmware compatibility.
 
-The repository includes `examples/scripts/interface-check.csv` for a manual import
-test. It references group 1 cues 9, 10 and 15; it is not an executable show approval.
-
 File import uses Flutter's `file_selector` plugin:
 https://pub.dev/packages/file_selector . Windows/iOS/macOS file selection is wired
 through the plugin but has not been device-tested here. macOS includes the

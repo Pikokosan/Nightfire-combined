@@ -12,6 +12,11 @@ Default MS88SFA LCD and button mapping:
 - OK / forward button: MicroPython pin `15` / nRF `P0.15`
 - Back button: MicroPython pin `20` / nRF `P0.20`
 
+Production field-module buttons pass through an inverting 74HC14. The field
+firmware therefore treats the nRF-side signal as active high and does not
+enable an internal GPIO pull-up. Keep the external pull resistor on the
+74HC14 input side and power the 74HC14 from 3.3 V.
+
 For the complete Pro Micro field-module mapping, including the 74HC595,
 pre-test, ADC, LEDs, and hardware ARM output, use
 `main/configs/field_promicro.py` and the `-Pinout promicro` upload
@@ -42,5 +47,6 @@ Standalone nRF52840 Pro Micro LCD test wiring:
 - OK button: board `D14` / nRF `P1.11` / MicroPython pin `43`
 - BACK button: board `D16` / nRF `P0.10` / MicroPython pin `10`
 
-Buttons are read with internal pull-ups, so wire each button between its GPIO
-pin and `GND`. Use 3.3 V-safe I2C wiring for the LCD.
+The standalone LCD test app reads buttons directly with internal pull-ups, so
+wire each test button between its GPIO pin and `GND`. Use 3.3 V-safe I2C
+wiring for the LCD.

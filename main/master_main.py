@@ -23,9 +23,9 @@ except Exception as e:
 
 DEFAULT_CUE_COUNT = 16
 MAX_CUE_COUNT = 64
+RESISTANCE_SHORT_MAX_DECI_OHM = 0
 MODULE_CONTINUITY_AUTO_CHECK_MS = 4000
 CONTINUITY_TIMEOUT_MS = 2000
-RESISTANCE_SHORT_MAX_DECI_OHM = 5
 CALIBRATION_BANK_SIZE = 8
 CALIBRATION_TESTER_DECI_OHMS = (20, 47, 27, 9, 24, 102, 0, None)
 DISCOVER_IDLE_TIMEOUT_MS = 900
@@ -58,6 +58,9 @@ TRELLIS_ADDRESS = 0x70
 TRELLIS_I2C_FREQ = 400000
 TRELLIS_POLL_MS = 4
 MANUAL_FIRE_DEBOUNCE_MS = 180
+# The HT16K33 key scanner plus just_pressed() provide release-gated debounce.
+# An additional time lockout consumes fast repeat presses on the same key.
+TRELLIS_MANUAL_FIRE_DEBOUNCE_MS = 0
 MANUAL_FIRE_BLINK_MS = 250
 TRELLIS_STEP_DEBOUNCE_MS = 60
 TRELLIS_LED_SWEEP_DELAY_MS = 45
@@ -66,6 +69,12 @@ SCRIPT_TIMER_FONT_PATH = "timer_96.bin"
 SRC_ID = 0x01
 DEVICE_DB_PATH = "nfcp_devices.json"
 SETTINGS_PATH = "nfcp_settings.json"
+
+_device_db = {
+    "generated_epoch": None,
+    "device_count": 0,
+    "devices": [],
+}
 
 RADIO_NETWORK_ID = bridge_radio.DEFAULT_NETWORK_ID
 RADIO_CHANNEL = 90
@@ -546,31 +555,35 @@ def init_trellis_boot_check():
 
 
 def load_device_db(path=DEVICE_DB_PATH):
-    try:
-        with open(path, "r") as f:
-            return json.load(f)
-    except:
-        return {
-            "generated_epoch": None,
-            "device_count": 0,
-            "devices": []
-        }
+    return _device_db
 
 
 def save_device_db(db, path=DEVICE_DB_PATH):
+    global _device_db
+
     db["generated_epoch"] = time.time()
     db["device_count"] = len(db.get("devices", []))
-
-    with open(path, "w") as f:
-        json.dump(db, f)
+    _device_db = db
 
 
 def clear_device_db(path=DEVICE_DB_PATH):
-    save_device_db({
+    global _device_db
+
+    _device_db = {
         "generated_epoch": time.time(),
         "device_count": 0,
         "devices": []
-    }, path)
+    }
+
+
+def remove_legacy_device_db(path=DEVICE_DB_PATH):
+    try:
+        os.remove(path)
+        print("Removed legacy persistent module database")
+    except OSError:
+        pass
+    except Exception as e:
+        print("Legacy module database cleanup failed:", e)
 
 
 def load_app_settings(path=SETTINGS_PATH):
@@ -1603,8 +1616,13 @@ class NFCPGui:
         self.modules_page = 0
         self.manual_fire_modules = []
         self.manual_fire_index = 0
+        self.manual_cue_base = 0
+        self.manual_grid_cue_count = DEFAULT_CUE_COUNT
+        self.manual_cue_cols = 4
+        self.manual_cue_row_pitch = 62
         self.manual_fire_last_poll_ms = time.ticks_ms()
         self.manual_fire_last_fire_ms = time.ticks_ms()
+        self.manual_fire_last_by_cue = {}
         self.manual_last_fire_uid = None
         self.manual_last_fire_key = None
         self.manual_last_fire_blink_on = False
@@ -5134,20 +5152,38 @@ class NFCPGui:
         self.manual_cue_buttons = []
         self.manual_cue_labels = []
 
-        x0 = 240
-        y0 = 155
-        btn_w = 110
-        btn_h = 70
-        gap_x = 12
-        gap_y = 12
+        self.manual_grid_cue_count = max(
+            [self.get_module_cue_count(module) for module in self.manual_fire_modules]
+        )
+        self.manual_cue_base = 0
+        self.manual_cue_cols = 4
+        self.manual_cue_row_pitch = 62
 
-        for i in range(16):
-            row = i // 4
-            col = i % 4
+        self.manual_grid_box = self.make_plain_box(
+            parent,
+            230,
+            145,
+            540,
+            245,
+            0x181818
+        )
+        self.manual_grid_box.set_scroll_dir(lv.DIR.VER)
+        self.manual_grid_box.set_scrollbar_mode(lv.SCROLLBAR_MODE.AUTO)
+
+        x0 = 0
+        y0 = 0
+        btn_w = 129
+        btn_h = 56
+        gap_x = 6
+        gap_y = 6
+
+        for i in range(self.manual_grid_cue_count):
+            row = i // self.manual_cue_cols
+            col = i % self.manual_cue_cols
             x = x0 + col * (btn_w + gap_x)
             y = y0 + row * (btn_h + gap_y)
 
-            btn = lv.button(parent)
+            btn = lv.button(self.manual_grid_box)
             btn.set_pos(x, y)
             btn.set_size(btn_w, btn_h)
 
@@ -5157,6 +5193,41 @@ class NFCPGui:
 
             self.manual_cue_buttons.append(btn)
             self.manual_cue_labels.append(lbl)
+
+    def sync_manual_fire_viewport(self, force=False):
+        if not hasattr(self, "manual_grid_box"):
+            return
+
+        try:
+            scroll_y = max(0, int(self.manual_grid_box.get_scroll_y()))
+        except:
+            scroll_y = 0
+
+        total_rows = (
+            self.manual_grid_cue_count + self.manual_cue_cols - 1
+        ) // self.manual_cue_cols
+        max_top_row = max(0, total_rows - 4)
+        top_row = (scroll_y + (self.manual_cue_row_pitch // 2)) // self.manual_cue_row_pitch
+        top_row = min(max_top_row, max(0, top_row))
+        cue_base = top_row * self.manual_cue_cols
+
+        if not force and cue_base == self.manual_cue_base:
+            return
+
+        self.manual_cue_base = cue_base
+        module = self.get_manual_fire_module()
+        if not module:
+            self.clear_trellis_leds()
+            return
+
+        continuity = self.get_module_continuity_list(module)
+        cue_count = self.get_module_cue_count(module)
+        self.update_trellis_continuity_leds(
+            continuity,
+            cue_count,
+            self.manual_cue_base
+        )
+        self.update_manual_fire_last_indicator(force=True)
 
     def make_manual_fire_cb(self, cue_index):
         def cb(event):
@@ -5188,10 +5259,10 @@ class NFCPGui:
                 (self.format_uid(uid_text), cue_count)
             )
 
-        for i in range(16):
+        for i in range(self.manual_grid_cue_count):
             cue_ok = i < len(continuity) and bool(continuity[i])
             cue_exists = i < cue_count
-            if cue_ok:
+            if cue_exists and cue_ok:
                 good += 1
 
             if hasattr(self, "manual_cue_labels") and i < len(self.manual_cue_labels):
@@ -5222,7 +5293,7 @@ class NFCPGui:
                 )
             )
 
-        self.update_trellis_continuity_leds(continuity, cue_count)
+        self.sync_manual_fire_viewport(force=True)
         self.update_manual_fire_last_indicator(force=True)
         self.set_status("Manual fire channel %s selected" % channel_text)
 
@@ -5273,19 +5344,27 @@ class NFCPGui:
         cue_count = self.get_module_cue_count(module)
         continuity = self.get_module_continuity_list(module)
         blink_key = self.manual_last_fire_key
+        blink_led = None
+        if blink_key is not None:
+            blink_led = blink_key - self.manual_cue_base
         blink_visible = (
-            blink_key is not None and
+            blink_led is not None and
             self.manual_last_fire_matches_current_module() and
-            0 <= blink_key < min(16, cue_count)
+            0 <= blink_led < 16 and
+            blink_key < cue_count
         )
 
         try:
             if self.trellis:
                 self.trellis.clear()
-                limit = min(16, cue_count)
-                for i in range(limit):
-                    lit = i < len(continuity) and bool(continuity[i])
-                    if blink_visible and i == blink_key:
+                for i in range(16):
+                    cue_index = self.manual_cue_base + i
+                    lit = (
+                        cue_index < cue_count and
+                        cue_index < len(continuity) and
+                        bool(continuity[cue_index])
+                    )
+                    if blink_visible and i == blink_led:
                         lit = self.manual_last_fire_blink_on
                     if lit:
                         self.trellis.set_led(i)
@@ -5294,7 +5373,7 @@ class NFCPGui:
             print("Manual Trellis blink failed:", e)
 
         if force and hasattr(self, "manual_cue_buttons"):
-            for i in range(min(16, len(self.manual_cue_buttons))):
+            for i in range(len(self.manual_cue_buttons)):
                 try:
                     self.manual_cue_buttons[i].set_style_bg_color(
                         self.get_manual_cue_base_color(i, continuity, cue_count),
@@ -5314,25 +5393,25 @@ class NFCPGui:
         except Exception as e:
             print("Trellis clear failed:", e)
 
-    def update_trellis_continuity_leds(self, continuity, cue_count):
+    def update_trellis_continuity_leds(self, continuity, cue_count, cue_base=0):
         if not self.trellis:
             return
 
         try:
             self.trellis.clear()
-            limit = min(16, cue_count)
-            for i in range(limit):
-                if i < len(continuity) and bool(continuity[i]):
+            for i in range(16):
+                cue_index = cue_base + i
+                if (
+                    cue_index < cue_count and
+                    cue_index < len(continuity) and
+                    bool(continuity[cue_index])
+                ):
                     self.trellis.set_led(i)
             self.trellis.write_display()
         except Exception as e:
             print("Trellis LED update failed:", e)
 
-    def fire_manual_cue(self, cue_index):
-        now = time.ticks_ms()
-        if time.ticks_diff(now, self.manual_fire_last_fire_ms) < MANUAL_FIRE_DEBOUNCE_MS:
-            return
-
+    def fire_manual_cue(self, cue_index, debounce_ms=MANUAL_FIRE_DEBOUNCE_MS):
         module = self.get_manual_fire_module()
         if not module:
             self.set_status("No manual fire channel selected")
@@ -5343,7 +5422,18 @@ class NFCPGui:
             self.set_status("Manual fire cue out of range")
             return
 
+        now = time.ticks_ms()
+        uid_text = module.get("unique_id", "0x00000000")
+        fire_key = (uid_text, cue_index)
+        last_fire_ms = self.manual_fire_last_by_cue.get(fire_key)
+        if (
+            last_fire_ms is not None and
+            time.ticks_diff(now, last_fire_ms) < debounce_ms
+        ):
+            return
+
         self.manual_fire_last_fire_ms = now
+        self.manual_fire_last_by_cue[fire_key] = now
         self.selected_module = module
         self.continuity = self.get_module_saved_continuity(module)
         self.fire_cue(cue_index)
@@ -5366,15 +5456,25 @@ class NFCPGui:
         if not self.trellis:
             return
 
+        now = time.ticks_ms()
+        if time.ticks_diff(now, self.manual_fire_last_poll_ms) < TRELLIS_POLL_MS:
+            return
+        self.manual_fire_last_poll_ms = now
+
         try:
             changed = self.trellis.read_switches()
-            if not changed:
-                return
+            if changed:
+                for key in range(16):
+                    if self.trellis.just_pressed(key):
+                        self.fire_manual_cue(
+                            self.manual_cue_base + key,
+                            TRELLIS_MANUAL_FIRE_DEBOUNCE_MS,
+                        )
+                        return
 
-            for key in range(16):
-                if self.trellis.just_pressed(key):
-                    self.fire_manual_cue(key)
-                    return
+            # Keep LVGL scroll work and Trellis LED writes out of the critical
+            # key-read path. A release or idle poll can safely update the map.
+            self.sync_manual_fire_viewport()
         except Exception as e:
             print("Trellis poll failed:", e)
             self.set_status("Trellis poll failed")
@@ -6389,6 +6489,7 @@ class NFCPGui:
                 self.save_selected_module_info(info)
                 self.set_status("Versions updated")
             else:
+                self.save_selected_module_online(False)
                 self.set_status("Version read timeout")
 
             self.refresh_selected_module_detail_labels(
@@ -6541,6 +6642,8 @@ class NFCPGui:
                 module_mark_online(dev)
 
         self.update_selected_module_record("Speed test", updater)
+        if self.current_view == "module_continuity":
+            self.refresh_cues()
 
     def save_selected_module_online(self, online):
         def updater(dev, uid_text):
@@ -6550,6 +6653,8 @@ class NFCPGui:
                 module_mark_lost(dev)
 
         self.update_selected_module_record("Module online", updater)
+        if self.current_view == "module_continuity":
+            self.refresh_cues()
 
     def save_selected_module_info(self, info):
         def updater(dev, uid_text):
@@ -6630,6 +6735,10 @@ class NFCPGui:
             return
 
         cue_count = self.get_selected_module_cue_count()
+        module_offline = bool(
+            self.selected_module and
+            self.module_is_lost(self.selected_module)
+        )
         good = 0
         resistance = {}
         resistance_values = []
@@ -6641,6 +6750,13 @@ class NFCPGui:
 
         for i in range(cue_count):
             cue_number = i + 1
+
+            if module_offline:
+                self.cue_labels[i].set_text("Cue %02d: NO COMM" % cue_number)
+                self.cue_labels[i].center()
+                self.cue_buttons[i].set_style_bg_color(lv.color_hex(0x4A4A4A), 0)
+                continue
+
             has_cont = self.continuity[i] if i < len(self.continuity) else False
             cue_in_script = self.selected_cue_is_in_script(cue_number)
             resistance_value = None
@@ -6696,7 +6812,10 @@ class NFCPGui:
             self.cue_buttons[i].set_style_bg_color(color, 0)
 
         if hasattr(self, "summary"):
-            self.summary.set_text("Continuity: %d / %d" % (good, cue_count))
+            if module_offline:
+                self.summary.set_text("Continuity: -- / %d" % cue_count)
+            else:
+                self.summary.set_text("Continuity: %d / %d" % (good, cue_count))
 
         self.set_status("Continuity updated")
 
@@ -7215,6 +7334,7 @@ class NFCPGui:
                 self.request_selected_continuity()
 
 
+remove_legacy_device_db()
 gui = NFCPGui()
 
 

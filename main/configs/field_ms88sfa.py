@@ -9,6 +9,10 @@ BOARD_PINOUT = "ms88sfa"
 PRE_TEST_PIN = 46           # Module pin 9,  P1.14
 ARM_CONTROL_PIN = 13        # Module pin 30, P0.13
 ARM_CONTROL_ACTIVE_VALUE = 1
+ARM_VOLTAGE_CHECK_ENABLED = True
+ARM_VOLTAGE_CHECK_SETTLE_MS = 50
+ARM_VOLTAGE_CHECK_MIN_MV = 500
+ARM_VOLTAGE_CHECK_SAMPLES = 16
 SAFE_LED_PIN = 42           # Module pin 7,  P1.10
 ARM_LED_PIN = 44            # Module pin 8,  P1.12
 UP_BUTTON_PIN = 45          # Module pin 2,  P1.13
@@ -16,6 +20,9 @@ DOWN_BUTTON_PIN = 47        # Module pin 3,  P1.15
 OK_FWD_BUTTON_PIN = 15      # Module pin 31, P0.15
 OK_BUTTON_PIN = OK_FWD_BUTTON_PIN
 BACK_BUTTON_PIN = 20        # Module pin 33, P0.20
+# Buttons pass through an inverting 74HC14 and are active high at the nRF.
+BUTTON_ACTIVE_VALUE = 1
+BUTTON_INTERNAL_PULL_UP = False
 BATT_CHECK_PIN = 29         # Module pin 5,  P0.29 / AIN5
 BATTERY_ADC_ENABLED = True
 
@@ -50,6 +57,7 @@ PRETEST_ADC_SAMPLE_DELAY_US = 150
 # The low-current pre-test path is active-low at SHORT_CHECK: connected cues
 # pull the ADC low, while open cues remain high.
 CHANNEL_OPEN_MIN_FRACTION = 0.15
+RESISTANCE_SHORT_MAX_DECI_OHM = 0
 
 # All outputs from the three 74HC595 devices are field-module cues.
 CUE_COUNT = 24

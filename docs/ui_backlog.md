@@ -2,6 +2,8 @@
 
 ## Battery settings
 
+Done in the controller's Settings tab (pack type and display calibration per firmware target, saved on the device). Still open: writing calibration into module firmware so resistance readings use it too.
+
 - Add a master Settings screen for module battery configuration.
 - Include pack type selection, starting with 2S and future higher-voltage packs.
 - Include ADC divider calibration so displayed module voltage can match a meter.

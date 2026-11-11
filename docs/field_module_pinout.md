@@ -137,6 +137,11 @@ signals differ even though the pad locations and numbering pattern match.
 | `SHORT_CHECK` | 6 | `P0.31` / `AIN7` | `31` | Analog cue-test ADC sense |
 | `ARM` | 30 | `P0.13` | `13` | Hardware arm/pre-test circuit control |
 
+The four button signals are driven into the nRF by an inverting 74HC14. They
+are active high at the nRF pins, and the firmware leaves the internal GPIO
+pull-ups disabled. The external pull resistors belong on the 74HC14 input
+side. Power the 74HC14 from the same 3.3 V logic rail as the nRF52840.
+
 Use `P0.13` for the `ARM` hardware-control net. This preserves ADC-capable
 spares for future measurement/debug and avoids the NFC-adjacent pins.
 
