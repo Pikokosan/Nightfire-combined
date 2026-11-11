@@ -22,7 +22,7 @@ installers), **Hardware**.
 
 ## 2026-11-10
 
-### Field — `PENDING`
+### Field — `b9c64cd`
 - **Changed:** buttons are read active high with no internal pull-up: on
   the production boards they pass through an inverting 74HC14
   (`BUTTON_ACTIVE_VALUE`, `BUTTON_INTERNAL_PULL_UP` in both field configs).
@@ -34,7 +34,7 @@ installers), **Hardware**.
   installs the node config as `nrf_node_config.mpy`, and removes a leftover
   `field_hardware_test.py`.
 
-### ESP32 master — `PENDING`
+### ESP32 master — `b9c64cd`
 - **Added:** the manual fire grid shows every cue of the largest module and
   scrolls; the Trellis keypad and its LEDs follow the visible 16 cues.
 - **Changed:** manual fire debounce is per module and cue. Trellis presses
@@ -46,7 +46,7 @@ installers), **Hardware**.
 - **Changed:** the continuity page shows NO COMM for a module that has
   gone offline instead of its last readings.
 
-### Tools — `PENDING`
+### Tools — `b9c64cd`
 - **Added:** `main/trellis_hardware_test.py` and
   `scripts/install/upload_trellis_test.ps1` (standalone 4x4 Trellis
   keypad/LED test); `scripts/diagnostics/capture_field_console.py` and
@@ -55,7 +55,7 @@ installers), **Hardware**.
   tests (one, the armed scan, still fails: `script` isn't set up in the
   test namespace).
 
-### Docs — `PENDING`
+### Docs — `b9c64cd`
 - **Changed:** field LCD and pinout docs describe the 74HC14 button inputs;
   UI backlog notes the battery settings that are done; removed a reference
   to an example script file that doesn't exist.
