@@ -16,6 +16,7 @@ import 'scripts/script_document.dart';
 import 'controller/field_module.dart';
 import 'widgets/maintenance_tools.dart';
 import 'widgets/mesh_panel.dart';
+import 'controller/system_arm_status.dart';
 import 'widgets/arm_key_dialog.dart';
 import 'widgets/manual_fire_panel.dart';
 import 'widgets/firmware_panel.dart';
@@ -142,6 +143,14 @@ class _RadioPageState extends State<RadioPage> with WidgetsBindingObserver {
       unawaited(_scan());
     }
   }
+
+  Color _armColor(SystemArmLevel level) => switch (level) {
+    SystemArmLevel.safe => Colors.lightGreen,
+    SystemArmLevel.commandArmed => Colors.orange,
+    SystemArmLevel.systemArmed => Colors.redAccent,
+    SystemArmLevel.error => Theme.of(context).colorScheme.error,
+    SystemArmLevel.unknown => Colors.amber,
+  };
 
   void _update() {
     if (!mounted) return;
@@ -346,6 +355,9 @@ class _RadioPageState extends State<RadioPage> with WidgetsBindingObserver {
       ),
     );
 
+    final armStatus = session == null
+        ? const SystemArmStatus(SystemArmLevel.unknown, 'ARM STATE UNKNOWN')
+        : SystemArmStatus.from(session);
     return Scaffold(
       appBar: AppBar(title: const Text('NIGHTFIRE')),
       body: SafeArea(
@@ -373,9 +385,10 @@ class _RadioPageState extends State<RadioPage> with WidgetsBindingObserver {
                         ),
                       ),
                       Text(
-                        session?.master.armSummary ?? 'ARM STATE UNKNOWN',
+                        armStatus.label,
+                        key: const ValueKey('system-arm-status'),
                         style: TextStyle(
-                          color: Colors.amber,
+                          color: _armColor(armStatus.level),
                           fontWeight: FontWeight.bold,
                         ),
                       ),
@@ -387,11 +400,21 @@ class _RadioPageState extends State<RadioPage> with WidgetsBindingObserver {
                     ],
                   ),
                   const SizedBox(height: 4),
-                  Text(
-                    session?.master.supported == true
-                        ? 'Arm acknowledgements apply to this USB session. STOP / DISARM ALL is available in Fire and Scripts.'
-                        : 'Remote arm state is unconfirmed. Arming and firing remain disabled.',
-                  ),
+                  if (armStatus.error case final error?)
+                    Text(
+                      error,
+                      key: const ValueKey('system-arm-error'),
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    )
+                  else
+                    Text(
+                      session?.master.supported == true
+                          ? 'Arm acknowledgements apply to this USB session. STOP / DISARM ALL is available in Fire and Scripts.'
+                          : 'Remote arm state is unconfirmed. Arming and firing remain disabled.',
+                    ),
                 ],
               ),
             ),

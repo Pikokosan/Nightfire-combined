@@ -20,7 +20,20 @@ installers), **Hardware**.
 
 ## Unreleased
 
-### Bridge usb-master-0.4.3
+## 2026-11-10
+
+### App — `PENDING`
+- **Changed:** the bar at the top shows the whole system's arm state instead
+  of the app's arm acknowledgements: SYSTEM SAFE (green), COMMAND MODULE ARMED
+  (orange, key on ARM), SYSTEM ARMED • n modules (red, key on ARM and modules
+  confirmed ARM), or ARM STATE UNKNOWN. Errors take over the bar with a
+  reason underneath: ARM KEY ERROR (key on at start-up), COMMAND MODULE FAULT
+  (switch fault, radio unavailable, RF heartbeat failing, app heartbeat
+  expired), ARM KEY UNKNOWN, MODULES ARMED, KEY SAFE, STOPPING / STOPPED, and
+  the last arm/fire operation that failed. Checked SAFE and COMMAND MODULE
+  ARMED on the emulator with the bench bridge.
+
+### Bridge usb-master-0.4.3 — `552617a`
 - **Added:** ARM key safety latch. If the key is on ARM when the bridge
   powers up or when the app connects, the bridge refuses ARM/FIRE/START/STEP
   until the key has been turned to SAFE. Pixel 1 flashes yellow meanwhile,
@@ -30,11 +43,11 @@ installers), **Hardware**.
   (yellow, ARM refused), key to SAFE then ARM (ARM accepted), quick
   reconnect on ARM (latched again).
 
-### Tools
+### Tools — `552617a`
 - **Added:** `scripts/diagnostics/probe_arm_key_latch.py`: watch the latch and
   test whether the bridge accepts ARM (to a UID that doesn't exist).
 
-### App
+### App — `552617a`
 - **Added:** "Turn the ARM key off" popup while the latch is set; Arm buttons
   are disabled and arming refuses with the reason. It closes by itself when
   the key reaches SAFE, and can be hidden (arming stays blocked). The app

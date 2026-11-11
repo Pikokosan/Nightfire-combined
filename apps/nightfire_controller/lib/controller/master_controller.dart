@@ -27,6 +27,10 @@ class MasterController {
   int _runOffsetMs = 0;
   bool get paused => pausedAtMs != null;
   String status = 'Master bridge firmware is required for live controls.';
+
+  /// The last arm/fire/script operation that failed, until one succeeds.
+  /// Shown in the system arm status at the top of the app.
+  String? lastError;
   Timer? _scriptTimer;
   final Stopwatch _clock = Stopwatch()..start();
   int _startMs = 0;
@@ -68,6 +72,7 @@ class MasterController {
   void invalidate() {
     _scriptTimer?.cancel();
     _scriptTimer = null;
+    lastError = null;
     armed.clear();
     _clearFired();
     uploaded.clear();
@@ -108,9 +113,12 @@ class MasterController {
       await body(epoch);
       _check(epoch);
       status = '$label complete';
+      lastError = null;
       return true;
     } catch (error) {
       status = '$label unconfirmed: $error';
+      lastError =
+          '$label not confirmed: ${error is StateError ? error.message : error}';
       return false;
     } finally {
       session.busy = false;
