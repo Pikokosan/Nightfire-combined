@@ -22,7 +22,7 @@ installers), **Hardware**.
 
 ## 2026-11-10
 
-### Tools — `PENDING`
+### Tools — `bdb59d7`
 - **Fixed:** the armed resistance scan tests stubbed the old
   `script_running` flag; the field firmware checks the shared script
   engine's `script.running`. Added a test that a running script blocks the
