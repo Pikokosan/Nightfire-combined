@@ -24,7 +24,7 @@ Nothing yet.
 
 ## 2026-11-11
 
-### Field field-module 0.3.1 — `COMMIT`
+### Field field-module 0.3.1 — `586ec11`
 - **Added:** adjustable cue hold time (how long a fired cue output stays
   on), 1-2000 ms. New unique-only radio command 0x29 reads it (empty) or
   sets it (2 bytes, ms); the reply 0x2A carries the value in use. A new
@@ -53,11 +53,11 @@ Nothing yet.
   debounce time, so release bounce isn't a second press. The second row of
   a screen is drawn on the next pass instead of after another radio wait.
 
-### Dummy nrf-dummy 0.2.1 — `COMMIT`
+### Dummy nrf-dummy 0.2.1 — `586ec11`
 - **Added:** answers 0x29/0x2A like the field module (kept until restart).
 - **Added:** pairing, the same as the field module (shared link and LCD code).
 
-### Bridge usb-master-0.4.5 — `COMMIT`
+### Bridge usb-master-0.4.5 — `586ec11`
 - **Added:** master mode relays the cue hold time command 0x29 (read, or a
   2-byte set) and refuses a set while modules may be armed. Capability bit
   128 says so.
@@ -67,7 +67,7 @@ Nothing yet.
   changes are refused during the window. Needs an app session and nothing
   that may be armed. Capability bit 4.
 
-### Bridge usb-master-0.4.4 — `COMMIT`
+### Bridge usb-master-0.4.4 — `586ec11`
 - **Added:** adjustable status LED brightness, 1-255
   (`STATUS_LED_BRIGHTNESS`, default 12, which looks the same as before).
   New command 0x1B reads or sets it, and capability bit 64 says that the
@@ -75,7 +75,7 @@ Nothing yet.
   it's refused while modules may be armed. Reinstalls keep the bridge's
   value.
 
-### App — `COMMIT`
+### App — `586ec11`
 - **Added:** Modules → **Pair modules**: opens a 10 s pairing window on the
   bridge, lists the modules that paired, then runs discovery. Disabled while
   modules are armed; needs bridge usb-master-0.4.5.
@@ -93,7 +93,7 @@ Nothing yet.
   (1-100 %, square curve so most of the travel is at the dim end; 22 % is
   the old level). Disabled on older bridges and while modules are armed.
 
-### Tools — `COMMIT`
+### Tools — `586ec11`
 - **Added:** `set_bridge_leds.py --brightness`, and
   `scripts/diagnostics/probe_led_brightness.py` to read or set it over USB.
 - **Fixed:** `install_usb_bridge.py` ran the bridge out of memory reading
