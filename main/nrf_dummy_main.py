@@ -18,7 +18,7 @@ except Exception:
 
 
 APP_FIRMWARE_NAME = "nrf-dummy"
-APP_FIRMWARE_VERSION = "0.2.0"
+APP_FIRMWARE_VERSION = "0.2.1"
 
 DEFAULT_NETWORK_ID = 0x04D2
 DEFAULT_GROUP_ID = 0x0001
@@ -90,6 +90,7 @@ _sim_last_refresh = 0
 _last_fire_mask = 0
 _last_fire_seq = 0
 _last_fire_ms = 0
+FIRE_PULSE_MS = getattr(node_config, "FIRE_PULSE_MS", 5)
 
 # Simulated resistance of a connected cue: 1.8-2.4 ohm, in deci-ohms.
 SIM_CONNECTED_MIN_DECI_OHMS = 18
@@ -197,6 +198,31 @@ def build_output_status_payload():
         (age_ms & 0xFFFF).to_bytes(2, "big") +
         loaded.to_bytes(2, "big")
     )
+
+
+def handle_fire_pulse(pkt):
+    """Like the field module's CMD_FIRE_PULSE; the dummy holds no outputs,
+    so the hold time is only remembered until restart."""
+    global FIRE_PULSE_MS
+
+    data = pkt.get("data", b"")
+    if data:
+        if len(data) != 2:
+            link.nack(pkt, CMD_FIRE_PULSE, NACK_BAD_LENGTH)
+            return
+        if ARMED:
+            link.nack(pkt, CMD_FIRE_PULSE, NACK_REJECTED_ARMED)
+            return
+        if script.running:
+            link.nack(pkt, CMD_FIRE_PULSE, NACK_BUSY)
+            return
+        value = int.from_bytes(data, "big")
+        if not 1 <= value <= 2000:
+            link.nack(pkt, CMD_FIRE_PULSE, NACK_INVALID_VALUE)
+            return
+        FIRE_PULSE_MS = value
+        print("DUMMY FIRE PULSE %dms" % value)
+    link.respond(CMD_FIRE_PULSE_RSP, FIRE_PULSE_MS.to_bytes(2, "big"))
 
 
 class DummyNode:
@@ -325,7 +351,7 @@ def check_master_link_failsafe():
         disarm("DISARMED - master link timeout")
 
 
-def make_button(name, pin_id):
+def make_button(name, pin_id, irq=True):
     if pin_id is None:
         return None
     try:
@@ -333,7 +359,7 @@ def make_button(name, pin_id):
     except Exception as e:
         print("LCD button init failed P%s:" % str(pin_id), e)
         pin = None
-    return name, DebouncedButton(pin, LCD_BUTTON_DEBOUNCE_MS)
+    return name, DebouncedButton(pin, LCD_BUTTON_DEBOUNCE_MS, irq=irq)
 
 
 def init_lcd_ui():
@@ -409,6 +435,9 @@ def handle(pkt):
     elif cmd == CMD_OUTPUT_STATUS_REQ:
         if link.is_for_me(pkt) and not pkt.get("data", b""):
             link.respond(CMD_OUTPUT_STATUS_RSP, build_output_status_payload())
+    elif cmd == CMD_FIRE_PULSE:
+        if link.is_for_me(pkt):
+            handle_fire_pulse(pkt)
     elif not script.handle(pkt):
         link.handle_common(pkt)
 
@@ -420,6 +449,11 @@ def handle_radio_payload(payload):
 def setup():
     init_lcd_ui()
     radio_ready = link.init_radio()
+    # Holding UP at power-up starts pairing with a bridge.
+    up = make_button("up", UP_BUTTON_PIN, irq=False)
+    if up and up[1].held_for(1000):
+        radio_ready = link.start_pairing()
+        lcd.show_pairing()
     print(
         "Nightfire nRF52840 dummy radio node uid=0x%08X group=0x%04X net=0x%04X" %
         (UNIQUE_ID, GROUP_ID, NETWORK_ID)
@@ -451,7 +485,7 @@ def main():
                 continue
 
             link.service()
-            payload = nrf_radio.recv(script.wait_ms(link.rx_timeout_ms(RADIO_RX_TIMEOUT_MS)))
+            payload = nrf_radio.recv(script.wait_ms(lcd.wait_ms(link.rx_timeout_ms(RADIO_RX_TIMEOUT_MS))))
             if payload:
                 handle_radio_payload(payload)
             lcd.service()

@@ -27,6 +27,16 @@ CMD_GET_KEEPALIVE_STATUS = 0x19
 # 1 no reply) route(1, 0 direct, 1 via relay, 2 flood) relay_uid(4)
 # attempts(1). A bridge without mesh answers with FLAG_ERROR.
 CMD_SEND_NFCP_RELIABLE = 0x1A
+# Status LED brightness. Empty payload: reply brightness(1). Payload
+# brightness(1, 1-255): set it, save it in nrf_bridge_config.py (master
+# firmware), reply with the new value. Setting needs an app session and no
+# modules that may be armed.
+CMD_LED_BRIGHTNESS = 0x1B
+# Pairing window (usb-master-0.4.5+, capability 4): 1 byte seconds (1-30)
+# moves the radio to the pairing network/channel and broadcasts this bridge's
+# network and channel to modules in pairing mode; their replies arrive as
+# normal NFCP RX frames. 0 ends it early; empty reads the seconds left.
+CMD_PAIR = 0x1C
 CMD_BOOTLOADER = 0x30
 CMD_RESET = 0x31
 CMD_FILE_BEGIN = 0x32

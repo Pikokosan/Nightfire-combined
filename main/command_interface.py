@@ -23,6 +23,10 @@ class CommandInterface:
         # the LED output is valid; otherwise it is left untouched.
         self.power_pin = getattr(config, "STATUS_LED_POWER_PIN", None)
         self.power_on = 1 if getattr(config, "STATUS_LED_POWER_ON_VALUE", 1) else 0
+        # Status LED brightness, 1-255 (255 = full). The default, 12, is the
+        # dim level these pixels have always used.
+        self.brightness = self.DEFAULT_BRIGHTNESS
+        self.set_brightness(getattr(config, "STATUS_LED_BRIGHTNESS", self.DEFAULT_BRIGHTNESS))
         self.power = None
         self.timeout = 3000
         self.switch = 0
@@ -43,6 +47,8 @@ class CommandInterface:
         self.last_colors = None
         self.keepalive_supported = False
         self.group_settings_supported = False
+        self.fire_pulse_supported = False
+        self.pairing_supported = False
         # Fed by the main loop: MasterControl.arm_state() (None without master
         # firmware) and the tick of the last RF keepalive sent.
         self.module_arm = None
@@ -90,6 +96,18 @@ class CommandInterface:
             except Exception:
                 self.led_status = 2
                 self.faults |= 2
+
+    def set_brightness(self, value):
+        """Set the status LED brightness (1-255); returns False if invalid."""
+        if type(value) is not int or not 1 <= value <= 255:
+            return False
+        self.brightness = value
+        self.last_colors = None   # rewrite the pixels on the next poll
+        return True
+
+    def scale(self, color):
+        level = self.brightness
+        return tuple(0 if c == 0 else max(1, (c * level + 127) // 255) for c in color)
 
     def heartbeat(self, payload):
         if len(payload) != 4:
@@ -151,7 +169,7 @@ class CommandInterface:
                        (32 if self.key_latched() else 0))
         if self.led_status != 1:
             return
-        colors = self.colors(now, session)
+        colors = [self.scale(color) for color in self.colors(now, session)]
         colors += [(0, 0, 0)] * (self.led_count - 4)
         encoded = bytes(color["RGB".index(component)] for color in colors for component in self.order)
         if encoded == self.last_colors:
@@ -163,11 +181,15 @@ class CommandInterface:
             self.led_status = 2
             self.faults |= 2
 
-    GREEN = (0, 10, 0)
-    RED = (12, 0, 0)
-    AMBER = (10, 5, 0)
-    BLUE = (0, 0, 12)
-    YELLOW = (10, 9, 0)
+    # Full-brightness colours. At the default brightness (12) they scale to
+    # GREEN (0, 10, 0), RED (12, 0, 0), AMBER (10, 5, 0), BLUE (0, 0, 12)
+    # and YELLOW (10, 9, 0).
+    GREEN = (0, 212, 0)
+    RED = (255, 0, 0)
+    AMBER = (212, 106, 0)
+    BLUE = (0, 0, 255)
+    YELLOW = (212, 191, 0)
+    DEFAULT_BRIGHTNESS = 12
     OFF = (0, 0, 0)
     KEY_LATCHED = 32   # fault bit: ARM key on at power-on/connect
     KEEPALIVE_BLINK_MS = 150
@@ -204,7 +226,7 @@ class CommandInterface:
 
     def payload(self):
         age = 65535 if self.last_host is None else min(65535, max(0, self.difference(self.clock(), self.last_host)))
-        capabilities = 8 | (32 if self.group_settings_supported else 0) | (16 if self.keepalive_supported else 0) | (1 if self.input is not None else 0) | (2 if self.led_status == 1 else 0)
+        capabilities = (128 if self.fire_pulse_supported else 0) | (4 if self.pairing_supported else 0) | 64 | 8 | (32 if self.group_settings_supported else 0) | (16 if self.keepalive_supported else 0) | (1 if self.input is not None else 0) | (2 if self.led_status == 1 else 0)
         return (bytes([1, capabilities, self.switch, self.led_status, self.session_state(), self.faults]) +
                 bridge_radio.int_to_be(age, 2) + bridge_radio.int_to_be(self.timeout, 2) +
                 bytes([255 if self.switch_pin is None else self.switch_pin,

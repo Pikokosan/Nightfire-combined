@@ -41,7 +41,7 @@ class BridgeMaintenance:
         names = ('RADIO_ADDRESS', 'RADIO_TX_POWER', 'ARM_SWITCH_PIN',
                  'STATUS_LED_PIN', 'STATUS_LED_COUNT', 'STATUS_LED_ORDER',
                  'STATUS_LED_TIMING_NS', 'STATUS_LED_POWER_PIN',
-                 'STATUS_LED_POWER_ON_VALUE')
+                 'STATUS_LED_POWER_ON_VALUE', 'STATUS_LED_BRIGHTNESS')
         with open('nrf_bridge_config.py.tmp', 'w') as output:
             output.write('MASTER_ENABLED = True\nNETWORK_ID = %d\nRADIO_CHANNEL = %d\n' %
                          (network, channel))

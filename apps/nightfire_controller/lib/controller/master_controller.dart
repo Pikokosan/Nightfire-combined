@@ -509,6 +509,75 @@ class MasterController {
         session.modules[uid]!.resistance = null;
       });
 
+  /// Sends the cue hold time to every discovered module. Each module saves
+  /// it and replies with the value it now uses; modules that don't confirm
+  /// are listed in the error (no reply: field firmware before 0.3.1).
+  Future<bool> pushFirePulse(int ms) =>
+      _operation('Send cue hold time', (epoch) async {
+        _requireDisarmed();
+        if (!session.supportsFirePulse) {
+          throw StateError('Needs radio firmware usb-master-0.4.5 or newer');
+        }
+        if (ms < RadioSession.firePulseMinMs ||
+            ms > RadioSession.firePulseMaxMs) {
+          throw ArgumentError(
+            'Hold time must be ${RadioSession.firePulseMinMs}-'
+            '${RadioSession.firePulseMaxMs} ms',
+          );
+        }
+        final targets = session.modules.values
+            .where((m) => m.seenInScan)
+            .toList();
+        if (targets.isEmpty) throw StateError('Scan for modules first');
+        final failed = <String>[];
+        for (final module in targets) {
+          try {
+            module.firePulseMs = await _firePulse(
+              module.uid,
+              epoch,
+              bigEndian(ms, 2),
+            );
+            module.firePulseError = module.firePulseMs == ms
+                ? null
+                : 'Module kept ${module.firePulseMs} ms';
+          } on ModuleRejection catch (error) {
+            _check(epoch);
+            module.firePulseError = switch (error.code) {
+              1 => 'Armed',
+              5 => 'Busy (script running)',
+              3 => 'Value refused',
+              _ => 'Rejected (code ${error.code})',
+            };
+          } catch (_) {
+            _check(epoch);
+            module.firePulseError = 'No reply (needs field firmware 0.3.1+)';
+          }
+          if (module.firePulseError != null) failed.add(module.id);
+          session.notifyListeners();
+        }
+        if (failed.isNotEmpty) {
+          throw StateError(
+            'Hold time not confirmed by ${failed.length} module(s): '
+            '${failed.join(', ')}',
+          );
+        }
+      });
+
+  Future<int> _firePulse(int uid, int epoch, [List<int> data = const []]) async {
+    _check(epoch);
+    final reply = await session._queryModule(
+      uid,
+      0x29,
+      0x2a,
+      frame: masterUnique(uid, 0x29, data),
+    );
+    _check(epoch);
+    if (reply.data.length != 2) {
+      throw const FormatException('Invalid hold time reply');
+    }
+    return readUnsigned(reply.data, 0, 2);
+  }
+
   /// Lead time before a synchronized start: a base plus a share per module.
   int startLeadMs = 2000;
   int startLeadPerModuleMs = 4000;

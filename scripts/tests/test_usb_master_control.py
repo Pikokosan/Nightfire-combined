@@ -50,7 +50,7 @@ class MasterTests(unittest.TestCase):
             self.assertIsNotNone(decode_master(frame), frame.hex())
 
     def test_unknown_commands_and_bad_lengths_rejected(self):
-        no_data_allowed = {0x10, 0x11, 0x22, 0x24, 0x27, 0x52, 0x64, 0x7f}
+        no_data_allowed = {0x10, 0x11, 0x22, 0x24, 0x27, 0x29, 0x52, 0x64, 0x7f}
         for command in range(256):
             self.assertEqual(decode_master(self.p.build_unique_command(self.uid, command)) is not None,
                              command in no_data_allowed)
@@ -81,6 +81,17 @@ class MasterTests(unittest.TestCase):
         self.master.permit(self.p.build_arm_unique(self.uid), True)
         self.assertTrue(self.master.permit(fire, True))
         self.assertFalse(self.master.permit(self.p.build_set_group(self.uid, 2), True))
+
+    def test_fire_pulse_read_and_set_only_while_safe(self):
+        read = self.p.build_unique_command(self.uid, 0x29)
+        set_ms = self.p.build_unique_command(self.uid, 0x29, (250).to_bytes(2, 'big'))
+        self.assertIsNone(decode_master(self.p.build_unique_command(self.uid, 0x29, b'\x01')))
+        self.assertFalse(self.master.permit(set_ms, False))
+        self.assertTrue(self.master.permit(read, True))
+        self.assertTrue(self.master.permit(set_ms, True))
+        self.master.permit(self.p.build_arm_unique(self.uid), True)
+        self.assertTrue(self.master.permit(read, True))
+        self.assertFalse(self.master.permit(set_ms, True))
 
     def test_stop_and_disarm_allowed_without_host(self):
         for frame in (self.p.build_disarm_broadcast(), self.p.build_disarm_unique(self.uid),
@@ -246,10 +257,12 @@ class MaintenanceTests(unittest.TestCase):
 
     def test_radio_save_preserves_interlock(self):
         Path('nrf_bridge_config.py').write_text('original')
-        self.maintenance.config = SimpleNamespace(ARM_SWITCH_PIN=9, STATUS_LED_PIN=10)
+        self.maintenance.config = SimpleNamespace(ARM_SWITCH_PIN=9, STATUS_LED_PIN=10,
+                                                  STATUS_LED_BRIGHTNESS=40)
         self.maintenance.save(1234, 90)
         content = Path('nrf_bridge_config.py').read_text()
         self.assertIn('ARM_SWITCH_PIN = 9', content)
+        self.assertIn('STATUS_LED_BRIGHTNESS = 40', content)
         self.assertIn('MASTER_ENABLED = True', content)
         self.assertEqual(Path('nrf_bridge_config.py.bak').read_text(), 'original')
 

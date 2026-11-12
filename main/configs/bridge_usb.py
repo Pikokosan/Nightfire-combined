@@ -19,3 +19,4 @@ STATUS_LED_ORDER = 'RGB'
 STATUS_LED_TIMING_NS = (150, 1100, 550, 700)   # (T0H, T0L, T1H, T1L) ns
 STATUS_LED_POWER_PIN = 13     # P0.13 switches the nice!nano VCC pin
 STATUS_LED_POWER_ON_VALUE = 1 # high = LED power on (measured on the bench)
+STATUS_LED_BRIGHTNESS = 12    # 1-255; also adjustable in the app's Settings

@@ -13,12 +13,111 @@ installers), **Hardware**.
 
 | Part | Version | Note |
 |---|---|---|
-| Bridge | usb-master-0.4.3 | ARM key safety latch. Bundle 24,654 bytes. |
-| Field | field-module 0.3.0 | |
-| Dummy | nrf-dummy 0.2.0 | |
+| Bridge | usb-master-0.4.5 | Cue hold time relay and module pairing. |
+| Field | field-module 0.3.1 | Adjustable cue hold time; pairing. |
+| Dummy | nrf-dummy 0.2.1 | Pairing. |
 | App | 0.4.0 (build 4) | |
 
 ## Unreleased
+
+Nothing yet.
+
+## 2026-11-11
+
+### Field field-module 0.3.1 — `COMMIT`
+- **Added:** adjustable cue hold time (how long a fired cue output stays
+  on), 1-2000 ms. New unique-only radio command 0x29 reads it (empty) or
+  sets it (2 bytes, ms); the reply 0x2A carries the value in use. A new
+  value is saved in `field_fire_pulse.bin` and replaces `FIRE_PULSE_MS`
+  from the config at boot. Refused while armed, while a script runs or a
+  cue is on, or out of range.
+- **Fixed:** cue outputs were held on for up to the 50 ms radio receive
+  timeout rather than `FIRE_PULSE_MS` (5 ms), because the main loop only
+  switched them off between receive waits. The receive wait now ends when
+  the earliest active cue is due, so the hold time is kept without
+  blocking. With the default 5 ms, real pulses are now shorter than before.
+- **Added:** pairing with a bridge. LCD menu → Pair, or UP held for a
+  second at power-up, listens on the pairing network 0x7A1B / channel 80 for
+  2 minutes. A bridge's offer (broadcast 0x34) sets and saves the module's
+  network and channel; the module replies 0x35 and moves to them. Its group
+  is kept. Disarmed only; arming or leaving the pairing screen ends it.
+- **Fixed:** BACK did nothing on the Pro Micro board. It is on P0.10, an
+  NFC antenna pin that isn't GPIO until `UICR.NFCPINS` is cleared (the same
+  goes for ARM_CONTROL on P0.09). The firmware now clears it at boot when
+  the config uses either pin, and restarts once. If the write doesn't take,
+  it reports a startup fault instead of restarting again.
+- **Fixed:** LCD buttons were slow and missed short taps: a press only
+  counted after two readings 80 ms apart, and buttons were read once per
+  main-loop pass (up to the 50 ms radio wait). A pin interrupt now latches
+  each press and it counts at once; then the button is ignored for the
+  debounce time, so release bounce isn't a second press. The second row of
+  a screen is drawn on the next pass instead of after another radio wait.
+
+### Dummy nrf-dummy 0.2.1 — `COMMIT`
+- **Added:** answers 0x29/0x2A like the field module (kept until restart).
+- **Added:** pairing, the same as the field module (shared link and LCD code).
+
+### Bridge usb-master-0.4.5 — `COMMIT`
+- **Added:** master mode relays the cue hold time command 0x29 (read, or a
+  2-byte set) and refuses a set while modules may be armed. Capability bit
+  128 says so.
+- **Added:** pairing window, command 0x1C (1-30 s; 0 ends it). The radio
+  moves to the pairing network and channel and offers this bridge's network
+  and channel every 300 ms, then goes back. Field sends and network/channel
+  changes are refused during the window. Needs an app session and nothing
+  that may be armed. Capability bit 4.
+
+### Bridge usb-master-0.4.4 — `COMMIT`
+- **Added:** adjustable status LED brightness, 1-255
+  (`STATUS_LED_BRIGHTNESS`, default 12, which looks the same as before).
+  New command 0x1B reads or sets it, and capability bit 64 says that the
+  bridge supports it. A new value is saved in `nrf_bridge_config.py`, and
+  it's refused while modules may be armed. Reinstalls keep the bridge's
+  value.
+
+### App — `COMMIT`
+- **Added:** Modules → **Pair modules**: opens a 10 s pairing window on the
+  bridge, lists the modules that paired, then runs discovery. Disabled while
+  modules are armed; needs bridge usb-master-0.4.5.
+- **Removed:** the Battery section of Settings (pack type and voltage
+  calibration). Gauges still use any calibration saved earlier.
+- **Added:** Settings → Modules → Cue hold time (1-2000 ms, saved in the
+  app) with **Send to modules**, which sends it to every discovered module
+  and lists each module's confirmed value, or why it didn't take (armed,
+  busy, no reply from field firmware before 0.3.1). Needs bridge
+  usb-master-0.4.5; disabled while modules are armed or a script runs.
+- **Tests:** the script picker lifecycle tests now step through the real
+  Android states (resumed, inactive, hidden, paused); the text field's
+  lifecycle listener asserts on skipped steps.
+- **Added:** Settings → Command module → Status LED brightness slider
+  (1-100 %, square curve so most of the travel is at the dim end; 22 % is
+  the old level). Disabled on older bridges and while modules are armed.
+
+### Tools — `COMMIT`
+- **Added:** `set_bridge_leds.py --brightness`, and
+  `scripts/diagnostics/probe_led_brightness.py` to read or set it over USB.
+- **Fixed:** `install_usb_bridge.py` ran the bridge out of memory reading
+  back the 25 KB bundle (backup and verify) in one piece; it now reads files
+  in 512-byte chunks.
+
+Checked on the COM12 bench bridge: 0.4.4 installed, brightness read as 12,
+set to 120 and saved in `nrf_bridge_config.py`, then set back to 12. On
+the emulator through the relay, the slider read 22 % from the bridge, and
+moving it to 60 % saved level 92 on the bridge.
+
+Cue hold time: offline tests only (Python: field command, saved value,
+capped receive wait, bridge relay policy; app: send to all modules,
+per-module failures, refusals, Settings field). Not yet run on a field
+module or the bridge.
+
+Pairing: checked on the Pro Micro field module and the bridge from the
+tablet app; the module paired and was then discovered.
+
+Buttons and NFC pins: on the Pro Micro field module (field_main.mpy 53,062
+bytes) `UICR.NFCPINS` read 0xFFFFFFFE after the first boot. A trace of the
+real main loop showed every OK, UP and DOWN press acted on once, on the first
+pass after it (passes about 53 ms, LCD row writes up to 30 ms). BACK did not
+reach P0.10 at all; that was a wiring fault on the test board, now fixed.
 
 ## 2026-11-10
 

@@ -50,6 +50,7 @@ def decode_master(frame):
     else:
         valid = ((command in (0x10, 0x11, 0x22, 0x27, 0x52, 0x64) and not data) or
                  (command == 0x24 and (not data or data == b'\x01')) or
+                 (command == 0x29 and len(data) in (0, 2)) or
                  (command == 0x20 and 1 <= len(data) <= 8 and any(data)) or
                  (command == 0x30 and len(data) == 4) or
                  (command in (0x31, 0x32, 0x62, 0x63, 0x70, 0x73) and len(data) == 2) or
@@ -79,6 +80,59 @@ def broadcast(command, data=b''):
         if value == 255:
             result.append(254)
     return bytes(result)
+
+
+# Same values as nfcp.py: modules in pairing mode listen here.
+PAIR_NETWORK_ID = 0x7A1B
+PAIR_RADIO_CHANNEL = 80
+PAIR_OFFER_GAP_MS = 300
+PAIR_MAX_SECONDS = 30
+
+
+class BridgePairing:
+    """The bridge side of pairing: for a few seconds the radio sits on the
+    pairing network and channel and offers this bridge's own network and
+    channel (NFCP broadcast 0x34) every PAIR_OFFER_GAP_MS."""
+
+    def __init__(self, clock, difference):
+        self.clock = clock
+        self.difference = difference
+        self.until = None
+        self.last_offer = None
+        self.nonce = 0
+
+    def active(self):
+        return self.until is not None
+
+    def start(self, seconds):
+        if not 1 <= seconds <= PAIR_MAX_SECONDS:
+            return False
+        self.until = self.clock() + seconds * 1000
+        self.last_offer = None
+        self.nonce = (self.nonce + 1) & 0xFFFF or 1
+        return True
+
+    def stop(self):
+        self.until = None
+
+    def seconds_left(self):
+        if self.until is None:
+            return 0
+        return max(0, (self.difference(self.until, self.clock()) + 999) // 1000)
+
+    def poll(self, network, channel):
+        """The offer frame to send now, or None. Ends the window on time."""
+        if self.until is None:
+            return None
+        now = self.clock()
+        if self.difference(now, self.until) >= 0:
+            self.until = None
+            return None
+        if self.last_offer is not None and self.difference(now, self.last_offer) < PAIR_OFFER_GAP_MS:
+            return None
+        self.last_offer = now
+        return broadcast(0x34, bridge_radio.int_to_be(network, 2) + bytes([channel & 0xFF]) +
+                         bridge_radio.int_to_be(self.nonce, 2))
 
 
 # After a STOP the RF keepalive is withheld for longer than the field's
@@ -131,6 +185,8 @@ class MasterControl:
         elif command in (0x26, 0x30, 0x31, 0x32, 0x33, 0x60, 0x61, 0x62,
                          0x64, 0x70, 0x71) and self.may_be_armed:
             return False
+        elif command == 0x29 and data and self.may_be_armed:
+            return False  # The cue hold time only changes while all is safe.
         return True
 
     def stop(self):

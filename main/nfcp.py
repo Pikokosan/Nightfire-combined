@@ -28,6 +28,15 @@ CMD_SET_UNIQUE   = 0x30
 CMD_SET_GROUP    = 0x31
 CMD_SET_NETWORK  = 0x32
 CMD_SET_RADIO_CHANNEL = 0x33
+# Pairing: a module in pairing mode listens on PAIR_NETWORK_ID /
+# PAIR_RADIO_CHANNEL. The bridge broadcasts CMD_PAIR there with its own
+# network (u16), channel (u8) and a nonce (u16); the module saves the network
+# and channel, replies CMD_PAIR_RSP (same 5 bytes + its group, u16), and
+# moves to them. usb_master_control.py keeps the same two values.
+CMD_PAIR = 0x34
+CMD_PAIR_RSP = 0x35
+PAIR_NETWORK_ID = 0x7A1B
+PAIR_RADIO_CHANNEL = 80
 CMD_DISCOVER     = 0x40
 CMD_DISCOVER_RSP = 0x41
 
@@ -69,6 +78,8 @@ CMD_RESISTANCE_RSP = 0x25   # Response-only resistance scan result
 CMD_SET_RESISTANCE_CAL = 0x26  # Unique-only bank calibration update
 CMD_OUTPUT_STATUS_REQ = 0x27   # Unique-only physical output state request
 CMD_OUTPUT_STATUS_RSP = 0x28   # Response-only physical output state
+CMD_FIRE_PULSE = 0x29          # Unique-only cue hold time: read (empty) or set (u16 ms)
+CMD_FIRE_PULSE_RSP = 0x2A      # Response-only cue hold time (u16 ms)
 
 RESISTANCE_PAYLOAD_VERSION = 0x01
 RESISTANCE_UNIT_DECI_OHM = 0x01
@@ -187,7 +198,7 @@ class NFCP:
 
     # Broadcast commands that do not target a single module.
     def build_broadcast(self, cmd: int, data: bytes = b"") -> bytes:
-        if cmd not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER, CMD_KEEPALIVE, CMD_SCRIPT_START, CMD_SCRIPT_STOP, CMD_SCRIPT_HEARTBEAT, CMD_TIME_SYNC):
+        if cmd not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER, CMD_KEEPALIVE, CMD_SCRIPT_START, CMD_SCRIPT_STOP, CMD_SCRIPT_HEARTBEAT, CMD_TIME_SYNC, CMD_PAIR):
             raise NFCPError("Broadcast only allowed for ARM/DISARM/DISCOVER/KEEPALIVE/SCRIPT")
         return self._frame(SOF_BROADCAST, bytes([self.node_id, cmd]) + data)
 
@@ -660,7 +671,7 @@ class NFCPStreamParser:
             pkt["src"] = payload[0]
             pkt["cmd"] = payload[1]
             pkt["data"] = payload[2:]
-            if pkt["cmd"] not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER, CMD_KEEPALIVE, CMD_SCRIPT_START, CMD_SCRIPT_STOP, CMD_SCRIPT_HEARTBEAT, CMD_TIME_SYNC):
+            if pkt["cmd"] not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER, CMD_KEEPALIVE, CMD_SCRIPT_START, CMD_SCRIPT_STOP, CMD_SCRIPT_HEARTBEAT, CMD_TIME_SYNC, CMD_PAIR):
                 return None
 
         elif self.frame_type == SOF_GROUP:
@@ -679,6 +690,7 @@ class NFCPStreamParser:
                 CMD_RESISTANCE_REQ,
                 CMD_SET_RESISTANCE_CAL,
                 CMD_OUTPUT_STATUS_REQ,
+                CMD_FIRE_PULSE,
                 CMD_INFO_REQ,
                 CMD_OTA_UPDATE_BEGIN,
                 CMD_OTA_UPDATE_WRITE,
@@ -717,6 +729,7 @@ class NFCPStreamParser:
             CMD_RESISTANCE_REQ,
             CMD_SET_RESISTANCE_CAL,
             CMD_OUTPUT_STATUS_REQ,
+            CMD_FIRE_PULSE,
             CMD_INFO_REQ,
             CMD_OTA_UPDATE_BEGIN,
             CMD_OTA_UPDATE_WRITE,

@@ -66,6 +66,11 @@ class FieldModule {
   String get scriptStatus => scriptId == null ? 'Not loaded' : 'Loaded';
   ResistanceSnapshot? resistance;
   OutputStatus? outputStatus;
+
+  /// Cue hold time the module last reported (ms), and whether its last
+  /// update failed (no reply usually means field firmware before 0.3.1).
+  int? firePulseMs;
+  String? firePulseError;
   DateTime? outputStatusAt;
   DateTime? measuredAt;
   String? error;

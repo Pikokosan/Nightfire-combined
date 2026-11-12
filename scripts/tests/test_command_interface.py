@@ -67,7 +67,7 @@ class InterfaceTests(unittest.TestCase):
         # Pixel 1 flashes yellow; the fault pixel stays dark for the latch.
         self.now = 1000
         interface.poll(True)
-        self.assertEqual(self.writes[-1][1][:3], bytes(interface.YELLOW))
+        self.assertEqual(self.writes[-1][1][:3], bytes((10, 9, 0)))
         self.assertEqual(self.writes[-1][1][9:], b"\x00\x00\x00")
         self.now = 1500
         interface.poll(True)
@@ -185,6 +185,28 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(self.pixels(interface)[2], (0, 10, 0))  # RF keepalive blink
         self.now = 700
         self.assertEqual(self.pixels(interface)[2], (0, 0, 12))
+
+    def test_brightness_scales_colours_and_rewrites_pixels(self):
+        interface = self.make(STATUS_LED_PIN=8, STATUS_LED_TIMING_NS=(300, 950, 900, 350))
+        self.assertEqual(interface.brightness, 12)
+        self.assertTrue(interface.payload()[1] & 64)      # brightness command
+        interface.heartbeat(b"1234")
+        self.assertEqual(self.pixels(interface)[2], (0, 0, 12))
+        self.assertTrue(interface.set_brightness(255))
+        self.assertEqual(self.pixels(interface)[1], (212, 106, 0))   # amber
+        self.assertEqual(self.pixels(interface)[2], (0, 0, 255))
+        writes = len(self.writes)
+        self.assertTrue(interface.set_brightness(1))      # dimmest: never fully off
+        self.assertEqual(self.pixels(interface)[1], (1, 1, 0))
+        self.assertEqual(len(self.writes), writes + 1)
+        for bad in (0, 256, -1, "12", None):
+            self.assertFalse(interface.set_brightness(bad))
+        self.assertEqual(interface.brightness, 1)
+
+    def test_brightness_from_config_and_invalid_falls_back(self):
+        self.assertEqual(self.make(STATUS_LED_BRIGHTNESS=80).brightness, 80)
+        self.assertEqual(self.make(STATUS_LED_BRIGHTNESS=0).brightness, 12)
+        self.assertEqual(self.make(STATUS_LED_BRIGHTNESS="x").brightness, 12)
 
     def test_invalid_configuration_and_output_fault_do_not_escape(self):
         for settings in ({"STATUS_LED_PIN": 8, "STATUS_LED_ORDER": None},

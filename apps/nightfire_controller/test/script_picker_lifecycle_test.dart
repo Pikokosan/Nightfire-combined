@@ -21,11 +21,34 @@ class PickerRadio extends FieldRadio {
   }
 }
 
+/// Walks the lifecycle through the states Android really reports (resumed,
+/// inactive, hidden, paused); text fields' lifecycle listeners assert on
+/// skipped steps.
+void moveTo(WidgetTester tester, AppLifecycleState target) {
+  const order = [
+    AppLifecycleState.resumed,
+    AppLifecycleState.inactive,
+    AppLifecycleState.hidden,
+    AppLifecycleState.paused,
+  ];
+  final current = tester.binding.lifecycleState;
+  if (current == null || !order.contains(current)) {
+    tester.binding.handleAppLifecycleStateChanged(target);
+    return;
+  }
+  var index = order.indexOf(current);
+  final end = order.indexOf(target);
+  while (index != end) {
+    index += end > index ? 1 : -1;
+    tester.binding.handleAppLifecycleStateChanged(order[index]);
+  }
+}
+
 void main() {
   testWidgets(
     'recovers a transport lost while picker is open after activity resumes',
     (tester) async {
-      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      moveTo(tester, AppLifecycleState.resumed);
       final radio = PickerRadio();
       final picker = Completer<ScriptSource?>();
       await tester.pumpWidget(
@@ -43,19 +66,19 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Load script'));
       await tester.pump();
-      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      moveTo(tester, AppLifecycleState.paused);
       radio.stream.addError(StateError('Test background socket abort'));
       await tester.pump();
       picker.complete(null);
       await tester.pump();
       expect(radio.connects, 1);
-      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      moveTo(tester, AppLifecycleState.resumed);
       await tester.pumpAndSettle();
       expect(radio.connects, 2);
       // Subsequent ordinary resume events must not reconnect again.
-      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      moveTo(tester, AppLifecycleState.paused);
       await tester.pump();
-      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      moveTo(tester, AppLifecycleState.resumed);
       await tester.pumpAndSettle();
       expect(radio.connects, 2);
       await tester.pumpWidget(const SizedBox());
@@ -69,9 +92,7 @@ void main() {
       testWidgets(
         'picker $outcome, result before resume=$resultBeforeResume preserves USB then restores background disconnect',
         (tester) async {
-          tester.binding.handleAppLifecycleStateChanged(
-            AppLifecycleState.resumed,
-          );
+          moveTo(tester, AppLifecycleState.resumed);
           final radio = PickerRadio();
           final picker = Completer<ScriptSource?>();
           await tester.pumpWidget(
@@ -92,15 +113,11 @@ void main() {
           await tester.pumpAndSettle();
           await tester.tap(find.text('Load script'));
           await tester.pump();
-          tester.binding.handleAppLifecycleStateChanged(
-            AppLifecycleState.paused,
-          );
+          moveTo(tester, AppLifecycleState.paused);
           await tester.pump();
           expect(radio.disconnects, baseline);
           if (!resultBeforeResume) {
-            tester.binding.handleAppLifecycleStateChanged(
-              AppLifecycleState.resumed,
-            );
+            moveTo(tester, AppLifecycleState.resumed);
           }
           if (outcome == 'error') {
             picker.completeError(const FormatException('Test picker error'));
@@ -118,14 +135,10 @@ void main() {
           if (resultBeforeResume) {
             // Completing the result must not re-enable a disconnect while the
             // activity is still returning from the picker.
-            tester.binding.handleAppLifecycleStateChanged(
-              AppLifecycleState.paused,
-            );
+            moveTo(tester, AppLifecycleState.paused);
             await tester.pump();
             expect(radio.disconnects, baseline);
-            tester.binding.handleAppLifecycleStateChanged(
-              AppLifecycleState.resumed,
-            );
+            moveTo(tester, AppLifecycleState.resumed);
           }
           await tester.pumpAndSettle();
           expect(radio.disconnects, baseline);
@@ -135,14 +148,10 @@ void main() {
           if (outcome == 'error') {
             expect(find.textContaining('Test picker error'), findsOneWidget);
           }
-          tester.binding.handleAppLifecycleStateChanged(
-            AppLifecycleState.paused,
-          );
+          moveTo(tester, AppLifecycleState.paused);
           await tester.pump();
           expect(radio.disconnects, baseline + 1);
-          tester.binding.handleAppLifecycleStateChanged(
-            AppLifecycleState.resumed,
-          );
+          moveTo(tester, AppLifecycleState.resumed);
           await tester.pumpWidget(const SizedBox());
           await tester.pumpAndSettle();
           expect(tester.takeException(), isNull);

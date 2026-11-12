@@ -13,7 +13,35 @@ import raw_micropython_upload as raw
 
 INTERFACE_SETTINGS = (b'ARM_SWITCH_PIN', b'STATUS_LED_PIN', b'STATUS_LED_COUNT',
                       b'STATUS_LED_ORDER', b'STATUS_LED_TIMING_NS',
-                      b'STATUS_LED_POWER_PIN', b'STATUS_LED_POWER_ON_VALUE')
+                      b'STATUS_LED_POWER_PIN', b'STATUS_LED_POWER_ON_VALUE',
+                      b'STATUS_LED_BRIGHTNESS')
+
+
+def read_remote(port, remote):
+    """A file's bytes from the board, or None if it is missing. Read in small
+    chunks: a whole bundle hex-encoded at once runs the bridge out of memory."""
+    code = (
+        "import binascii, gc\n"
+        "gc.collect()\n"
+        "try:\n"
+        "    f = open(%r, 'rb')\n"
+        "except OSError:\n"
+        "    print('MISSING')\n"
+        "else:\n"
+        "    while True:\n"
+        "        b = f.read(512)\n"
+        "        if not b:\n"
+        "            break\n"
+        "        print(binascii.hexlify(b).decode())\n"
+        "    f.close()\n"
+        "    print('END')\n" % remote
+    )
+    lines = raw.exec_raw(port, code).split()
+    if lines == [b"MISSING"]:
+        return None
+    if not lines or lines[-1] != b"END":
+        raise RuntimeError("Could not read %s from the bridge" % remote)
+    return bytes.fromhex(b"".join(lines[:-1]).decode("ascii"))
 
 
 def prepare_master_config(device, repository):
@@ -76,16 +104,9 @@ def main():
         touched = False
         try:
             for remote in copies:
-                code = (
-                    "import binascii\n"
-                    "try:\n"
-                    "    print(binascii.hexlify(open(%r, 'rb').read()).decode())\n"
-                    "except OSError:\n"
-                    "    print('MISSING')\n" % remote
-                )
-                output = raw.exec_raw(port, code).strip()
-                if output != b"MISSING":
-                    (backup / remote).write_bytes(bytes.fromhex(output.decode("ascii")))
+                data = read_remote(port, remote)
+                if data is not None:
+                    (backup / remote).write_bytes(data)
             raw.exec_raw(port, "import select, sys\np=select.poll()\np.register(sys.stdin, select.POLLIN)\nprint(p.poll(0))\n")
             print("Original firmware saved to", backup)
             if options.master:
@@ -110,10 +131,7 @@ def main():
                     continue
                 raw.exec_raw(port, "import os\ntry:\n    os.remove(%r)\nexcept OSError:\n    pass\n" % remote)
                 raw.upload_file(port, str(local), remote)
-                output = raw.exec_raw(
-                    port, "import binascii\nprint(binascii.hexlify(open(%r, 'rb').read()).decode())\n" % remote
-                )
-                if bytes.fromhex(output.decode("ascii").strip()) != local.read_bytes():
+                if read_remote(port, remote) != local.read_bytes():
                     raise RuntimeError("Upload verification failed: " + remote)
         except Exception:
             if touched:

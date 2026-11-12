@@ -35,6 +35,22 @@ class _FieldModulesPanelState extends State<FieldModulesPanel> {
   final _settingsTabs = <int, bool>{};
   final _detailsRevision = <int, int>{};
   RadioSession get session => widget.session;
+  String? _pairResult;
+
+  Future<void> _pair(BuildContext context) async {
+    setState(() => _pairResult = null);
+    try {
+      final paired = await session.pairModules();
+      _pairResult = paired.isEmpty
+          ? 'No module paired. Put the module in pairing mode (Pair in its '
+                'menu, or hold UP while powering it on), then pair again.'
+          : 'Paired ${paired.length} module${paired.length == 1 ? '' : 's'}: '
+                '${paired.map((uid) => '0x${uid.toRadixString(16).padLeft(8, '0').toUpperCase()}').join(', ')}';
+    } catch (error) {
+      _pairResult = error is StateError ? error.message : '$error';
+    }
+    if (mounted) setState(() {});
+  }
 
   int? _notInScript(Iterable<FieldModule> modules) {
     final script = widget.script;
@@ -217,6 +233,12 @@ class _FieldModulesPanelState extends State<FieldModulesPanel> {
               label: const Text('Discover modules'),
             ),
             OutlinedButton.icon(
+              key: const ValueKey('pair-modules'),
+              onPressed: session.canPair ? () => _pair(context) : null,
+              icon: const Icon(Icons.link),
+              label: Text(session.pairing ? 'Pairing…' : 'Pair modules'),
+            ),
+            OutlinedButton.icon(
               onPressed:
                   session.busy || !session.canQueryModules || modules.isEmpty
                   ? null
@@ -226,6 +248,25 @@ class _FieldModulesPanelState extends State<FieldModulesPanel> {
             ),
           ],
         ),
+        if (session.pairing) ...[
+          const SizedBox(height: 12),
+          const LinearProgressIndicator(),
+          Text(
+            'Pairing for ${RadioSession.pairingSeconds} s. Put each module in '
+            'pairing mode first: Pair in its menu, or hold UP while powering '
+            'it on.',
+            key: const ValueKey('pairing-note'),
+          ),
+        ] else if (_pairResult case final result?) ...[
+          const SizedBox(height: 8),
+          Text(result, key: const ValueKey('pairing-result')),
+        ] else if (session.ready && !session.supportsPairing)
+          const Padding(
+            padding: EdgeInsets.only(top: 8),
+            child: Text(
+              'Pairing needs radio firmware usb-master-0.4.5 or newer.',
+            ),
+          ),
         if (session.continuityProgress case final progress?) ...[
           const SizedBox(height: 12),
           const LinearProgressIndicator(),

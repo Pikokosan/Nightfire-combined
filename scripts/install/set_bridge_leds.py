@@ -48,7 +48,7 @@ PRESETS = {
 }
 
 NAMES = ("STATUS_LED_PIN", "STATUS_LED_COUNT", "STATUS_LED_ORDER", "STATUS_LED_TIMING_NS",
-         "STATUS_LED_POWER_PIN", "STATUS_LED_POWER_ON_VALUE")
+         "STATUS_LED_POWER_PIN", "STATUS_LED_POWER_ON_VALUE", "STATUS_LED_BRIGHTNESS")
 TEST_COLOURS = [(40, 0, 0), (0, 40, 0), (0, 0, 40), (25, 25, 25)]
 
 
@@ -101,6 +101,8 @@ def main():
     parser.add_argument("--count", type=int, help="pixels on the data line, 4..16")
     parser.add_argument("--pin", type=int, help="LED data GPIO (P0.08 is 8)")
     parser.add_argument("--power-pin", help="GPIO that switches LED power, or 'none' (P0.13 is 13)")
+    parser.add_argument("--brightness", type=int,
+                        help="status LED brightness, 1..255 (default 12; the app can also change it)")
     parser.add_argument("--test", action="store_true", help="light a test pattern; nothing is saved")
     parser.add_argument("--leave", action="store_true",
                         help="with --test, leave the pattern lit and the bridge stopped instead of "
@@ -141,6 +143,10 @@ def main():
             if options.power_pin is not None:
                 changes["STATUS_LED_POWER_PIN"] = (None if options.power_pin.lower() == "none"
                                                    else int(options.power_pin))
+            if options.brightness is not None:
+                if not 1 <= options.brightness <= 255:
+                    raise SystemExit("Brightness must be 1 to 255.")
+                changes["STATUS_LED_BRIGHTNESS"] = options.brightness
             wanted = dict(current, **changes)
 
             order = wanted.get("STATUS_LED_ORDER", "RGB")
@@ -178,7 +184,7 @@ def main():
 
             if options.save:
                 if not changes:
-                    raise SystemExit("Nothing to save; pass --preset, --order, --timing, --count, --pin or --power-pin.")
+                    raise SystemExit("Nothing to save; pass --preset, --order, --timing, --count, --pin, --power-pin or --brightness.")
                 backup = ROOT / "dist" / ("bridge_backup_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
                 backup.mkdir(parents=True)
                 (backup / CONFIG).write_bytes(original)

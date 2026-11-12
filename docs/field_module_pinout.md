@@ -33,8 +33,10 @@ profile. MicroPython pin numbers are the native nRF GPIO numbers.
 
 This mapping only uses the exposed side pins; none of the small bottom pads are
 required. `P0.09` and `P0.10` are NFC-capable pins, used here as ordinary GPIO
-for `ARM_CONTROL` and `BACK_BTN`. If a clone leaves NFC enabled, its firmware
-must configure `UICR.NFCPINS` for GPIO before these two assignments will work.
+for `ARM_CONTROL` and `BACK_BTN`. They only work as GPIO once `UICR.NFCPINS`
+is cleared. Field firmware 0.3.1 does this itself: at the first boot that uses
+either pin it clears the bit and restarts once (it prints "NFC pins: switching
+P0.09/P0.10 to GPIO"). Only a full chip erase sets it back.
 The unassigned bottom pads are `P1.01`, `P1.02`, and `P1.07`.
 
 Upload the field firmware with this pinout using:
@@ -339,3 +341,40 @@ after the exact pre-test current path is measured and calibrated. The Pro Micro
 field fixture has that calibration in `main/configs/field_promicro.py`;
 production board profiles intentionally fall back to ADC millivolts until
 their own hardware is characterized.
+
+## Cue hold time
+
+A fired cue output is held on for the cue hold time, then switched off by
+the main loop; firing never waits for it. The radio receive wait is cut
+short so the output is switched off on time (before field-module 0.3.1 it
+could stay on for up to the 50 ms receive timeout, whatever the setting).
+
+- Range 1-2000 ms. Default `FIRE_PULSE_MS` in the node config (5 ms).
+- The app sets it for every discovered module: Settings → Modules → Cue
+  hold time → **Send to modules**. Each module saves it in
+  `field_fire_pulse.bin`, which then replaces `FIRE_PULSE_MS` at boot.
+- Radio command `0x29 FIRE_PULSE` (unique only): an empty request reads the
+  value; a 2-byte big-endian value sets and saves it. Both reply
+  `0x2A FIRE_PULSE_RSP` with the value in use. A set is refused while the
+  module is armed (NACK 1), while a script runs or a cue is on (NACK 5), or
+  out of range (NACK 3). The USB bridge relays it from usb-master-0.4.5
+  (capability 128) and refuses a set while modules may be armed.
+
+## Pairing with a radio bridge
+
+Pairing gives a module the bridge's network ID and radio channel, so the
+two don't have to be set by hand. The module keeps its group.
+
+1. Put the module in pairing mode (it must be disarmed):
+   - LCD menu → **Pair** (the screen counts down), or
+   - hold **UP** while powering it on, for at least a second (works on boards
+     without an LCD too).
+   Pairing mode lasts 2 minutes. Leaving the pairing screen cancels it.
+2. In the app, Modules → **Pair modules**. For 10 s the bridge offers its
+   network and channel. Every module in pairing mode saves them, replies,
+   and moves to the bridge's channel. The app then runs discovery.
+
+On the radio: pairing mode listens on network `0x7A1B`, channel 80. The
+bridge broadcasts `0x34 PAIR` there (network u16, channel u8, nonce u16); the
+module replies `0x35 PAIR_RSP` (the same 5 bytes and its group, u16). Needs
+field-module 0.3.1 (or nrf-dummy 0.2.1) and bridge usb-master-0.4.5.

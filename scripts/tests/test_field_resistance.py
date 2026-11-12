@@ -204,5 +204,100 @@ class ArmVoltageCheckTests(unittest.TestCase):
         self.assertIn(("pin", 1), calls)
 
 
+class FirePulseTests(unittest.TestCase):
+    """CMD_FIRE_PULSE (cue hold time) and the receive wait capped to it."""
+
+    def make_namespace(self, armed=False, script_running=False, saved=None):
+        source = ROOT / "main" / "field_main.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        functions = [
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name in (
+                "valid_fire_pulse_ms",
+                "load_fire_pulse_ms",
+                "save_fire_pulse_ms",
+                "fire_wait_ms",
+                "handle_fire_pulse",
+            )
+        ]
+        replies = []
+        store = {}
+        if saved is not None:
+            store["field_fire_pulse.bin"] = b"NFFP\x01" + saved.to_bytes(2, "big")
+        clock = SimpleNamespace(now=1000)
+        namespace = {
+            "FIRE_PULSE_PATH": "field_fire_pulse.bin",
+            "FIRE_PULSE_MAGIC": b"NFFP\x01",
+            "FIRE_PULSE_MIN_MS": 1,
+            "FIRE_PULSE_MAX_MS": 2000,
+            "FIRE_PULSE_MS": 5,
+            "CUE_COUNT": 4,
+            "ARMED": armed,
+            "fire_out_mask": 0,
+            "fire_deadlines": [0] * 4,
+            "script": SimpleNamespace(running=script_running),
+            "load_crc_payload": lambda path, magic: store.get(path),
+            "save_crc_payload": lambda path, payload: store.__setitem__(path, bytes(payload)),
+            "time": SimpleNamespace(
+                ticks_ms=lambda: clock.now,
+                ticks_diff=lambda a, b: a - b,
+            ),
+            "link": SimpleNamespace(
+                nack=lambda pkt, cmd, code: replies.append(("nack", cmd, code)),
+                respond=lambda cmd, data: replies.append(("rsp", cmd, bytes(data))),
+            ),
+            "CMD_FIRE_PULSE": 0x29,
+            "CMD_FIRE_PULSE_RSP": 0x2A,
+            "NACK_REJECTED_ARMED": 1,
+            "NACK_BAD_LENGTH": 2,
+            "NACK_INVALID_VALUE": 3,
+            "NACK_INTERNAL_ERROR": 4,
+            "NACK_BUSY": 5,
+        }
+        exec(compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"), namespace)
+        return namespace, replies, store, clock
+
+    def test_read_and_set_saves_the_hold_time(self):
+        namespace, replies, store, _ = self.make_namespace()
+        namespace["handle_fire_pulse"]({"data": b""})
+        namespace["handle_fire_pulse"]({"data": (250).to_bytes(2, "big")})
+        self.assertEqual(replies, [("rsp", 0x2A, b"\x00\x05"), ("rsp", 0x2A, b"\x00\xfa")])
+        self.assertEqual(namespace["FIRE_PULSE_MS"], 250)
+        self.assertEqual(namespace["load_fire_pulse_ms"](5), 250)
+        self.assertEqual(store["field_fire_pulse.bin"], b"NFFP\x01\x00\xfa")
+
+    def test_saved_value_replaces_config_and_bad_values_fall_back(self):
+        namespace, _, _, _ = self.make_namespace(saved=40)
+        self.assertEqual(namespace["load_fire_pulse_ms"](5), 40)
+        namespace, _, _, _ = self.make_namespace(saved=5000)
+        self.assertEqual(namespace["load_fire_pulse_ms"](12), 12)
+        self.assertEqual(namespace["load_fire_pulse_ms"](0), 5)
+
+    def test_set_refused_when_armed_running_or_out_of_range(self):
+        for kwargs, data, code in (
+            ({"armed": True}, (100).to_bytes(2, "big"), 1),
+            ({"script_running": True}, (100).to_bytes(2, "big"), 5),
+            ({}, (0).to_bytes(2, "big"), 3),
+            ({}, (2001).to_bytes(2, "big"), 3),
+            ({}, b"\x01", 2),
+        ):
+            namespace, replies, store, _ = self.make_namespace(**kwargs)
+            namespace["handle_fire_pulse"]({"data": data})
+            self.assertEqual(replies, [("nack", 0x29, code)])
+            self.assertEqual(namespace["FIRE_PULSE_MS"], 5)
+            self.assertEqual(store, {})
+
+    def test_radio_wait_ends_when_the_earliest_cue_is_due(self):
+        namespace, _, _, clock = self.make_namespace()
+        wait = namespace["fire_wait_ms"]
+        self.assertEqual(wait(50), 50)
+        namespace["fire_out_mask"] = 0b0101
+        namespace["fire_deadlines"][0] = clock.now + 30
+        namespace["fire_deadlines"][2] = clock.now + 8
+        self.assertEqual(wait(50), 8)
+        clock.now += 20
+        self.assertEqual(wait(50), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

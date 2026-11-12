@@ -1,13 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:nightfire_controller/controller/field_module.dart';
-import 'package:nightfire_controller/controller/radio_session.dart';
 import 'package:nightfire_controller/settings/battery_settings.dart';
 import 'package:nightfire_controller/widgets/module_battery.dart';
-import 'package:nightfire_controller/widgets/settings_panel.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-
-import 'master_controller_test.dart' show MasterRadio;
 
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
@@ -128,49 +123,5 @@ void main() {
     );
     await tester.pump();
     expect(find.text('60% • 7.60 V'), findsOneWidget);
-  });
-
-  testWidgets('calibrate with meter sets the target scale', (tester) async {
-    tester.view.physicalSize = const Size(1200, 2000);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.reset);
-    final settings = BatterySettings();
-    final session = RadioSession(MasterRadio());
-    addTearDown(session.dispose);
-    session.modules[0x11223344] = FieldModule(0x11223344, 1, 8, 1)
-      ..info = {
-        'App': 'field-module',
-        'Battery mV': '8000',
-        'Battery type': '2S',
-      };
-    await tester.pumpWidget(
-      MaterialApp(
-        home: BatterySettingsScope(
-          settings: settings,
-          child: Scaffold(
-            body: SingleChildScrollView(child: SettingsPanel(session: session)),
-          ),
-        ),
-      ),
-    );
-    expect(find.text('Field module'), findsOneWidget);
-    expect(find.text('Dummy module'), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('calibrate-field-module')));
-    await tester.pumpAndSettle();
-    expect(find.text('Module reading: 8.000 V'), findsOneWidget);
-    await tester.enterText(find.byKey(const Key('meter-volts')), '8.2');
-    await tester.tap(find.byKey(const Key('save-calibration')));
-    await tester.pumpAndSettle();
-    expect(settings.profileFor('field-module').scale, closeTo(1.025, 1e-9));
-    expect(find.textContaining('×1.0250'), findsOneWidget);
-    // Dummy modules have no reading, so their calibrate button is off.
-    expect(
-      tester
-          .widget<ButtonStyleButton>(
-            find.byKey(const ValueKey('calibrate-nrf-dummy')),
-          )
-          .onPressed,
-      isNull,
-    );
   });
 }

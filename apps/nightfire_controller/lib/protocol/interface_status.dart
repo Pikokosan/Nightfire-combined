@@ -21,6 +21,16 @@ class InterfaceStatus {
   bool get supportsMasterHeartbeat => capabilities & 16 != 0;
   bool get supportsGroupSettings => capabilities & 32 != 0;
 
+  /// Capability 64 (usb-master-0.4.4+): command 0x1B reads and sets the
+  /// status LED brightness.
+  bool get supportsLedBrightness => capabilities & 64 != 0;
+
+  /// Command 0x1C opens a pairing window for field modules (usb-master-0.4.5+).
+  bool get supportsPairing => capabilities & 4 != 0;
+
+  /// The bridge relays the field cue hold time command (usb-master-0.4.5+).
+  bool get supportsFirePulse => capabilities & 128 != 0;
+
   /// Fault bit 32 (usb-master-0.4.3+): the ARM key was on when the bridge
   /// powered up or the app connected, and has not been turned to SAFE since.
   /// The bridge refuses ARM and FIRE until it is.

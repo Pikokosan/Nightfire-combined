@@ -28,7 +28,19 @@ STATUS_LED_ORDER = "GRB"      # the order the LED expects its colour bytes
 STATUS_LED_TIMING_NS = (250, 1000, 800, 450)   # (T0H, T0L, T1H, T1L) in ns
 STATUS_LED_POWER_PIN = 13     # GPIO that switches LED power (nice!nano VCC). None = not used.
 STATUS_LED_POWER_ON_VALUE = 1 # level that turns LED power on
+STATUS_LED_BRIGHTNESS = 12    # 1 (dimmest) to 255 (full). Default 12.
 ```
+
+**Brightness** can be changed without a cable: in the app, open **Settings →
+Command module → Status LED brightness** (usb-master-0.4.4 or newer). The
+slider runs 1–100 % on a square curve, so most of its travel is at the dim
+end; the default, 12, shows as 22 %. The bridge saves the new value in its
+`nrf_bridge_config.py`, so it stays after a restart. It can't be changed
+while modules may be armed. From a PC:
+`py -3 scripts/install/set_bridge_leds.py --port COM12 --brightness 40 --save`.
+
+At full brightness each pixel can draw about 60 mA (white). The default level
+draws only a few milliamps; check the LED supply before running them bright.
 
 Each bit sent to the LEDs is a high pulse followed by a low gap. A short high
 pulse (`T0H`) means 0 and a long one (`T1H`) means 1. The bridge's driver makes

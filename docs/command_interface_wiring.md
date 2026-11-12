@@ -98,8 +98,9 @@ block too (but not the yellow light or the bridge-side refusal).
 Pixel 2 reflects what the bridge sent and what modules acknowledged; it is not a
 live readback of each module. A green pixel 2 after host loss means the field's
 self-disarm window has passed, not that each module reported DISARM. Extra
-configured pixels are kept off. Brightness is limited in firmware; do not use this software
-limit to determine the power supply's required capacity.
+configured pixels are kept off. Brightness defaults to a low level (12 of 255) and can be
+raised in the app's Settings (see `docs/bridge_status_leds.md`); size the LED supply for full
+brightness, not for the default.
 
 ## Firmware setup
 
@@ -146,11 +147,22 @@ Existing AA55/CRC bridge frames remain inside the `NFUSB1` USB envelope.
 - `0x18 HOST_HEARTBEAT`: four-byte host session tag; reply has no payload.
 - `0x17 GET_INTERFACE_STATUS`: empty request; returns the 15-byte status below.
 - `0x19 GET_KEEPALIVE_STATUS`: empty request; RF heartbeat telemetry (0.3.1+).
+- `0x1B LED_BRIGHTNESS` (usb-master-0.4.4+, capability 64): empty request
+  returns the brightness (1 byte, 1–255). A 1-byte request sets it, saves it
+  in `nrf_bridge_config.py` and returns the new value; it needs an active app
+  session and is refused (error 5) while modules may be armed.
+- `0x1C PAIR` (usb-master-0.4.5+, capability 4): a 1-byte request (1–30 s)
+  opens a pairing window: the radio moves to the pairing network 0x7A1B,
+  channel 80, and broadcasts this bridge's network and channel every 300 ms.
+  Modules that pair reply `CMD_PAIR_RSP`, forwarded as normal NFCP RX frames.
+  Field sends are refused (error 5) during the window. `0` ends it early;
+  an empty request returns the seconds left. Needs an app session and no
+  modules that may be armed.
 
 | Byte(s) | Meaning |
 | --- | --- |
 | 0 | Status version, currently 1 |
-| 1 | Capability bits: switch=1, LED output ready=2, actuation-disabled interface=8, RF heartbeat telemetry=16, group settings=32 |
+| 1 | Capability bits: switch=1, LED output ready=2, pairing command=4 (usb-master-0.4.5+), actuation-disabled interface=8, RF heartbeat telemetry=16, group settings=32, LED brightness command=64, field cue hold time relay=128 (usb-master-0.4.5+, master mode) |
 | 2 | Switch: unknown=0, SAFE position=1, ARM position=2 |
 | 3 | LEDs: disabled=0, ready=1, config/output fault=2, native driver missing=3 |
 | 4 | Host session: none=0, active=1, expired=2 |

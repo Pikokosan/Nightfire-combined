@@ -35,6 +35,8 @@ RUNTIME_CONFIG_MAGIC = b"NFRT\x01"
 RESISTANCE_CALIBRATION_PATH = "field_resistance_cal.bin"
 RESISTANCE_CALIBRATION_MAGIC = b"NFRC\x01"
 RESISTANCE_CALIBRATION_BANK_SIZE = 8
+FIRE_PULSE_PATH = "field_fire_pulse.bin"
+FIRE_PULSE_MAGIC = b"NFFP\x01"
 
 
 def load_crc_payload(path, magic):
@@ -116,7 +118,7 @@ def save_resistance_calibration_banks(banks):
 
 
 APP_FIRMWARE_NAME = "field-module"
-APP_FIRMWARE_VERSION = "0.3.0"
+APP_FIRMWARE_VERSION = "0.3.1"
 
 DEFAULT_NETWORK_ID = 0x04D2
 DEFAULT_GROUP_ID = 0x0001
@@ -214,7 +216,30 @@ PRETEST_OUTPUT_SETTLE_US = getattr(node_config, "PRETEST_OUTPUT_SETTLE_US", MUX_
 PRETEST_ADC_SAMPLES = getattr(node_config, "PRETEST_ADC_SAMPLES", 8)
 PRETEST_ADC_SAMPLE_DELAY_US = getattr(node_config, "PRETEST_ADC_SAMPLE_DELAY_US", 150)
 
-FIRE_PULSE_MS = getattr(node_config, "FIRE_PULSE_MS", 5)
+
+def valid_fire_pulse_ms(value):
+    return type(value) is int and FIRE_PULSE_MIN_MS <= value <= FIRE_PULSE_MAX_MS
+
+
+def load_fire_pulse_ms(default):
+    """The cue hold time saved by CMD_FIRE_PULSE, else the config value."""
+    data = load_crc_payload(FIRE_PULSE_PATH, FIRE_PULSE_MAGIC)
+    if data is not None and len(data) == len(FIRE_PULSE_MAGIC) + 2:
+        value = int.from_bytes(data[-2:], "big")
+        if valid_fire_pulse_ms(value):
+            return value
+    return default if valid_fire_pulse_ms(default) else 5
+
+
+def save_fire_pulse_ms(value):
+    save_crc_payload(FIRE_PULSE_PATH, FIRE_PULSE_MAGIC + value.to_bytes(2, "big"))
+
+
+# How long a fired cue output is held on. The app can change it over the
+# radio (CMD_FIRE_PULSE); the saved value replaces FIRE_PULSE_MS from config.
+FIRE_PULSE_MIN_MS = 1
+FIRE_PULSE_MAX_MS = 2000
+FIRE_PULSE_MS = load_fire_pulse_ms(int(getattr(node_config, "FIRE_PULSE_MS", 5)))
 LOG_FIRE_EVENTS = getattr(node_config, "LOG_FIRE_EVENTS", False)
 LOG_SCRIPT_EVENTS = getattr(node_config, "LOG_SCRIPT_EVENTS", False)
 BATTERY_ADC_ENABLED = getattr(node_config, "BATTERY_ADC_ENABLED", True)
@@ -473,6 +498,44 @@ def make_pin(pin_id, mode, pull=None, value=None, name="pin"):
         record_startup_fault("%s P%s init failed: %s" % (name, str(pin_id), str(e)))
         return NullPin(1 if mode == Pin.IN else 0)
 
+
+def release_nfc_pins(pins):
+    """P0.09 and P0.10 are the NFC antenna pins: they work as GPIO only once
+    UICR.NFCPINS bit 0 is cleared (the Pro Micro uses them for ARM_CONTROL
+    and BACK). Clears it once, then restarts so the setting takes effect.
+    Writing 0 to a UICR bit needs no erase; only a full chip erase sets it
+    back."""
+    if 9 not in pins and 10 not in pins:
+        return
+    try:
+        from machine import mem32
+    except ImportError:
+        return
+    uicr_nfcpins = 0x1000120C
+    nvmc_ready = 0x4001E400
+    nvmc_config = 0x4001E504
+    if not mem32[uicr_nfcpins] & 1:
+        return
+    print("NFC pins: switching P0.09/P0.10 to GPIO, then restarting")
+    try:
+        mem32[nvmc_config] = 1          # write enable
+        while not mem32[nvmc_ready]:
+            pass
+        mem32[uicr_nfcpins] = 0xFFFFFFFE
+        while not mem32[nvmc_ready]:
+            pass
+    finally:
+        mem32[nvmc_config] = 0          # read only
+    if mem32[uicr_nfcpins] & 1:
+        # Never restart in a loop: report it and carry on.
+        record_startup_fault("NFC pins still enabled; P0.09/P0.10 unusable")
+        return
+    time.sleep_ms(50)
+    machine.reset()
+
+
+release_nfc_pins((ARM_CONTROL_PIN, BACK_BUTTON_PIN, OK_FWD_BUTTON_PIN, UP_BUTTON_PIN,
+                  DOWN_BUTTON_PIN, SAFE_LED_PIN, ARM_LED_PIN, PRE_TEST_PIN))
 
 safe_led = make_pin(SAFE_LED_PIN, Pin.OUT, value=1, name="safe led")
 arm_led = make_pin(ARM_LED_PIN, Pin.OUT, value=0, name="arm led")
@@ -840,6 +903,51 @@ def poll_fire_outputs():
         outputs.digitalWriteMask(fire_out_mask)
 
 
+def fire_wait_ms(default_ms):
+    """Cap a blocking radio wait so an active cue is switched off on time
+    instead of being held for the whole receive timeout."""
+    if not fire_out_mask:
+        return default_ms
+    now = time.ticks_ms()
+    wait = default_ms
+    for i in range(CUE_COUNT):
+        if fire_out_mask & (1 << i):
+            wait = min(wait, time.ticks_diff(fire_deadlines[i], now))
+    return wait if wait > 1 else 1
+
+
+def handle_fire_pulse(pkt):
+    """CMD_FIRE_PULSE: empty reads the cue hold time; two bytes (ms, big
+    endian) set and save it. Both reply CMD_FIRE_PULSE_RSP with the value."""
+    global FIRE_PULSE_MS
+
+    data = pkt.get("data", b"")
+    if data:
+        if len(data) != 2:
+            link.nack(pkt, CMD_FIRE_PULSE, NACK_BAD_LENGTH)
+            return
+        if ARMED:
+            link.nack(pkt, CMD_FIRE_PULSE, NACK_REJECTED_ARMED)
+            return
+        if script.running or fire_out_mask:
+            link.nack(pkt, CMD_FIRE_PULSE, NACK_BUSY)
+            return
+        value = int.from_bytes(data, "big")
+        if not valid_fire_pulse_ms(value):
+            link.nack(pkt, CMD_FIRE_PULSE, NACK_INVALID_VALUE)
+            return
+        if value != FIRE_PULSE_MS:
+            try:
+                save_fire_pulse_ms(value)
+            except Exception as e:
+                print("Fire pulse save failed:", e)
+                link.nack(pkt, CMD_FIRE_PULSE, NACK_INTERNAL_ERROR)
+                return
+            FIRE_PULSE_MS = value
+            print("FIRE PULSE %dms" % value)
+    link.respond(CMD_FIRE_PULSE_RSP, FIRE_PULSE_MS.to_bytes(2, "big"))
+
+
 def build_output_status_payload():
     flags = 0
     if ARMED:
@@ -1160,6 +1268,9 @@ def handle(pkt):
     elif cmd == CMD_SET_RESISTANCE_CAL:
         if link.is_for_me(pkt):
             handle_set_resistance_calibration(pkt)
+    elif cmd == CMD_FIRE_PULSE:
+        if link.is_for_me(pkt):
+            handle_fire_pulse(pkt)
     elif not script.handle(pkt):
         link.handle_common(pkt)
 
@@ -1173,6 +1284,10 @@ def setup():
     set_armed_outputs(False)
     run_startup_self_tests()
     radio_ready = link.init_radio()
+    # Holding UP at power-up starts pairing with a bridge.
+    if DebouncedButton(up_button, LCD_BUTTON_DEBOUNCE_MS, BUTTON_ACTIVE_VALUE, irq=False).held_for(1000):
+        radio_ready = link.start_pairing()
+        lcd.show_pairing()
     print(
         "Nightfire nRF52840 field module board=%s uid=0x%08X group=0x%04X net=0x%04X channel=%d" %
         (BOARD_PINOUT, UNIQUE_ID, GROUP_ID, NETWORK_ID, RADIO_CHANNEL)
@@ -1262,9 +1377,10 @@ def main():
                 continue
 
             link.service()
-            payload = nrf_radio.recv(script.wait_ms(link.rx_timeout_ms(RADIO_RX_TIMEOUT_MS)))
+            payload = nrf_radio.recv(fire_wait_ms(script.wait_ms(lcd.wait_ms(link.rx_timeout_ms(RADIO_RX_TIMEOUT_MS)))))
             if payload:
                 handle_radio_payload(payload)
+                poll_fire_outputs()
             lcd.service()
         except Exception as e:
             print("Field main loop error:", e)

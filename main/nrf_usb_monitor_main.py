@@ -32,15 +32,33 @@ radio_ready = False
 interface = CommandInterface(config, led_write=getattr(nrf_radio, "write_ws2811", None))
 interface.keepalive_supported = True
 interface.group_settings_supported = True
+# Capability 128: the master policy relays CMD_FIRE_PULSE (cue hold time).
+interface.fire_pulse_supported = bool(getattr(config, 'MASTER_ENABLED', False))
 keepalive = MasterKeepalive(network, bridge_mesh.send_legacy, time.ticks_ms, time.ticks_diff)
 master = None
 maintenance = None
 trial_confirmed = False
+pairing = None
 if getattr(config, 'MASTER_ENABLED', False):
-    from usb_master_control import MasterControl
+    from usb_master_control import (MasterControl, BridgePairing,
+                                    PAIR_NETWORK_ID, PAIR_RADIO_CHANNEL)
     from usb_master_maintenance import BridgeMaintenance
     master = MasterControl(bridge_mesh.send_legacy, time.ticks_ms, time.ticks_diff)
     maintenance = BridgeMaintenance(nrf_radio, config)
+    pairing = BridgePairing(time.ticks_ms, time.ticks_diff)
+    # Capability 4: CMD_PAIR pairs field modules with this bridge.
+    interface.pairing_supported = True
+
+
+def pairing_active():
+    return pairing is not None and pairing.active()
+
+
+def end_pairing():
+    """Back to this bridge's own channel after a pairing window."""
+    pairing.stop()
+    nrf_radio.channel(channel)
+    bridge_mesh.queue.clear()
 
 
 def stats_payload():
@@ -69,7 +87,7 @@ while True:
                     command = bridge_radio.CMD_PONG
                     payload = b""
                 elif command == bridge_radio.CMD_GET_INFO:
-                    version = b"usb-master-0.4.3" if master else b"usb-monitor-0.3.3"   # mesh: reliable delivery
+                    version = b"usb-master-0.4.5" if master else b"usb-monitor-0.3.3"   # mesh: reliable delivery
                     payload = (bridge_radio.int_to_be(nrf_radio.device_id32(), 4) +
                                b"\x00\x00" + bridge_radio.int_to_be(network, 2) +
                                bytes([len(version)]) + version)
@@ -90,6 +108,40 @@ while True:
                     payload = b""
                 elif command == bridge_radio.CMD_GET_KEEPALIVE_STATUS and not frame.payload:
                     payload = keepalive.payload()
+                elif command == bridge_radio.CMD_LED_BRIGHTNESS and not frame.payload:
+                    payload = bytes([interface.brightness])
+                elif (command == bridge_radio.CMD_LED_BRIGHTNESS and len(frame.payload) == 1 and
+                      interface.session_state() == 1 and
+                      not (master and (master.may_be_armed or master.stop_pending)) and
+                      interface.set_brightness(frame.payload[0])):
+                    if maintenance:
+                        try:
+                            config.STATUS_LED_BRIGHTNESS = interface.brightness
+                            maintenance.save(network, channel)
+                        except Exception as error:
+                            flags |= bridge_radio.FLAG_ERROR
+                            print('LED brightness save error:', error)
+                    payload = bytes([interface.brightness])
+                elif command == bridge_radio.CMD_PAIR and pairing is not None and not frame.payload:
+                    payload = bytes([pairing.seconds_left()])
+                elif (command == bridge_radio.CMD_PAIR and pairing is not None and
+                      len(frame.payload) == 1 and frame.payload[0] == 0):
+                    if pairing.active():
+                        end_pairing()
+                    payload = b"\x00"
+                elif (command == bridge_radio.CMD_PAIR and pairing is not None and
+                      len(frame.payload) == 1 and interface.session_state() == 1 and
+                      not master.may_be_armed and not master.stop_pending and
+                      pairing.start(frame.payload[0])):
+                    nrf_radio.channel(PAIR_RADIO_CHANNEL)
+                    bridge_mesh.queue.clear()
+                    payload = bytes([frame.payload[0]])
+                elif pairing_active() and command in (bridge_radio.CMD_SEND_NFCP,
+                                                      bridge_radio.CMD_SEND_NFCP_RELIABLE):
+                    # Nothing reaches the field on the pairing channel.
+                    interface.reject()
+                    flags |= bridge_radio.FLAG_ERROR
+                    payload = b"\x05"
                 elif command == bridge_radio.CMD_SEND_NFCP_RELIABLE and len(frame.payload) > 6 and (
                     master.permit(frame.payload[6:], interface.session_state() == 1,
                                   interface.arm_switch())
@@ -116,6 +168,7 @@ while True:
                         payload = b"\x04"
                 elif (master and interface.session_state() == 1 and
                       not master.may_be_armed and not master.stop_pending and
+                      not pairing_active() and
                       command in (0x12, 0x13, 0x14, 0x16, 0x31, 0x32, 0x33, 0x34)):
                     try:
                         payload = b''
@@ -163,7 +216,17 @@ while True:
                         interface.arm_switch())
             if interface.session_state() != 1:
                 maintenance.abort()
-        keepalive.poll(interface.session_state() == 1 and not (master and master.needs_rearm), radio_ready)
+        if pairing is not None and pairing.active():
+            if interface.session_state() != 1 or master.may_be_armed or master.stop_pending:
+                end_pairing()
+            else:
+                offer = pairing.poll(network, channel)
+                if offer:
+                    bridge_mesh.send_frame(PAIR_NETWORK_ID, offer)
+                elif not pairing.active():
+                    end_pairing()   # the window ran out
+        keepalive.poll(interface.session_state() == 1 and not (master and master.needs_rearm) and
+                       not pairing_active(), radio_ready)
         interface.faults = (interface.faults & ~16) | (16 if keepalive.failed else 0)
         interface.module_arm = master.arm_state() if master else None
         interface.keepalive_at = keepalive.last_success
@@ -173,8 +236,9 @@ while True:
             # Drops duplicates, relayed copies of our own frames and pre-mesh
             # payloads before any further work.
             rssi = nrf_radio.last_rssi()
-            frame_bytes = bridge_mesh.receive(packet, network, rssi)
-            reply = radio_reply(bridge_radio.int_to_be(network, 2) + frame_bytes, network) if frame_bytes else None
+            rx_network = PAIR_NETWORK_ID if pairing_active() else network
+            frame_bytes = bridge_mesh.receive(packet, rx_network, rssi)
+            reply = radio_reply(bridge_radio.int_to_be(rx_network, 2) + frame_bytes, rx_network) if frame_bytes else None
             if reply:
                 if master:
                     master.observe_reply(reply)

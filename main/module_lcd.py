@@ -34,17 +34,35 @@ LCD_MENU_ITEMS = (
     "Set Group",
     "Set Network",
     "Set Channel",
+    "Pair",
 )
 
 
 class DebouncedButton:
-    def __init__(self, pin, debounce_ms=80, active_value=0):
+    """A press is reported on its first edge, then the button is ignored for
+    debounce_ms. A pin interrupt latches the edge, so a tap shorter than one
+    main-loop pass (the radio wait) is not missed."""
+
+    def __init__(self, pin, debounce_ms=80, active_value=0, irq=True):
         self.pin = pin
         self.debounce_ms = int(debounce_ms)
         self.active_value = active_value
-        self.last_raw = self.read_raw()
-        self.stable = self.last_raw
-        self.changed_ms = time.ticks_ms()
+        self.edge = False
+        self.stable = self.read_raw()
+        # Settled from the start: the first press counts at once.
+        self.changed_ms = time.ticks_add(time.ticks_ms(), -self.debounce_ms)
+        if pin is not None and irq:
+            # One handler per pin: a second button on the same pin (the
+            # power-up hold check) passes irq=False.
+            try:
+                from machine import Pin
+                trigger = Pin.IRQ_RISING if active_value else Pin.IRQ_FALLING
+                pin.irq(handler=self.on_edge, trigger=trigger)
+            except Exception as e:
+                print("Button interrupt unavailable:", e)
+
+    def on_edge(self, pin):
+        self.edge = True
 
     def read_raw(self):
         if self.pin is None:
@@ -54,18 +72,35 @@ class DebouncedButton:
         except Exception:
             return False
 
-    def update(self, now):
-        """Returns True once per debounced press."""
-        raw = self.read_raw()
-        if raw != self.last_raw:
-            self.last_raw = raw
-            self.changed_ms = now
+    def held_for(self, hold_ms=1000):
+        """True if the button stays down for hold_ms from now. Used at
+        power-up: holding UP starts pairing (also on boards with no LCD)."""
+        if not self.read_raw():
             return False
+        start = time.ticks_ms()
+        while time.ticks_diff(time.ticks_ms(), start) < hold_ms:
+            if not self.read_raw():
+                return False
+            time.sleep_ms(20)
+        return True
 
-        if raw != self.stable and time.ticks_diff(now, self.changed_ms) >= self.debounce_ms:
-            self.stable = raw
-            return self.stable
-
+    def update(self, now):
+        """Returns True once per press."""
+        raw = self.read_raw()
+        edge = self.edge
+        self.edge = False
+        settled = time.ticks_diff(now, self.changed_ms) >= self.debounce_ms
+        if self.stable:
+            # This press was reported. Edges now are release bounce; the
+            # button is free again once it reads released after debounce_ms.
+            if not raw and settled:
+                self.stable = False
+                self.changed_ms = now
+            return False
+        if (raw or edge) and settled:
+            self.stable = True
+            self.changed_ms = now
+            return True
         return False
 
 
@@ -151,6 +186,15 @@ class LcdMenu:
             self.start_edit("network", ids[0])
         elif item == "Set Channel":
             self.start_edit("channel", ids[3])
+        elif item == "Pair":
+            if self.node.armed() or not self.link.start_pairing():
+                self.blocked()
+            else:
+                self.show_pairing()
+
+    def show_pairing(self):
+        self.mode = "view"
+        self.active_view = "pairing"
 
     def adjust_edit(self, delta):
         if self.edit_target == "channel":
@@ -208,7 +252,11 @@ class LcdMenu:
                 self.open_menu_item()
         elif self.mode == "view":
             continuity = self.active_view == "continuity"
-            if name == "back":
+            if self.active_view == "pairing" and name in ("back", "ok"):
+                # Leaving the pairing screen cancels pairing.
+                self.link.stop_pairing()
+                self.mode = "menu"
+            elif name == "back":
                 self.mode = "menu"
             elif continuity and name == "ok" and self.node.can_scan:
                 self.scan_pending = True
@@ -260,6 +308,15 @@ class LcdMenu:
             return "Network ID", "%04X OK=save" % (self.edit_value & 0xFFFF)
         return "Group ID", "%04X OK=save" % (self.edit_value & 0xFFFF)
 
+    def pairing_lines(self):
+        left = self.link.pairing_left_ms()
+        if left:
+            return "Pairing %3ds" % ((left + 999) // 1000), "Pair in the app"
+        if self.link.paired:
+            network, channel = self.link.paired
+            return "Paired", "Net%04X Ch%03d" % (network & 0xFFFF, channel & 0xFF)
+        return "Pairing ended", "BACK=menu"
+
     def continuity_lines(self):
         cue_count = self.node.cue_count()
         open_mask, status = self.node.continuity()
@@ -310,9 +367,18 @@ class LcdMenu:
             )
         if self.active_view == "continuity":
             return self.continuity_lines()
+        if self.active_view == "pairing":
+            return self.pairing_lines()
         if self.active_view == "edit_blocked":
             return "Disarm first", "BACK=menu"
         return self.home_lines()
+
+    def wait_ms(self, default_ms):
+        """Radio receive wait: short while a screen is half drawn, so the
+        second row follows the first at once instead of a pass later."""
+        if self.pending_lines is not None:
+            return 1
+        return default_ms
 
     def service(self):
         """Reads buttons and redraws. Call this from the main loop."""

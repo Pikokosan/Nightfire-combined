@@ -71,6 +71,27 @@ class RadioSession extends ChangeNotifier {
           values['Firmware']?.startsWith('usb-monitor-0.3') == true ||
           isMasterFirmware(values['Firmware']));
   InterfaceStatus? interfaceStatus;
+
+  /// Status LED brightness reported by the bridge (1-255), or null when the
+  /// bridge can't change it or hasn't been asked yet.
+  int? ledBrightness;
+  bool get supportsLedBrightness =>
+      ready && interfaceStatus?.supportsLedBrightness == true;
+
+  /// Sets and saves the bridge's status LED brightness (1-255). The bridge
+  /// refuses while modules may be armed.
+  Future<void> setLedBrightness(int value) async {
+    if (!supportsLedBrightness) {
+      throw StateError('This radio cannot change its LED brightness');
+    }
+    if (master.armed.isNotEmpty) {
+      throw StateError('Disarm all modules before changing the LED brightness');
+    }
+    final reply = await _request(0x1B, [value.clamp(1, 255)]);
+    if (reply.payload.length == 1) ledBrightness = reply.payload[0];
+    notifyListeners();
+  }
+
   MasterHeartbeatStatus? masterHeartbeatStatus;
 
   /// Safety lockout: the bridge's ARM key was on when the app connected (or
@@ -91,6 +112,7 @@ class RadioSession extends ChangeNotifier {
       _armKeyLatch = true;
     }
   }
+
   Timer? _heartbeatTimer;
   bool _heartbeatInFlight = false;
   int _hostSession = 0;
@@ -114,12 +136,42 @@ class RadioSession extends ChangeNotifier {
     unawaited(_savePreferences());
   }
 
+  /// How long a fired cue output is held on, in ms. Saved on this device and
+  /// sent to the field modules from Settings (field-module 0.3.1+, which
+  /// save it themselves).
+  static const firePulseKey = 'fire_pulse_ms_v1';
+  static const firePulseMinMs = 1;
+  static const firePulseMaxMs = 2000;
+  static const firePulseDefaultMs = 5;
+  int _firePulseMs = firePulseDefaultMs;
+  int get firePulseMs => _firePulseMs;
+  set firePulseMs(int value) {
+    final clamped = value.clamp(firePulseMinMs, firePulseMaxMs);
+    if (_firePulseMs == clamped) return;
+    _firePulseMs = clamped;
+    notifyListeners();
+    unawaited(_savePreferences());
+  }
+
+  /// The bridge relays the cue hold time command (usb-master-0.4.5+).
+  bool get supportsFirePulse =>
+      ready && interfaceStatus?.supportsFirePulse == true;
+
   Future<void> _loadPreferences() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final saved = prefs.getBool(autoContinuityKey);
-      if (saved != null && !_disposed && saved != _autoContinuity) {
+      final pulse = prefs.getInt(firePulseKey);
+      if (_disposed) return;
+      if (saved != null && saved != _autoContinuity) {
         _autoContinuity = saved;
+        notifyListeners();
+      }
+      if (pulse != null &&
+          pulse >= firePulseMinMs &&
+          pulse <= firePulseMaxMs &&
+          pulse != _firePulseMs) {
+        _firePulseMs = pulse;
         notifyListeners();
       }
     } catch (_) {
@@ -131,6 +183,7 @@ class RadioSession extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(autoContinuityKey, _autoContinuity);
+      await prefs.setInt(firePulseKey, _firePulseMs);
     } catch (_) {}
   }
 
@@ -154,6 +207,7 @@ class RadioSession extends ChangeNotifier {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     interfaceStatus = null;
+    ledBrightness = null;
     _armKeyLatch = false;
     masterHeartbeatStatus = null;
     _discoverNonce = null;
@@ -236,7 +290,89 @@ class RadioSession extends ChangeNotifier {
     }
   }
 
+  /// Pairing (usb-master-0.4.5+): the bridge offers its network and channel
+  /// on the pairing channel; modules in pairing mode (LCD menu → Pair, or UP
+  /// held at power-up) take them and reply.
+  bool get supportsPairing => ready && interfaceStatus?.supportsPairing == true;
+  bool get canPair =>
+      supportsPairing &&
+      !busy &&
+      master.armed.isEmpty &&
+      !master.running &&
+      !master.stepping;
+  static const pairingSeconds = 10;
+  DateTime? pairingUntil;
+  bool get pairing => pairingUntil != null;
+
+  /// UIDs that accepted the offer in the current or last pairing window.
+  final pairedUids = <int>{};
+  int? _pairNonce;
+
+  /// Opens a pairing window, collects the modules that pair, then runs
+  /// discovery so they show on the Modules page. Returns the paired UIDs.
+  Future<Set<int>> pairModules({int seconds = pairingSeconds}) async {
+    if (!canPair) {
+      throw StateError(
+        supportsPairing
+            ? 'Disarm and wait for other work to finish before pairing'
+            : 'Pairing needs radio firmware usb-master-0.4.5 or newer',
+      );
+    }
+    busy = true;
+    final epoch = _epoch;
+    pairedUids.clear();
+    _pairNonce = null;
+    pairingUntil = DateTime.now().add(Duration(seconds: seconds));
+    status = 'Pairing: put modules in pairing mode now…';
+    notifyListeners();
+    try {
+      await _request(0x1C, [seconds]);
+      await Future<void>.delayed(Duration(seconds: seconds, milliseconds: 300));
+    } catch (error) {
+      if (epoch == _epoch) status = 'Pairing failed: $error';
+      rethrow;
+    } finally {
+      pairingUntil = null;
+      busy = false;
+      notifyListeners();
+    }
+    if (epoch != _epoch) return {...pairedUids};
+    final paired = {...pairedUids};
+    if (paired.isNotEmpty) await discoverModules();
+    status = paired.isEmpty
+        ? 'No module paired. On the module choose Pair in the menu, or '
+              'hold UP while powering it on, then pair again.'
+        : 'Paired ${paired.length} module${paired.length == 1 ? '' : 's'}. '
+              '$status';
+    notifyListeners();
+    return paired;
+  }
+
+  void _receivePairing(NfcpPacket packet) {
+    final data = packet.data;
+    if (data.length != 7) return;
+    final network = values['Network'];
+    // The module echoes the offer: network, channel, nonce, then its group.
+    _pairNonce ??= readUnsigned(data, 3, 2);
+    if (readUnsigned(data, 3, 2) != _pairNonce) return;
+    if (network != null &&
+        int.tryParse(network.replaceFirst('0x', ''), radix: 16) !=
+            readUnsigned(data, 0, 2)) {
+      return;
+    }
+    if (pairedUids.add(packet.source)) {
+      status =
+          'Paired 0x${packet.source.toRadixString(16).padLeft(8, '0').toUpperCase()}'
+          ' (group ${readUnsigned(data, 5, 2)})';
+      notifyListeners();
+    }
+  }
+
   void _receiveModule(NfcpPacket packet, int rssi, [int hops = 0]) {
+    if (packet.command == 0x35) {
+      if (pairingUntil != null) _receivePairing(packet);
+      return;
+    }
     if (_discoverNonce != null && packet.command == 0x41) {
       final data = packet.data;
       if (data.length != 10 && data.length != 12) return;
@@ -694,6 +830,11 @@ class RadioSession extends ChangeNotifier {
         final keepalive = await _request(0x19, const [], heartbeatReplyTimeout);
         if (epoch != _epoch) return;
         masterHeartbeatStatus = MasterHeartbeatStatus.parse(keepalive.payload);
+      }
+      if (ledBrightness == null && interfaceStatus!.supportsLedBrightness) {
+        final level = await _request(0x1B, const [], heartbeatReplyTimeout);
+        if (epoch != _epoch) return;
+        if (level.payload.length == 1) ledBrightness = level.payload[0];
       }
       notifyListeners();
       _startAutoContinuity();

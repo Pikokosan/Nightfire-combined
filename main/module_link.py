@@ -32,6 +32,9 @@ from mesh import *
 # was 50-65% of the receive cost on the module.
 LINK_CHECK_NFCP_CRC = False
 
+# How long pairing mode listens for a bridge before going back.
+PAIR_WINDOW_MS = 120000
+
 LINK_SOF_TYPES = {
     SOF2_BROADCAST: SOF_BROADCAST,
     SOF2_GROUP: SOF_GROUP,
@@ -134,6 +137,75 @@ class ModuleLink:
         self.last_rx_ms = 0
         self.stat_relayed = 0
         self.stat_duplicate = 0
+        # Pairing mode: until pair_until the radio listens on the pairing
+        # network/channel. paired = (network, channel) once a bridge paired it.
+        self.pair_until = None
+        self.paired = None
+
+    # --- pairing -----------------------------------------------------------
+    def ids(self):
+        """node.ids(), with the pairing network and channel in pairing mode."""
+        ids = self.node.ids()
+        if self.pair_until is None:
+            return ids
+        return PAIR_NETWORK_ID, ids[1], ids[2], PAIR_RADIO_CHANNEL
+
+    def pairing_left_ms(self):
+        if self.pair_until is None:
+            return 0
+        return max(0, time.ticks_diff(self.pair_until, time.ticks_ms()))
+
+    def start_pairing(self, window_ms=PAIR_WINDOW_MS):
+        """Listen for a bridge's pairing offer for window_ms. Disarmed only."""
+        if self.node.armed():
+            return False
+        self.queue.clear()
+        self.relays = {}
+        self.request = None
+        self.paired = None
+        self.pair_until = time.ticks_add(time.ticks_ms(), window_ms)
+        print("PAIRING net=0x%04X ch=%d for %ds" % (PAIR_NETWORK_ID, PAIR_RADIO_CHANNEL, window_ms // 1000))
+        return self.init_radio()
+
+    def stop_pairing(self):
+        if self.pair_until is None:
+            return
+        self.pair_until = None
+        self.queue.clear()
+        self.relays = {}
+        self.request = None
+        print("PAIRING ended")
+        self.init_radio()
+
+    def service_pairing(self):
+        if self.pair_until is not None and (
+            self.node.armed() or time.ticks_diff(time.ticks_ms(), self.pair_until) >= 0
+        ):
+            self.stop_pairing()
+
+    def handle_pair(self, pkt):
+        """CMD_PAIR from a bridge: take its network and channel, reply on
+        the pairing channel, then move to them."""
+        data = pkt.get("data", b"")
+        if (self.pair_until is None or self.node.armed() or len(data) != 5 or
+                pkt.get("frame_type") != SOF_BROADCAST):
+            return
+        network = int.from_bytes(data[0:2], "big")
+        channel = data[2]
+        if not nrf_module_common.valid_radio_channel(channel):
+            return
+        if not (self.node.apply_setting("network", network) and
+                self.node.apply_setting("channel", channel)):
+            print("PAIRING save failed")
+            return
+        group = self.node.ids()[1] & 0xFFFF
+        self.respond(CMD_PAIR_RSP, bytes(data) + group.to_bytes(2, "big"))
+        self.flush()
+        time.sleep_ms(80)
+        self.pair_until = None
+        self.paired = (network, channel)
+        print("PAIRED net=0x%04X ch=%d" % (network, channel))
+        self.init_radio()
 
     def note_attempt(self, key, now):
         attempts = self.attempts
@@ -153,7 +225,7 @@ class ModuleLink:
     def init_radio(self):
         try:
             nrf_radio.init(
-                channel=self.node.ids()[3],
+                channel=self.ids()[3],
                 tx_power=self.tx_power,
                 address=self.address,
             )
@@ -207,7 +279,7 @@ class ModuleLink:
         came (direct, via its relay, or flooded) with the request's msg_id,
         so the bridge can match it, and is cached for retries. Anything else
         is flooded with a new msg_id."""
-        ids = self.node.ids()
+        ids = self.ids()
         request = self.request
         if request is not None:
             self.request = None          # later frames are not "the reply"
@@ -248,6 +320,8 @@ class ModuleLink:
 
     def service(self):
         """Send queued repeats and relays that are due. Call every loop."""
+        if self.pair_until is not None:
+            self.service_pairing()
         if self.relays:
             self.service_relays(time.ticks_ms())
         if not self.queue.items:
@@ -301,7 +375,7 @@ class ModuleLink:
         frame_type = pkt.get("frame_type")
         if frame_type == SOF_BROADCAST:
             return True
-        ids = self.node.ids()
+        ids = self.ids()
         if frame_type == SOF_GROUP:
             return pkt.get("target") == ids[1]
         if frame_type == SOF_UNIQUE:
@@ -309,7 +383,7 @@ class ModuleLink:
         return False
 
     def is_for_me(self, pkt):
-        return pkt.get("frame_type") == SOF_UNIQUE and pkt.get("target") == self.node.ids()[2]
+        return pkt.get("frame_type") == SOF_UNIQUE and pkt.get("target") == self.ids()[2]
 
     def receive(self, payload, handler):
         """Handles one radio payload: drops what isn't new, queues a relay
@@ -320,7 +394,7 @@ class ModuleLink:
         rx_us = time.ticks_us()     # arrival anchor for time code
         if len(payload) < MESH_HEADER_LEN + 2:
             return
-        ids = self.node.ids()
+        ids = self.ids()
         network_id = ids[0]
         if payload[0] != ((network_id >> 8) & 0xFF) or payload[1] != (network_id & 0xFF):
             return
@@ -433,20 +507,20 @@ class ModuleLink:
     # --- replies -----------------------------------------------------------
     def ack(self, pkt, orig_cmd, code=ACK_OK):
         if pkt.get("frame_type") == SOF_UNIQUE:
-            self.tx(self.nfcp.build_ack(self.node.ids()[2], orig_cmd, code))
+            self.tx(self.nfcp.build_ack(self.ids()[2], orig_cmd, code))
 
     def nack(self, pkt, orig_cmd, code):
         if pkt.get("frame_type") == SOF_UNIQUE:
-            self.tx(self.nfcp.build_nack(self.node.ids()[2], orig_cmd, code))
+            self.tx(self.nfcp.build_nack(self.ids()[2], orig_cmd, code))
 
     def respond(self, cmd, data=b""):
-        self.tx(self.nfcp.build_response(self.node.ids()[2], cmd, data))
+        self.tx(self.nfcp.build_response(self.ids()[2], cmd, data))
 
     def discover_reply(self, pkt, cue_count, device_type, backoff_min_ms, backoff_max_ms, repeats, gap_ms):
         data = pkt.get("data", b"")
         nonce = int.from_bytes(data[:2], "big") if len(data) >= 2 else None
         span = backoff_max_ms - backoff_min_ms + 1
-        ids = self.node.ids()
+        ids = self.ids()
         # The backoff is a queued delay, not a sleep, so we keep listening.
         self.tx(
             self.nfcp.build_discover_response(
@@ -484,6 +558,10 @@ class ModuleLink:
         if cmd == CMD_KEEPALIVE:
             return True
 
+        if cmd == CMD_PAIR:
+            self.handle_pair(pkt)
+            return True
+
         if cmd == CMD_SET_GROUP or cmd == CMD_SET_NETWORK:
             if node.armed():
                 self.nack(pkt, cmd, NACK_REJECTED_ARMED)
@@ -510,7 +588,7 @@ class ModuleLink:
                 self.flush()
                 time.sleep_ms(80)
                 nrf_radio.init(
-                    channel=node.ids()[3],
+                    channel=self.ids()[3],
                     tx_power=self.tx_power,
                     address=self.address,
                 )
