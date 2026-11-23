@@ -23,10 +23,41 @@
 #define NRF_RADIO_RX_SHORTS (NRF_RADIO_DEFAULT_SHORTS | RADIO_SHORTS_ADDRESS_RSSISTART_Msk | \
     RADIO_SHORTS_DISABLED_RSSISTOP_Msk)
 
+// Background receive
+// ------------------
+// After init() the radio listens all the time, not only inside recv(): it is
+// put back into RX after every recv(), send(), channel() and noise_sample().
+// Each packet ends with END -> DISABLE; the RADIO interrupt (on DISABLED)
+// keeps a good packet in a small ring and re-arms RX into the next free slot
+// (about 40 us with fast ramp-up). recv() hands out held packets oldest
+// first and only waits when the ring is empty.
+//
+// The ring has NRF_RADIO_RX_SLOTS slots: the one the radio is filling plus up
+// to NRF_RADIO_RX_SLOTS - 1 held packets. When all are held, a new packet is
+// dropped (counted in rx_dropped) and the slot is reused.
+//
+// The interrupt is the only writer of rx_write, recv() the only writer of
+// rx_read. Everything else that touches the radio stops listening first
+// (rx_stop(): RADIO interrupt off, an in-flight packet finishes and is kept)
+// and starts it again afterwards (rx_start()).
+#define NRF_RADIO_RX_SLOTS 5
+#define NRF_RADIO_IRQ_PRIORITY 2
+#define NRF_RADIO_NO_RSSI (-32768)
+// A packet whose address has been heard needs at most (1 + 252 + 2) bytes of
+// 8 us each to finish. Stopping RX waits this long for it instead of cutting
+// it off.
+#define NRF_RADIO_RX_FINISH_US 2600
+
 static uint8_t tx_packet[NRF_RADIO_MAX_PAYLOAD + 1];
-static uint8_t rx_packet[NRF_RADIO_MAX_PAYLOAD + 1];
-// RSSI of the last received packet. Channel checks (CCA, noise_sample) keep
-// their samples to themselves.
+static uint8_t rx_slots[NRF_RADIO_RX_SLOTS][NRF_RADIO_MAX_PAYLOAD + 1] __attribute__((aligned(4)));
+static int16_t rx_slot_rssi[NRF_RADIO_RX_SLOTS];
+// Scratch receive buffer for noise_sample(): what lands there is never kept.
+static uint8_t scratch_packet[NRF_RADIO_MAX_PAYLOAD + 1];
+static volatile uint8_t rx_write = 0;
+static volatile uint8_t rx_read = 0;
+static volatile bool rx_listening = false;
+// RSSI of the last packet recv() returned. Channel checks (CCA, noise_sample)
+// keep their samples to themselves.
 static int last_rssi_dbm = 0;
 static uint32_t current_channel = NRF_RADIO_DEFAULT_CHANNEL;
 static int32_t current_tx_power = 8;
@@ -35,17 +66,26 @@ static uint32_t stat_tx_ok = 0;
 static uint32_t stat_tx_timeout = 0;
 static uint32_t stat_rx_ok = 0;
 static uint32_t stat_rx_timeout = 0;
-static uint32_t stat_rx_crc_error = 0;
-static uint32_t stat_rx_bad_len = 0;
+static volatile uint32_t stat_rx_crc_error = 0;
+static volatile uint32_t stat_rx_bad_len = 0;
+static volatile uint32_t stat_rx_dropped = 0;
 static uint32_t stat_tx_busy = 0;
 static uint32_t stat_cca_ok = 0;
 static uint32_t stat_cca_busy = 0;
 
+// Spins until *event is set or about `guard` polls have passed.
+static bool wait_event(volatile uint32_t *event, uint32_t guard) {
+    while (!*event) {
+        if (guard-- == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void radio_disable(void) {
     NRF_RADIO->TASKS_DISABLE = 1;
-    uint32_t guard = 1000000;
-    while (!NRF_RADIO->EVENTS_DISABLED && guard--) {
-    }
+    wait_event(&NRF_RADIO->EVENTS_DISABLED, 1000000);
     NRF_RADIO->EVENTS_DISABLED = 0;
 }
 
@@ -110,49 +150,134 @@ static void radio_config(uint32_t channel, int32_t tx_power, uint32_t address) {
     NRF_RADIO->SHORTS = NRF_RADIO_DEFAULT_SHORTS;
 }
 
+// Keeps the packet that just ended (if any) in the ring. Runs in the RADIO
+// interrupt, or with that interrupt off, after DISABLED.
+static void rx_take_packet(void) {
+    if (!NRF_RADIO->EVENTS_END) {
+        return;
+    }
+    uint8_t slot = rx_write;
+    if (!NRF_RADIO->CRCSTATUS) {
+        stat_rx_crc_error++;
+        return;
+    }
+    if (rx_slots[slot][0] > NRF_RADIO_MAX_PAYLOAD) {
+        stat_rx_bad_len++;
+        return;
+    }
+    rx_slot_rssi[slot] = NRF_RADIO->EVENTS_RSSIEND ? -(int16_t)NRF_RADIO->RSSISAMPLE : NRF_RADIO_NO_RSSI;
+    uint8_t next = (uint8_t)((slot + 1) % NRF_RADIO_RX_SLOTS);
+    if (next == rx_read) {
+        stat_rx_dropped++;
+        return;
+    }
+    __DMB();
+    rx_write = next;
+}
+
+// Starts receiving into the free slot. The radio must be DISABLED.
+static void rx_arm(void) {
+    NRF_RADIO->EVENTS_READY = 0;
+    NRF_RADIO->EVENTS_ADDRESS = 0;
+    NRF_RADIO->EVENTS_END = 0;
+    NRF_RADIO->EVENTS_RSSIEND = 0;
+    NRF_RADIO->EVENTS_DISABLED = 0;
+    (void)NRF_RADIO->EVENTS_DISABLED;
+    NRF_RADIO->PACKETPTR = (uint32_t)rx_slots[rx_write];
+    NRF_RADIO->TASKS_RXEN = 1;
+}
+
+void RADIO_IRQHandler(void) {
+    if (!NRF_RADIO->EVENTS_DISABLED) {
+        return;
+    }
+    if (rx_listening) {
+        rx_take_packet();
+        rx_arm();
+    } else {
+        NRF_RADIO->EVENTS_DISABLED = 0;
+        (void)NRF_RADIO->EVENTS_DISABLED;
+    }
+}
+
+static void rx_start(void) {
+    if (rx_listening) {
+        return;
+    }
+    if ((NRF_RADIO->STATE & RADIO_STATE_STATE_Msk) != RADIO_STATE_STATE_Disabled) {
+        radio_disable();
+    }
+    NRF_RADIO->SHORTS = NRF_RADIO_RX_SHORTS;
+    NRF_RADIO->INTENCLR = 0xFFFFFFFFu;
+    NRF_RADIO->INTENSET = RADIO_INTENSET_DISABLED_Msk;
+    NVIC_SetPriority(RADIO_IRQn, NRF_RADIO_IRQ_PRIORITY);
+    NVIC_ClearPendingIRQ(RADIO_IRQn);
+    rx_listening = true;
+    rx_arm();
+    NVIC_EnableIRQ(RADIO_IRQn);
+}
+
+// Stops listening. A packet that is on the air finishes first, and a
+// finished packet the interrupt has not handled yet is kept.
+static void rx_stop(void) {
+    if (!rx_listening) {
+        return;
+    }
+    NVIC_DisableIRQ(RADIO_IRQn);
+    if (NRF_RADIO->EVENTS_ADDRESS && !NRF_RADIO->EVENTS_END) {
+        // One poll takes at least one 16 MHz peripheral read (62.5 ns), so
+        // this bound is at least NRF_RADIO_RX_FINISH_US. (Not ticks_us: its
+        // 30 us RTC steps and IRQ dependence are not needed here.)
+        wait_event(&NRF_RADIO->EVENTS_END, NRF_RADIO_RX_FINISH_US * 16u);
+    }
+    rx_listening = false;
+    radio_disable();
+    rx_take_packet();
+    NRF_RADIO->INTENCLR = 0xFFFFFFFFu;
+    NRF_RADIO->EVENTS_ADDRESS = 0;
+    NRF_RADIO->EVENTS_END = 0;
+    NRF_RADIO->EVENTS_RSSIEND = 0;
+    NRF_RADIO->EVENTS_READY = 0;
+    NRF_RADIO->SHORTS = NRF_RADIO_DEFAULT_SHORTS;
+    NVIC_ClearPendingIRQ(RADIO_IRQn);
+}
+
+// Drops held packets. Call with listening stopped.
+static void rx_clear(void) {
+    rx_read = rx_write;
+}
+
+// Clear-channel check while listening: the receiver that listens for
+// packets also samples the channel. A packet on the air counts as busy.
 static bool channel_is_clear(uint32_t cca_ms, int32_t busy_dbm) {
     if (cca_ms == 0) {
         return true;
     }
 
-    radio_disable();
-    memset(rx_packet, 0, sizeof(rx_packet));
-    NRF_RADIO->PACKETPTR = (uint32_t)rx_packet;
-    NRF_RADIO->EVENTS_READY = 0;
-    NRF_RADIO->EVENTS_RSSIEND = 0;
-    NRF_RADIO->EVENTS_DISABLED = 0;
-    NRF_RADIO->TASKS_RXEN = 1;
-
-    uint32_t guard = 1000000;
-    while (!NRF_RADIO->EVENTS_READY && guard--) {
-    }
-    if (!guard) {
-        radio_disable();
-        stat_rx_timeout++;
-        return true;
-    }
-
+    rx_start();
     uint32_t start = mp_hal_ticks_ms();
     while ((mp_hal_ticks_ms() - start) < cca_ms) {
+        if (NRF_RADIO->EVENTS_ADDRESS && !NRF_RADIO->EVENTS_END) {
+            stat_cca_busy++;
+            return false;
+        }
+        if ((NRF_RADIO->STATE & RADIO_STATE_STATE_Msk) != RADIO_STATE_STATE_Rx) {
+            // Re-arming after a packet: about 40 us.
+            continue;
+        }
         NRF_RADIO->EVENTS_RSSIEND = 0;
         NRF_RADIO->TASKS_RSSISTART = 1;
-
-        guard = 1000000;
-        while (!NRF_RADIO->EVENTS_RSSIEND && guard--) {
-        }
-        if (!guard) {
-            break;
+        if (!wait_event(&NRF_RADIO->EVENTS_RSSIEND, 10000)) {
+            continue;
         }
 
         int32_t dbm = -(int32_t)NRF_RADIO->RSSISAMPLE;
         if (dbm >= busy_dbm) {
-            radio_disable();
             stat_cca_busy++;
             return false;
         }
     }
 
-    radio_disable();
     stat_cca_ok++;
     return true;
 }
@@ -171,11 +296,14 @@ static mp_obj_t nrf_radio_init(size_t n_args, const mp_obj_t *pos_args, mp_map_t
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
 
+    rx_stop();
     radio_config(
         (uint32_t)args[ARG_channel].u_int,
         (int32_t)args[ARG_tx_power].u_int,
         (uint32_t)args[ARG_address].u_int
     );
+    rx_clear();
+    rx_start();
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_KW(nrf_radio_init_obj, 0, nrf_radio_init);
@@ -214,7 +342,7 @@ static mp_obj_t nrf_radio_send(size_t n_args, const mp_obj_t *pos_args, mp_map_t
         return mp_const_false;
     }
 
-    radio_disable();
+    rx_stop();
     tx_packet[0] = payload.len;
     memcpy(&tx_packet[1], payload.buf, payload.len);
     NRF_RADIO->PACKETPTR = (uint32_t)tx_packet;
@@ -223,64 +351,49 @@ static mp_obj_t nrf_radio_send(size_t n_args, const mp_obj_t *pos_args, mp_map_t
     NRF_RADIO->EVENTS_DISABLED = 0;
     NRF_RADIO->TASKS_TXEN = 1;
 
-    uint32_t guard = 1000000;
-    while (!NRF_RADIO->EVENTS_DISABLED && guard--) {
-    }
-    if (!guard) {
+    if (!wait_event(&NRF_RADIO->EVENTS_DISABLED, 1000000)) {
         radio_disable();
         stat_tx_timeout++;
+        rx_start();
         mp_raise_OSError(MP_ETIMEDOUT);
     }
     NRF_RADIO->EVENTS_DISABLED = 0;
+    NRF_RADIO->EVENTS_END = 0;
     stat_tx_ok++;
+    rx_start();
     return mp_const_true;
 }
 static MP_DEFINE_CONST_FUN_OBJ_KW(nrf_radio_send_obj, 1, nrf_radio_send);
 
+// Returns the oldest held packet, or waits up to timeout ms (0: forever) for
+// one. CRC errors no longer end the wait early; they are counted and the
+// radio keeps listening.
 static mp_obj_t nrf_radio_recv(size_t n_args, const mp_obj_t *args) {
     uint32_t timeout_ms = 0;
     if (n_args > 0) {
         timeout_ms = mp_obj_get_int(args[0]);
     }
 
-    radio_disable();
-    memset(rx_packet, 0, sizeof(rx_packet));
-    NRF_RADIO->PACKETPTR = (uint32_t)rx_packet;
-    NRF_RADIO->EVENTS_READY = 0;
-    NRF_RADIO->EVENTS_ADDRESS = 0;
-    NRF_RADIO->EVENTS_END = 0;
-    NRF_RADIO->EVENTS_RSSIEND = 0;
-    NRF_RADIO->EVENTS_DISABLED = 0;
-    NRF_RADIO->SHORTS = NRF_RADIO_RX_SHORTS;
-    NRF_RADIO->TASKS_RXEN = 1;
-
+    rx_start();
     uint32_t start = mp_hal_ticks_ms();
-    while (!NRF_RADIO->EVENTS_DISABLED) {
+    for (;;) {
+        uint8_t slot = rx_read;
+        if (slot != rx_write) {
+            __DMB();
+            mp_obj_t packet = mp_obj_new_bytes(&rx_slots[slot][1], rx_slots[slot][0]);
+            if (rx_slot_rssi[slot] != NRF_RADIO_NO_RSSI) {
+                last_rssi_dbm = rx_slot_rssi[slot];
+            }
+            __DMB();
+            rx_read = (uint8_t)((slot + 1) % NRF_RADIO_RX_SLOTS);
+            stat_rx_ok++;
+            return packet;
+        }
         if (timeout_ms && mp_hal_ticks_ms() - start >= timeout_ms) {
-            radio_disable();
-            NRF_RADIO->SHORTS = NRF_RADIO_DEFAULT_SHORTS;
             stat_rx_timeout++;
             return mp_const_none;
         }
     }
-    NRF_RADIO->EVENTS_DISABLED = 0;
-    NRF_RADIO->SHORTS = NRF_RADIO_DEFAULT_SHORTS;
-    if (NRF_RADIO->EVENTS_RSSIEND) {
-        last_rssi_dbm = -(int)NRF_RADIO->RSSISAMPLE;
-    }
-
-    if (!NRF_RADIO->CRCSTATUS) {
-        stat_rx_crc_error++;
-        return mp_const_none;
-    }
-
-    uint8_t length = rx_packet[0];
-    if (length > NRF_RADIO_MAX_PAYLOAD) {
-        stat_rx_bad_len++;
-        return mp_const_none;
-    }
-    stat_rx_ok++;
-    return mp_obj_new_bytes(&rx_packet[1], length);
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(nrf_radio_recv_obj, 0, 1, nrf_radio_recv);
 
@@ -290,7 +403,7 @@ static mp_obj_t nrf_radio_last_rssi(void) {
 static MP_DEFINE_CONST_FUN_OBJ_0(nrf_radio_last_rssi_obj, nrf_radio_last_rssi);
 
 static mp_obj_t nrf_radio_stats(void) {
-    mp_obj_t result = mp_obj_new_dict(14);
+    mp_obj_t result = mp_obj_new_dict(16);
     mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_tx_ok), mp_obj_new_int_from_uint(stat_tx_ok));
     mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_tx_timeout), mp_obj_new_int_from_uint(stat_tx_timeout));
     mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_tx_busy), mp_obj_new_int_from_uint(stat_tx_busy));
@@ -298,6 +411,9 @@ static mp_obj_t nrf_radio_stats(void) {
     mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_rx_timeout), mp_obj_new_int_from_uint(stat_rx_timeout));
     mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_rx_crc_error), mp_obj_new_int_from_uint(stat_rx_crc_error));
     mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_rx_bad_len), mp_obj_new_int_from_uint(stat_rx_bad_len));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_rx_dropped), mp_obj_new_int_from_uint(stat_rx_dropped));
+    mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_rx_held), mp_obj_new_int(
+        (rx_write + NRF_RADIO_RX_SLOTS - rx_read) % NRF_RADIO_RX_SLOTS));
     mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_cca_ok), mp_obj_new_int_from_uint(stat_cca_ok));
     mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_cca_busy), mp_obj_new_int_from_uint(stat_cca_busy));
     mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_last_rssi), mp_obj_new_int(last_rssi_dbm));
@@ -316,6 +432,7 @@ static mp_obj_t nrf_radio_clear_stats(void) {
     stat_rx_timeout = 0;
     stat_rx_crc_error = 0;
     stat_rx_bad_len = 0;
+    stat_rx_dropped = 0;
     stat_tx_busy = 0;
     stat_cca_ok = 0;
     stat_cca_busy = 0;
@@ -328,12 +445,19 @@ static mp_obj_t nrf_radio_channel(mp_obj_t channel_obj) {
     if (channel > 100) {
         mp_raise_ValueError(MP_ERROR_TEXT("channel must be 0..100"));
     }
+    bool was_listening = rx_listening;
+    rx_stop();
+    rx_clear();
     current_channel = channel;
     NRF_RADIO->FREQUENCY = channel;
     NRF_RADIO->DATAWHITEIV = channel & 0x3F;
+    if (was_listening) {
+        rx_start();
+    }
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(nrf_radio_channel_obj, nrf_radio_channel);
+
 
 static mp_obj_t nrf_radio_device_id32(void) {
     uint32_t id0 = NRF_FICR->DEVICEID[0];
@@ -391,20 +515,25 @@ static mp_obj_t nrf_radio_noise_sample(size_t n_args, const mp_obj_t *pos_args, 
     int32_t previous_tx_power = current_tx_power;
     uint32_t previous_address = current_address;
 
+    // Held packets stay held; listening resumes on the previous channel.
+    bool was_listening = rx_listening;
+    rx_stop();
     radio_config(sample_channel, current_tx_power, current_address);
-    memset(rx_packet, 0, sizeof(rx_packet));
-    NRF_RADIO->PACKETPTR = (uint32_t)rx_packet;
+    // END -> START: a packet on the sampled channel does not stop the receiver
+    // (it lands in the scratch buffer and is thrown away).
+    NRF_RADIO->SHORTS = RADIO_SHORTS_READY_START_Msk | RADIO_SHORTS_END_START_Msk;
+    NRF_RADIO->PACKETPTR = (uint32_t)scratch_packet;
     NRF_RADIO->EVENTS_READY = 0;
     NRF_RADIO->EVENTS_RSSIEND = 0;
     NRF_RADIO->EVENTS_DISABLED = 0;
     NRF_RADIO->TASKS_RXEN = 1;
 
-    uint32_t guard = 1000000;
-    while (!NRF_RADIO->EVENTS_READY && guard--) {
-    }
-    if (!guard) {
+    if (!wait_event(&NRF_RADIO->EVENTS_READY, 1000000)) {
         radio_disable();
         radio_config(previous_channel, previous_tx_power, previous_address);
+        if (was_listening) {
+            rx_start();
+        }
         mp_raise_OSError(MP_ETIMEDOUT);
     }
 
@@ -419,10 +548,7 @@ static mp_obj_t nrf_radio_noise_sample(size_t n_args, const mp_obj_t *pos_args, 
         NRF_RADIO->EVENTS_RSSIEND = 0;
         NRF_RADIO->TASKS_RSSISTART = 1;
 
-        guard = 1000000;
-        while (!NRF_RADIO->EVENTS_RSSIEND && guard--) {
-        }
-        if (!guard) {
+        if (!wait_event(&NRF_RADIO->EVENTS_RSSIEND, 1000000)) {
             break;
         }
 
@@ -444,6 +570,9 @@ static mp_obj_t nrf_radio_noise_sample(size_t n_args, const mp_obj_t *pos_args, 
 
     radio_disable();
     radio_config(previous_channel, previous_tx_power, previous_address);
+    if (was_listening) {
+        rx_start();
+    }
 
     mp_obj_t result = mp_obj_new_dict(6);
     mp_obj_dict_store(result, MP_OBJ_NEW_QSTR(MP_QSTR_channel), mp_obj_new_int(sample_channel));

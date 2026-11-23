@@ -7,7 +7,9 @@ work that isn't committed yet under **Unreleased**.
 Parts: **Bridge** (USB radio dongle, `usb-master-*`), **Field** (field
 module firmware), **Dummy** (`nrf-dummy`), **Mesh** (radio layer shared by
 all of them), **App** (Android controller), **Tools** (scripts, simulator,
-installers), **Hardware**.
+installers), **Hardware**, **nRF image** (the MicroPython firmware with
+the native `nrf_radio` driver that the bridge, field modules and dummies
+run).
 
 ## Current versions
 
@@ -17,12 +19,73 @@ installers), **Hardware**.
 | Field | field-module 0.3.2 | One disarm path. |
 | Dummy | nrf-dummy 0.2.2 | One disarm path. |
 | App | 0.4.0 (build 4) | |
+| nRF image | 2026-11-06 build | On the field modules and dummies. The COM12 bridge runs the 2026-11-23 background-receive build: A/B retries 0.11% against 0.44%. |
 
 ## Unreleased
 
 Nothing yet.
 
 ## 2026-11-23
+
+### nRF image 2026-11-23 (background receive) — `PENDING`
+- **Changed:** the radio listens all the time, not only while Python waits
+  in `nrf_radio.recv()`. Before, `recv()` turned the receiver on at entry
+  and off on return, so a board was deaf whenever its Python loop did
+  anything else: about half the time on the COM12 bridge. Now the RADIO
+  interrupt keeps packets that arrive in between in a ring of 4 and
+  re-arms the receiver (about 40 us); the next `recv()` returns the oldest
+  at once. The radio goes back into RX after `init()`, `recv()`, `send()`,
+  `channel()` and `noise_sample()`. The Python API is unchanged, so `main/`
+  code needs no change.
+- **Added:** `stats()` keys `rx_dropped` (good packets dropped because 4
+  were already held) and `rx_held` (held right now). `clear_stats()`
+  clears `rx_dropped`. The bridge's `CMD_GET_STATS` reply does not carry
+  them yet; read them in a REPL.
+- **Changed:** a CRC error no longer ends `recv()` early with `None`; it is
+  counted and `recv()` keeps waiting until its timeout.
+- **Changed:** `send(cca_ms=...)` samples the channel with the listening
+  receiver, and a packet on the air counts as busy. Before, a packet that
+  arrived during the check stopped the receiver and the check passed as
+  clear. Without CCA, `send()` lets a packet already on the air finish
+  (at most about 2 ms) and keeps it before transmitting.
+- **Changed:** `init()` and `channel()` drop held packets; `noise_sample()`
+  keeps them and resumes listening on the previous channel. A packet heard
+  on the sampled channel no longer stops the sampling receiver.
+- **Fixed:** the driver's busy-wait guards could not report a timeout (the
+  counter wrapped past zero), so a radio that never finished a transmit
+  counted as `tx_ok` instead of raising `ETIMEDOUT`.
+- **Note:** same filesystem layout (`FS_SIZE = 0x80000`,
+  `nicenano_1M_256k.ld`), so a reflash keeps the board's files. The
+  2026-11-06 image is kept as
+  `firmware/nrf52840/nightfire_nicenano_micropython_2026-11-06_baseline.uf2`
+  for A/B runs and to go back. How to flash the COM12 bridge is in
+  `firmware/micropython/README.md`.
+- **Note:** on the COM12 bridge only so far. Field modules and dummies
+  stay on the 2026-11-06 image until they are flashed one at a time.
+- **Note:** flashed to the COM12 bench bridge on 2026-11-23. It came back
+  on COM12 with its files (`main.py`, `nrf_bridge_config.py`, the 28,548-byte
+  usb-master-0.4.6 bundle), `os.uname()` shows the 2026-11-23 build, and
+  `nrf_radio.stats()` has `rx_dropped` (0).
+- **Note:** `mesh_hw_smoke.py --bridge COM12` on the new image, 2026-11-23:
+  11 of 11 checks pass with field module D96E30DD (ping x20 lost 0, median
+  61 ms; reliable ping x50 failed 0, median 104 ms; tx_ok 249, rx_ok 243,
+  no CRC or length errors).
+- **Measured:** A/B on the COM12 bridge with field module D96E30DD,
+  2026-11-23, one session, 300 reliable pings per run (`reliable_ping_load.py`),
+  new and old image alternating, bridge app usb-master-0.4.6 on both:
+
+  | Image | Retries (3 runs) | Median | p95 | Max | Radio packets the bridge took in per run |
+  |---|---|---|---|---|---|
+  | 2026-11-23 (background receive) | 1 of 900 (0.11%): 0, 0, 1 | 65 ms | 95-96 ms | 112-574 ms | 917-919 for 942-945 sent |
+  | 2026-11-06 | 4 of 900 (0.44%): 2, 1, 1 | 65 ms | 97-98 ms | 555-563 ms | 781-804 for 948-951 sent |
+
+  The bridge takes in about 97% as many packets as it sends with the new
+  image against about 83% with the old: the module's reply copies that
+  used to land while the bridge was busy are now kept. Fewer of them are
+  lost, so fewer deliveries need a retry. The median is unchanged because
+  the first copy that does arrive answers the ping either way.
+  `rx_dropped` stayed 0 and no CRC or length errors on either image. The
+  bridge is left on the new image.
 
 ### Bridge usb-master-0.4.6 / usb-monitor-0.3.4 — `0913868`
 - **Changed:** NFCP frames are encoded and decoded in one place,

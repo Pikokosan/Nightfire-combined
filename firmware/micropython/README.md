@@ -44,8 +44,33 @@ read as all-ones on these LEDs). See
 `docs/command_interface_wiring.md` for the interface protocol, proposed connections,
 and required waveform/USB/radio bench checks.
 
-`last_rssi()` is the RSSI of the last received packet. While `recv()` is
-listening, the radio's `ADDRESS_RSSISTART` / `DISABLED_RSSISTOP` shortcuts
+### Background receive (2026-11-23 build and later)
+
+The radio listens all the time after `init()`, not only while Python waits
+in `recv()`. It goes back into RX right after every `recv()`, `send()`,
+`channel()` and `noise_sample()`. A packet that arrives while Python is busy
+(reading USB, handling another packet, sleeping) is kept by the RADIO
+interrupt in a ring of 4, and the next `recv()` returns it at once, oldest
+first. `recv(timeout)` only waits when nothing is held. The Python API is
+unchanged.
+
+- When 4 packets are already held, a new one is dropped and counted in
+  `stats()["rx_dropped"]`. `stats()["rx_held"]` is how many are held now.
+- `rx_ok` counts packets `recv()` returned; `rx_crc_error` and `rx_bad_len`
+  count bad packets as they arrive. A CRC error no longer ends a `recv()`
+  early: it keeps waiting for a good packet until its timeout.
+- `init()` and `channel()` drop held packets. `noise_sample()` keeps them.
+- `send()` with `cca_ms` samples the channel with the listening receiver,
+  and a packet on the air counts as busy. Without CCA, `send()` lets a
+  packet that is already on the air finish (at most about 2 ms), keeps it,
+  then transmits.
+- `last_rssi()` is the RSSI of the last packet `recv()` returned, as before.
+
+Older builds enable the receiver only inside `recv()` and turn it off on
+return, so a board is deaf whenever Python is doing anything else.
+
+`last_rssi()` is the RSSI of the last received packet. While the receiver
+is listening, the radio's `ADDRESS_RSSISTART` / `DISABLED_RSSISTOP` shortcuts
 sample it during the packet itself. Before 2026-11-06 the driver sampled
 as soon as the receiver was ready, so it always returned the noise floor
 (about -100 dBm), and CCA / `noise_sample()` overwrote it too. Those
@@ -60,6 +85,8 @@ checks now keep their samples to themselves.
 - `rx_timeout`
 - `rx_crc_error`
 - `rx_bad_len`
+- `rx_dropped` (2026-11-23 build: good packets dropped, receive ring full)
+- `rx_held` (2026-11-23 build: packets held right now)
 - `cca_ok`
 - `cca_busy`
 - `last_rssi`
@@ -122,6 +149,64 @@ To flash a board:
 1. Put it in UF2 mode: `py -3 scripts\install\enter_nrf_bootloader.py --port COMx`.
 2. Copy `firmware/nrf52840/nightfire_nicenano_micropython.uf2` to the drive
    that appears (`INFO_UF2.TXT` names the board).
+
+### Flashing the COM12 bench bridge (nice!nano, UF2 bootloader)
+
+The bridge's files (its app, `nrf_node_config.py`, LED settings) stay on
+the board: the 2026-11-23 build has the same filesystem layout
+(`FS_SIZE = 0x80000`, `nicenano_1M_256k.ld`) as the 2026-11-05/06 builds.
+
+1. Close anything that holds COM12 (the Android app, a serial monitor).
+2. Put the bridge in UF2 mode, either way:
+   - `py -3 scripts\install\enter_nrf_bootloader.py --port COM12`
+     (stops the bridge app over USB and runs `machine.bootloader()`), or
+   - double-tap the nice!nano's reset pad (RST to GND twice, quickly).
+
+   A drive appears whose `INFO_UF2.TXT` names the nice!nano bootloader,
+   and COM12 goes away.
+3. Copy the image:
+   `powershell -ExecutionPolicy Bypass -File scripts\install\flash_nrf52840_uf2.ps1`
+   (copies `firmware\nrf52840\nightfire_nicenano_micropython.uf2`; pass
+   `-Uf2 <file>` for another image). The drive disappears and the board
+   restarts on its own, back on COM12, running the bridge app.
+4. Check it is the image you meant: in a REPL, `import os; os.uname()`
+   shows the build date, and on the background-receive build
+   `nrf_radio.stats()` has an `rx_dropped` key.
+
+To go back, flash `firmware\nrf52840\nightfire_nicenano_micropython_2026-11-06_baseline.uf2`
+the same way (`-Uf2` with that path). That is the image built 2026-11-06,
+before background receive.
+
+### Bench plan: background receive A/B (bridge only)
+
+Radio-timing changes ship only after an A/B on hardware. Old = the
+2026-11-06 baseline image, new = the 2026-11-23 image; same bridge app
+(usb-master-0.4.6) on both, field module `D96E30DD` powered and in place,
+everything in one session (radio conditions drift over minutes).
+
+1. Before flashing anything, note the bridge app bundle size on COM12
+   (bridge app updates have rolled back silently before) and that
+   `os.uname()` shows the 2026-11-06 build.
+2. Flash the new image (steps above). Smoke test:
+   `py -3 scripts/diagnostics/mesh_hw_smoke.py --bridge COM12`.
+   Must pass as it does on the old image. Stop here if it does not.
+3. Alternate, 300 reliable pings per run, at least 3 runs each:
+   new, old, new, old, new, old. Each run:
+   `py -3 scripts/diagnostics/reliable_ping_load.py --bridge COM12 --uid D96E30DD --count 300`.
+   Reflash between runs (about a minute each). Write down retries, median
+   and p95 round trip.
+4. After the last run on the new image, read `nrf_radio.stats()` in a REPL
+   (`py -3 scripts/diagnostics/read_nrf_radio_stats.py COM12`): `rx_dropped`
+   should be 0 or near it; a steady count means the ring of 4 is too small
+   for the traffic.
+5. Leave the bridge on whichever image wins. Ship the new one only if its
+   retries are lower than 0.4% (the 0.4.6 figure) or at least no worse,
+   with no smoke-test failures. Field modules and dummies come after, one
+   board at a time.
+
+Expected: retries well under 0.4%, and the median round trip a few ms
+shorter, because a module's first reply no longer lands while the bridge
+reads USB.
 
 Boards on the 2026-11-05 build or later keep their files. A board on an
 older build (for example 2026-09-16) has a different filesystem layout and
