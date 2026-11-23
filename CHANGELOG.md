@@ -24,7 +24,7 @@ Nothing yet.
 
 ## 2026-11-23
 
-### Bridge usb-master-0.4.6 / usb-monitor-0.3.4 — `PENDING`
+### Bridge usb-master-0.4.6 / usb-monitor-0.3.4 — `0913868`
 - **Changed:** NFCP frames are encoded and decoded in one place,
   `main/nfcp_frame.py`, with named command numbers. Before, the master
   policy, the monitor policy, the keepalive and the pairing offer each had
@@ -53,10 +53,10 @@ Nothing yet.
 - **Fixed:** the bridge refused `mesh.py` in a file update, although the app
   offers it. The bridge now accepts `mesh.py` and `nfcp_frame.py`.
 
-### App — `PENDING`
+### App — `0913868`
 - **Changed:** the firmware page also accepts `nfcp_frame.py`.
 
-### Tools — `PENDING`
+### Tools — `0913868`
 - **Added:** `scripts/sim/bridge_trace_harness.py` runs the USB bridge on
   fake hardware through every USB command, session changes, arming,
   pairing, maintenance and a main-loop error, and writes a trace to compare.
