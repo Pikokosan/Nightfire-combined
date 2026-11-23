@@ -24,7 +24,7 @@ Nothing yet.
 
 ## 2026-11-23
 
-### Field field-module 0.3.2 — `PENDING`
+### Field field-module 0.3.2 — `87a8f5d`
 - **Changed:** one `disarm()` now makes the module safe on every path: the
   disarm command, master link timeout, startup fault, a refused arm and a
   main-loop error. Each path stops the script, clears every cue output,
@@ -35,11 +35,11 @@ Nothing yet.
   fault blocked firing). Disarm paths other than a startup fault didn't
   switch PRE_TEST off. Every arm now starts from SAFE, re-arms included.
 
-### Dummy nrf-dummy 0.2.2 — `PENDING`
+### Dummy nrf-dummy 0.2.2 — `87a8f5d`
 - **Changed:** the disarm command and main-loop errors use `disarm()`, like
   the link timeout already did.
 
-### Tools — `PENDING`
+### Tools — `87a8f5d`
 - **Added:** `scripts/tests/test_module_disarm.py` drives every disarm path
   of both firmwares on the trace harness's fake hardware and checks the
   module ends up SAFE.
