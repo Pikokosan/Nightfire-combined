@@ -80,6 +80,7 @@ def main():
         "main.py": root / "main/nrf_usb_monitor_main.py",
         "bridge_radio.py": root / "main/bridge_radio.py",
         "mesh.py": root / "main/mesh.py",
+        "nfcp_frame.py": root / "main/nfcp_frame.py",
         "usb_bridge_transport.py": root / "main/usb_bridge_transport.py",
         "usb_monitor_nfcp.py": root / "main/usb_monitor_nfcp.py",
         "command_interface.py": root / "main/command_interface.py",

@@ -3,88 +3,91 @@
 No hardware imports: the same framing and watchdog run in host-side tests.
 """
 import bridge_radio
+from nfcp_frame import *
 
 
-def _decode(frame, kinds):
-    if len(frame) < 7 or len(frame) > 218 or frame[0] != 255:
-        return None
-    kind = frame[1]
-    if kind not in kinds:
-        return None
-    body = bytearray()
-    escaped = False
-    for value in frame[2:]:
-        if escaped:
-            if value != 254:
-                return None
-            body.append(255)
-            escaped = False
-        elif value == 255:
-            escaped = True
-        else:
-            body.append(value)
-    if escaped or len(body) < 5 or len(body) != body[0] + 3:
-        return None
-    if bridge_radio.crc16_ccitt(body[:-2]) != bridge_radio.int_from_be(body[-2:]):
-        return None
-    payload = body[1:-2]
-    return kind, payload
+def _master_broadcast_valid(command, data):
+    """Broadcasts the app may send through the master bridge."""
+    return ((command == NFCP_CMD_DISARM and not data) or
+            (command == NFCP_CMD_DISCOVER and len(data) in (0, 2)) or
+            (command in (NFCP_CMD_KEEPALIVE, NFCP_CMD_TIME_SYNC) and len(data) == 4) or
+            (command == NFCP_CMD_SCRIPT_STOP and len(data) == 2) or
+            (command == NFCP_CMD_SCRIPT_HEARTBEAT and len(data) == 6))
+
+
+def _master_unique_valid(command, data):
+    """Commands to one module the app may send, with their data lengths."""
+    if command in (NFCP_CMD_ARM, NFCP_CMD_DISARM, NFCP_CMD_CONTINUITY_REQ,
+                   NFCP_CMD_OUTPUT_STATUS_REQ, NFCP_CMD_INFO_REQ, NFCP_CMD_OTA_UPDATE_REBOOT):
+        return not data
+    if command == NFCP_CMD_RESISTANCE_REQ:
+        return not data or data == b'\x01'          # calibrated, or raw ADC
+    if command == NFCP_CMD_FIRE_PULSE:
+        return len(data) in (0, 2)                  # read, or set (ms)
+    if command == NFCP_CMD_FIRE:
+        return 1 <= len(data) <= 8 and any(data)    # cue mask
+    if command == NFCP_CMD_SET_UNIQUE:
+        return len(data) == 4
+    if command in (NFCP_CMD_SET_GROUP, NFCP_CMD_SET_NETWORK, NFCP_CMD_OTA_UPDATE_END,
+                   NFCP_CMD_OTA_UPDATE_ABORT, NFCP_CMD_SCRIPT_CLEAR, NFCP_CMD_SCRIPT_STOP):
+        return len(data) == 2
+    if command == NFCP_CMD_SET_RADIO_CHANNEL:
+        return len(data) == 1 and nfcp_valid_channel(data[0])
+    if command == NFCP_CMD_SET_RESISTANCE_CAL:
+        # version 1, bank < 8, 1-8 points of adc_mv(2) deci_ohms(2)
+        return (len(data) >= 3 and data[0] == 1 and data[1] < 8 and 1 <= data[2] <= 8 and
+                len(data) == 3 + data[2] * 4)
+    if command == NFCP_CMD_PING:
+        return len(data) <= 16
+    if command == NFCP_CMD_OTA_UPDATE_BEGIN:
+        # transfer_id(2) size(4) checksum(4) path_len(1, 1-64) path
+        return len(data) >= 12 and 1 <= data[10] <= 64 and len(data) == 11 + data[10]
+    if command == NFCP_CMD_OTA_UPDATE_WRITE:
+        return 7 <= len(data) <= 86
+    if command == NFCP_CMD_SCRIPT_LOAD:
+        # script_id(2) chunk(1) count(1, 1-3) entries
+        return (len(data) >= 4 and 1 <= data[3] <= 3 and
+                len(data) == 4 + data[3] * NFCP_SCRIPT_ENTRY_BYTES)
+    if command == NFCP_CMD_SCRIPT_START:
+        return len(data) == 12
+    if command in (NFCP_CMD_SCRIPT_HEARTBEAT, NFCP_CMD_SCRIPT_STEP):
+        return len(data) == 6
+    return False
 
 
 def decode_master(frame):
-    decoded = _decode(frame, (0xFD, 0xFB))
+    """(kind, command, data, uid or None) of an NFCP frame the app may send
+    through the master bridge, or None."""
+    decoded = nfcp_decode(frame, (NFCP_KIND_BROADCAST, NFCP_KIND_UNIQUE))
     if decoded is None:
         return None
     kind, payload = decoded
-    header = 2 if kind == 0xFD else 6
-    if len(payload) < header or payload[0] != 1:
+    broadcast = kind == NFCP_KIND_BROADCAST
+    header = 2 if broadcast else 6    # node_id [uid(4)] cmd
+    if len(payload) < header or payload[0] != NFCP_MASTER_NODE_ID:
         return None
     command = payload[header - 1]
     data = payload[header:]
-    if kind == 0xFD:
-        valid = ((command == 0x11 and not data) or
-                 (command == 0x40 and len(data) in (0, 2)) or
-                 (command in (0x54, 0x75) and len(data) == 4) or
-                 (command == 0x73 and len(data) == 2) or
-                 (command == 0x74 and len(data) == 6))
-    else:
-        valid = ((command in (0x10, 0x11, 0x22, 0x27, 0x52, 0x64) and not data) or
-                 (command == 0x24 and (not data or data == b'\x01')) or
-                 (command == 0x29 and len(data) in (0, 2)) or
-                 (command == 0x20 and 1 <= len(data) <= 8 and any(data)) or
-                 (command == 0x30 and len(data) == 4) or
-                 (command in (0x31, 0x32, 0x62, 0x63, 0x70, 0x73) and len(data) == 2) or
-                 (command == 0x33 and len(data) == 1 and
-                  (data[0] == 0 or 74 <= data[0] <= 100)) or
-                 (command == 0x26 and len(data) >= 3 and data[0] == 1 and
-                  data[1] < 8 and 1 <= data[2] <= 8 and len(data) == 3 + data[2] * 4) or
-                 (command == 0x7F and len(data) <= 16) or
-                 (command == 0x60 and len(data) >= 12 and 1 <= data[10] <= 64 and
-                  len(data) == 11 + data[10]) or
-                 (command == 0x61 and 7 <= len(data) <= 86) or
-                 (command == 0x71 and len(data) >= 4 and 1 <= data[3] <= 3 and
-                  len(data) == 4 + data[3] * 12) or
-                 (command == 0x72 and len(data) == 12) or
-                 (command in (0x74, 0x76) and len(data) == 6))
-    if not valid:
+    valid = _master_broadcast_valid if broadcast else _master_unique_valid
+    if not valid(command, data):
         return None
-    return kind, command, bytes(data), (bridge_radio.int_from_be(payload[1:5]) if kind == 0xFB else None)
+    return kind, command, bytes(data), (None if broadcast else bridge_radio.int_from_be(payload[1:5]))
 
 
-def broadcast(command, data=b''):
-    body = bytes([2 + len(data), 1, command]) + data
-    body += bridge_radio.int_to_be(bridge_radio.crc16_ccitt(body), 2)
-    result = bytearray(b'\xff\xfd')
-    for value in body:
-        result.append(value)
-        if value == 255:
-            result.append(254)
-    return bytes(result)
+# Commands that may arm or fire. They need the ARM key on ARM, and all but
+# ARM need a module this bridge armed.
+MASTER_ARMING = (NFCP_CMD_ARM, NFCP_CMD_FIRE, NFCP_CMD_SCRIPT_START, NFCP_CMD_SCRIPT_STEP)
+# Commands that stop things: allowed even after the app session expired.
+MASTER_STOPPING = (NFCP_CMD_DISARM, NFCP_CMD_SCRIPT_STOP)
+# Changes refused while any module may be armed.
+MASTER_SAFE_ONLY = (NFCP_CMD_SET_RESISTANCE_CAL, NFCP_CMD_SET_UNIQUE, NFCP_CMD_SET_GROUP,
+                    NFCP_CMD_SET_NETWORK, NFCP_CMD_SET_RADIO_CHANNEL,
+                    NFCP_CMD_OTA_UPDATE_BEGIN, NFCP_CMD_OTA_UPDATE_WRITE,
+                    NFCP_CMD_OTA_UPDATE_END, NFCP_CMD_OTA_UPDATE_REBOOT,
+                    NFCP_CMD_SCRIPT_CLEAR, NFCP_CMD_SCRIPT_LOAD)
+# A module's "uid ACK DISARM OK" reply ends with these.
+MASTER_DISARM_ACK = bytes((NFCP_CMD_ACK, NFCP_CMD_DISARM, NFCP_ACK_OK))
 
-
-# Same values as nfcp.py: modules in pairing mode listen here.
-PAIR_NETWORK_ID = 0x7A1B
-PAIR_RADIO_CHANNEL = 80
 PAIR_OFFER_GAP_MS = 300
 PAIR_MAX_SECONDS = 30
 
@@ -92,7 +95,7 @@ PAIR_MAX_SECONDS = 30
 class BridgePairing:
     """The bridge side of pairing: for a few seconds the radio sits on the
     pairing network and channel and offers this bridge's own network and
-    channel (NFCP broadcast 0x34) every PAIR_OFFER_GAP_MS."""
+    channel (NFCP broadcast NFCP_CMD_PAIR) every PAIR_OFFER_GAP_MS."""
 
     def __init__(self, clock, difference):
         self.clock = clock
@@ -131,8 +134,8 @@ class BridgePairing:
         if self.last_offer is not None and self.difference(now, self.last_offer) < PAIR_OFFER_GAP_MS:
             return None
         self.last_offer = now
-        return broadcast(0x34, bridge_radio.int_to_be(network, 2) + bytes([channel & 0xFF]) +
-                         bridge_radio.int_to_be(self.nonce, 2))
+        return nfcp_broadcast(NFCP_CMD_PAIR, bridge_radio.int_to_be(network, 2) +
+                              bytes([channel & 0xFF]) + bridge_radio.int_to_be(self.nonce, 2))
 
 
 # After a STOP the RF keepalive is withheld for longer than the field's
@@ -165,27 +168,26 @@ class MasterControl:
         if decoded is None:
             return False
         kind, command, data, uid = decoded
-        if command in (0x11, 0x73):
-            if command == 0x11 and kind == 0xFD and self.may_be_armed:
+        if command in MASTER_STOPPING:
+            if command == NFCP_CMD_DISARM and kind == NFCP_KIND_BROADCAST and self.may_be_armed:
                 self.broadcast_disarm = True
             return True  # STOP/DISARM remain possible after host expiry.
         if not host_active or self.expired or self.stop_pending:
             return False
-        if command in (0x10, 0x20, 0x72, 0x76):
+        if command in MASTER_ARMING:
             if switch is not None and switch != 2:
                 return False
-            if command != 0x10 and uid not in self.targets:
+            if command != NFCP_CMD_ARM and uid not in self.targets:
                 return False
             # Set before RF send: transmission failure does not prove disarm.
             self.may_be_armed = True
-            if command == 0x10 and kind == 0xFB:
+            if command == NFCP_CMD_ARM and kind == NFCP_KIND_UNIQUE:
                 self.targets.add(uid)
                 self.needs_rearm = False
                 self.broadcast_disarm = False
-        elif command in (0x26, 0x30, 0x31, 0x32, 0x33, 0x60, 0x61, 0x62,
-                         0x64, 0x70, 0x71) and self.may_be_armed:
+        elif command in MASTER_SAFE_ONLY and self.may_be_armed:
             return False
-        elif command == 0x29 and data and self.may_be_armed:
+        elif command == NFCP_CMD_FIRE_PULSE and data and self.may_be_armed:
             return False  # The cue hold time only changes while all is safe.
         return True
 
@@ -209,8 +211,8 @@ class MasterControl:
             self.last_stop = now
             network = bridge_radio.int_to_be(self.network, 2)
             try:
-                stopped = self.send(network + broadcast(0x73, b'\x00\x00'))
-                disarmed = self.send(network + broadcast(0x11))
+                stopped = self.send(network + nfcp_broadcast(NFCP_CMD_SCRIPT_STOP, b'\x00\x00'))
+                disarmed = self.send(network + nfcp_broadcast(NFCP_CMD_DISARM))
                 if stopped and disarmed:
                     self.stop_pending -= 1
             except Exception:
@@ -252,11 +254,18 @@ class MasterControl:
         pass
 
     def observe_reply(self, frame):
-        decoded = _decode(frame, (0xFA,))
+        # Only an ACK of a DISARM matters here. Its three bytes are never
+        # escaped, so a frame without them can skip the full decode (which
+        # keeps the bridge off the radio for a few ms per reply).
+        if MASTER_DISARM_ACK not in frame:
+            return
+        decoded = nfcp_decode(frame, (NFCP_KIND_RESPONSE,))
         if decoded is None:
             return
         payload = decoded[1]
-        if len(payload) == 7 and payload[4] == 0x50 and payload[5] == 0x11 and payload[6] == 0:
+        # uid(4) ACK DISARM OK
+        if (len(payload) == 7 and payload[4] == NFCP_CMD_ACK and
+                payload[5] == NFCP_CMD_DISARM and payload[6] == NFCP_ACK_OK):
             self.targets.discard(bridge_radio.int_from_be(payload[:4]))
             self.may_be_armed = bool(self.targets)
             if not self.may_be_armed:

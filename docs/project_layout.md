@@ -14,6 +14,9 @@ on-board name (for example the entry point becomes `main.py`).
   into `usb_master_bundle.mpy` by `scripts/build/build_usb_master_bundle.py`).
 - `usb_bridge_transport.py`: the `NFUSB1` USB line envelope.
 - `usb_monitor_nfcp.py`: which module commands the bridge passes on.
+- `nfcp_frame.py`: NFCP frame encoding and decoding, and the command
+  numbers, for the bridge (`nfcp.py` is too big for it; a test keeps the two
+  the same).
 - `usb_master_control.py`: live ARM/FIRE/script control and the RF keepalive.
 - `usb_master_maintenance.py`: radio maintenance (channel scan and so on).
 - `command_interface.py`: SAFE/ARM switch and status LEDs.
@@ -83,7 +86,7 @@ list.
 | `tests/` | Offline unit tests (`test_*.py`), no hardware |
 | `bench/` | Tests that drive real boards |
 | `diagnostics/` | Probes and one-off checks |
-| `sim/` | Mesh simulator, firmware trace harness, PC module emulator |
+| `sim/` | Mesh simulator, firmware trace harnesses, PC module emulator |
 | `android/` | App build, tablet emulator, icons |
 | `lib/` | Helpers the other scripts import |
 

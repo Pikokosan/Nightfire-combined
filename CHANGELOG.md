@@ -13,7 +13,7 @@ installers), **Hardware**.
 
 | Part | Version | Note |
 |---|---|---|
-| Bridge | usb-master-0.4.5 | Cue hold time relay and module pairing. |
+| Bridge | usb-master-0.4.6 | Listens more: fewer reliable-delivery retries. |
 | Field | field-module 0.3.2 | One disarm path. |
 | Dummy | nrf-dummy 0.2.2 | One disarm path. |
 | App | 0.4.0 (build 4) | |
@@ -23,6 +23,49 @@ installers), **Hardware**.
 Nothing yet.
 
 ## 2026-11-23
+
+### Bridge usb-master-0.4.6 / usb-monitor-0.3.4 — `PENDING`
+- **Changed:** NFCP frames are encoded and decoded in one place,
+  `main/nfcp_frame.py`, with named command numbers. Before, the master
+  policy, the monitor policy, the keepalive and the pairing offer each had
+  their own copy of the escape/CRC code and used bare numbers. A test keeps
+  its values and frames identical to `nfcp.py`.
+- **Changed:** the main loop is a `UsbBridge` class with one handler per USB
+  command instead of one long `if`/`elif` chain. The "app session and
+  nothing armed" check is one function (`may_change`) instead of three
+  hand-written copies. Behaviour is unchanged: the new bridge trace harness
+  gives the same trace before and after in master and monitor mode (apart
+  from the version string).
+- **Fixed:** the bridge hears the radio only while it waits in
+  `nrf_radio.recv()`, and it spent about half of each main-loop pass doing
+  other work. Two of the biggest pieces are gone: the status LED colours
+  (about 3 ms) are worked out only when something they show changes, and a
+  module reply is fully decoded only if it can be the ACK of a DISARM.
+  Measured on the COM12 bridge with one field module, 300 reliable pings
+  per run, old and new alternating: retries 0.4% (7 of 1,800) against 1.1%
+  (23 of 2,100) for 0.4.5, median round trip 66-70 ms against 72-82 ms,
+  p95 about 103 ms against 113-122 ms. The cleanup alone (faster loop
+  passes, same work) had made it worse, 3-5% retries, by shifting when the
+  bridge was deaf; that version was never released.
+- **Note:** a bridge installed from source files (not the compiled bundle)
+  now needs `nfcp_frame.py`; `install_usb_bridge.py` copies it. The
+  compiled bundle is 28,548 bytes (was 26,666).
+- **Fixed:** the bridge refused `mesh.py` in a file update, although the app
+  offers it. The bridge now accepts `mesh.py` and `nfcp_frame.py`.
+
+### App — `PENDING`
+- **Changed:** the firmware page also accepts `nfcp_frame.py`.
+
+### Tools — `PENDING`
+- **Added:** `scripts/sim/bridge_trace_harness.py` runs the USB bridge on
+  fake hardware through every USB command, session changes, arming,
+  pairing, maintenance and a main-loop error, and writes a trace to compare.
+- **Added:** `scripts/diagnostics/reliable_ping_load.py` loads a bridge with
+  reliable pings to one module and reports retries and round trips, to A/B
+  two bridge firmwares on the bench.
+- **Added:** `scripts/tests/test_nfcp_frame.py`; the bundle test now also
+  checks that no top-level name is defined in two bridge files and that the
+  bridge accepts every file the app may send.
 
 ### Field field-module 0.3.2 — `87a8f5d`
 - **Changed:** one `disarm()` now makes the module safe on every path: the

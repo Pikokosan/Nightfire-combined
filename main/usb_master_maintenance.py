@@ -5,7 +5,7 @@ import bridge_radio
 BUNDLE_FILE = 'usb_master_bundle.mpy'
 TRIAL_PENDING = 'update_pending'
 TRIAL_ACTIVE = 'update_trial'
-UPDATABLE_FILES = ('main.py', BUNDLE_FILE, 'bridge_radio.py', 'nrf_bridge_config.py',
+UPDATABLE_FILES = ('main.py', BUNDLE_FILE, 'bridge_radio.py', 'mesh.py', 'nfcp_frame.py', 'nrf_bridge_config.py',
                    'usb_master_control.py', 'usb_master_maintenance.py',
                    'usb_bridge_transport.py', 'usb_monitor_nfcp.py', 'command_interface.py')
 

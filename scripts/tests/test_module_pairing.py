@@ -99,7 +99,7 @@ class ModulePairingTests(unittest.TestCase):
     def offer(self, network=0x0BEE, channel=76):
         self.offers.start(5)
         frame = self.offers.poll(network, channel)
-        payload = mesh.mesh_build(control.PAIR_NETWORK_ID, BRIDGE, 7, frame)
+        payload = mesh.mesh_build(control.NFCP_PAIR_NETWORK_ID, BRIDGE, 7, frame)
         self.link.receive(payload, self.link.handle_common)
 
     def replies(self):
@@ -113,8 +113,8 @@ class ModulePairingTests(unittest.TestCase):
         return found
 
     def test_shared_constants_match(self):
-        self.assertEqual(nfcp.PAIR_NETWORK_ID, control.PAIR_NETWORK_ID)
-        self.assertEqual(nfcp.PAIR_RADIO_CHANNEL, control.PAIR_RADIO_CHANNEL)
+        self.assertEqual(nfcp.PAIR_NETWORK_ID, control.NFCP_PAIR_NETWORK_ID)
+        self.assertEqual(nfcp.PAIR_RADIO_CHANNEL, control.NFCP_PAIR_RADIO_CHANNEL)
 
     def test_pairing_takes_the_bridge_network_and_channel(self):
         self.assertTrue(self.link.start_pairing())
@@ -161,7 +161,7 @@ class BridgePairingTests(unittest.TestCase):
         self.assertTrue(self.pairing.start(2))
         self.assertEqual(self.pairing.seconds_left(), 2)
         first = self.pairing.poll(0x04D2, 90)
-        self.assertEqual(first, control.broadcast(
+        self.assertEqual(first, control.nfcp_broadcast(
             0x34, b"\x04\xd2\x5a" + self.pairing.nonce.to_bytes(2, "big")))
         self.assertIsNone(self.pairing.poll(0x04D2, 90))
         _clock["ms"] += control.PAIR_OFFER_GAP_MS

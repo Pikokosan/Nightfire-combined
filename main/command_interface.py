@@ -45,6 +45,7 @@ class CommandInterface:
         self.need_safe = True
         self.led_write = led_write
         self.last_colors = None
+        self.led_shown = None
         self.keepalive_supported = False
         self.group_settings_supported = False
         self.fire_pulse_supported = False
@@ -169,6 +170,16 @@ class CommandInterface:
                        (32 if self.key_latched() else 0))
         if self.led_status != 1:
             return
+        # Everything the pixels show (see colors()). Working the colours out
+        # takes about 3 ms on the nice!nano, and the bridge hears no radio
+        # meanwhile, so it is only done when this changes.
+        shown = (self.switch, self.need_safe, self.module_arm, session, self.faults,
+                 (now // 500) % 2,
+                 self.keepalive_at is not None and
+                 self.difference(now, self.keepalive_at) < self.KEEPALIVE_BLINK_MS)
+        if shown == self.led_shown and self.last_colors is not None:
+            return
+        self.led_shown = shown
         colors = [self.scale(color) for color in self.colors(now, session)]
         colors += [(0, 0, 0)] * (self.led_count - 4)
         encoded = bytes(color["RGB".index(component)] for color in colors for component in self.order)

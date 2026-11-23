@@ -51,6 +51,8 @@ nRF boards directly.
 
 Probes and focused checks. The everyday one is `mesh_hw_smoke.py`
 (discover and ping modules through a USB bridge, without arming).
+`reliable_ping_load.py` A/B tests two bridge firmwares: retries and round
+trips of reliable pings to one module.
 `micropython_*.py`, `probe_radio_io_api.py` and `read_field_resistance_points.py`
 run on a board, not on the PC.
 
@@ -60,6 +62,8 @@ run on a board, not on the PC.
   the real firmware. `--list` shows the scenarios.
 - `firmware_trace_harness.py`: run the field or dummy firmware on the PC and
   write a trace to compare before and after a change.
+- `bridge_trace_harness.py`: the same for the USB bridge (`--mode master` or
+  `monitor`): every USB command, sessions, arming, pairing and maintenance.
 - `PC_multi_module_emulator.py`: fake modules on a serial port.
 
 ## `android/`

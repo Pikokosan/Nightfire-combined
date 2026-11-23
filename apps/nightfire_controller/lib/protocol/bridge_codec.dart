@@ -222,6 +222,7 @@ const bridgeFirmwareFiles = [
   'usb_master_bundle.mpy',
   'bridge_radio.py',
   'mesh.py',
+  'nfcp_frame.py',
   'usb_master_control.py',
   'usb_master_maintenance.py',
   'usb_bridge_transport.py',

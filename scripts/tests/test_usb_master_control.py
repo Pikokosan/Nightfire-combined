@@ -8,7 +8,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'main'))
 import nfcp
 import bridge_radio
-from usb_master_control import MasterControl, decode_master, broadcast, KEEPALIVE_HOLD_MS
+from usb_master_control import MasterControl, decode_master, KEEPALIVE_HOLD_MS
+from nfcp_frame import nfcp_broadcast
 from usb_master_maintenance import BridgeMaintenance
 
 
@@ -27,7 +28,7 @@ class MasterTests(unittest.TestCase):
 
     def test_golden_broadcasts(self):
         for command, data in ((0x11, b''), (0x73, b'\0\0'), (0x74, b'\0' * 6), (0x75, b'\xff' * 4)):
-            self.assertEqual(broadcast(command, data), self.p.build_broadcast(command, data))
+            self.assertEqual(nfcp_broadcast(command, data), self.p.build_broadcast(command, data))
 
     def test_all_ported_unique_commands(self):
         frames = [self.p.build_arm_unique(self.uid), self.p.build_disarm_unique(self.uid),

@@ -5,9 +5,9 @@ import subprocess
 import sys
 
 
-INTERNAL = {'bridge_radio', 'mesh', 'usb_bridge_transport', 'usb_monitor_nfcp',
+INTERNAL = {'bridge_radio', 'mesh', 'nfcp_frame', 'usb_bridge_transport', 'usb_monitor_nfcp',
             'command_interface', 'usb_master_control', 'usb_master_maintenance'}
-SOURCES = ('bridge_radio.py', 'mesh.py', 'usb_bridge_transport.py', 'usb_monitor_nfcp.py',
+SOURCES = ('bridge_radio.py', 'mesh.py', 'nfcp_frame.py', 'usb_bridge_transport.py', 'usb_monitor_nfcp.py',
            'command_interface.py', 'usb_master_control.py',
            'usb_master_maintenance.py', 'nrf_usb_monitor_main.py')
 

@@ -65,6 +65,8 @@ py -3 scripts/sim/mesh_sim.py --list
 ## Notes
 
 - The shared command protocol is `main/nfcp.py`, and the bridge's frame
-  protocol is `main/bridge_radio.py`. Don't duplicate packet logic elsewhere.
+  protocol is `main/bridge_radio.py`. The USB bridge uses the smaller
+  `main/nfcp_frame.py` for NFCP frames; `scripts/tests/test_nfcp_frame.py`
+  keeps it in step with `nfcp.py`. Don't duplicate packet logic elsewhere.
 - The mesh layer shared by the bridge and the modules is `main/mesh.py`.
 - Add a `CHANGELOG.md` entry with every commit.

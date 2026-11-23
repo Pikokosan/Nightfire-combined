@@ -36,6 +36,36 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(namespace['MasterKeepalive'](1234, None, None, None).network, 1234)
         self.assertIn('BridgeMaintenance', namespace)
 
+    def test_the_bridge_accepts_every_file_the_app_may_send(self):
+        import re
+        root = Path(__file__).resolve().parents[2]
+        dart = (root / 'apps/nightfire_controller/lib/protocol/bridge_codec.dart').read_text(encoding='utf-8')
+        listed = re.search(r'const bridgeFirmwareFiles = \[(.*?)\];', dart, re.S).group(1)
+        app_files = re.findall(r"'([^']+)'", listed)
+        sys.path.insert(0, str(root / 'main'))
+        from usb_master_maintenance import UPDATABLE_FILES
+        self.assertIn('nfcp_frame.py', app_files)
+        for name in app_files:
+            self.assertIn(name, UPDATABLE_FILES)
+
+    def test_no_top_level_name_is_defined_in_two_sources(self):
+        # The bundle is one namespace: a second definition would silently
+        # replace the first (bridge_radio.CMD_PING and NFCP's ping differ).
+        from build_usb_master_bundle import SOURCES
+        defined = {}
+        for filename in SOURCES:
+            source = Path(__file__).resolve().parents[2] / 'main' / filename
+            for node in ast.parse(source.read_text(encoding='utf-8')).body:
+                if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                    names = [node.name]
+                elif isinstance(node, ast.Assign):
+                    names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+                else:
+                    continue
+                for name in names:
+                    self.assertNotIn(name, defined, '%s in %s and %s' % (name, defined.get(name), filename))
+                    defined[name] = filename
+
 
 if __name__ == '__main__':
     unittest.main()
