@@ -118,7 +118,7 @@ def save_resistance_calibration_banks(banks):
 
 
 APP_FIRMWARE_NAME = "field-module"
-APP_FIRMWARE_VERSION = "0.3.1"
+APP_FIRMWARE_VERSION = "0.3.2"
 
 DEFAULT_NETWORK_ID = 0x04D2
 DEFAULT_GROUP_ID = 0x0001
@@ -805,6 +805,22 @@ def clear_fire_outputs():
     outputs.clear()
 
 
+def disarm(reason=None):
+    """The one way to make the module safe, used by every disarm path
+    (command, link loss, startup fault, arm check, main loop error): stop the
+    script and every cue output, end any pre-test, then drive the output
+    drivers, LEDs and arm control to SAFE."""
+    global ARMED
+
+    ARMED = False
+    script.halt()
+    pre_test.value(0)
+    clear_fire_outputs()
+    set_armed_outputs(False)
+    if reason:
+        print(reason)
+
+
 def disable_measurement_frontend():
     if scanner is not None:
         scanner.disable_all()
@@ -844,14 +860,8 @@ def detect_output_chain(max_bits=64):
 
 
 def set_startup_fault(reason):
-    global ARMED
-
     record_startup_fault(reason)
-    ARMED = False
-    script.halt()
-    pre_test.value(0)
-    clear_fire_outputs()
-    set_armed_outputs(False)
+    disarm()
 
 
 def run_startup_self_tests():
@@ -1170,17 +1180,8 @@ def handle_fire(pkt):
 
 
 def check_master_link_failsafe():
-    global ARMED
-
-    if not ARMED or not link.master_link_lost(MASTER_LINK_TIMEOUT_MS):
-        return
-
-    ARMED = False
-    script.halt()
-    clear_fire_outputs()
-    set_armed_outputs(False)
-    lcd.refresh()
-    print("DISARMED - master link timeout")
+    if ARMED and link.master_link_lost(MASTER_LINK_TIMEOUT_MS):
+        disarm("DISARMED - master link timeout")
 
 
 def init_lcd_ui():
@@ -1201,21 +1202,16 @@ def init_lcd_ui():
 def handle_arm(pkt):
     global ARMED, arm_check_error
 
+    disarm()        # every arm starts from SAFE, even a re-arm
     if STARTUP_FAULT:
-        ARMED = False
-        set_armed_outputs(False)
         link.nack(pkt, CMD_ARM, NACK_INTERNAL_ERROR)
         print("ARM rejected - startup fault:", STARTUP_FAULT_REASON)
         return
 
-    ARMED = False
-    script.halt()
     if not check_arm_voltage():
-        clear_fire_outputs()
-        set_armed_outputs(False)
         measured = "--" if arm_check_mv is None else str(int(arm_check_mv))
         arm_check_error = "arm voltage %smV" % measured
-        lcd.refresh()
+        disarm()    # the check left ARM_CONTROL on
         link.nack(pkt, CMD_ARM, NACK_INTERNAL_ERROR)
         print(
             "ARM rejected - SHORT_CHECK %smV below %dmV" %
@@ -1226,14 +1222,11 @@ def handle_arm(pkt):
     arm_check_error = ""
     ARMED = True
     set_armed_outputs(True)
-    lcd.refresh()
     link.ack(pkt, CMD_ARM)
     print("ARMED - SHORT_CHECK %dmV" % int(arm_check_mv or 0))
 
 
 def handle(pkt):
-    global ARMED
-
     lcd.refresh()
     cmd = pkt.get("cmd")
     data = pkt.get("data", b"")
@@ -1254,10 +1247,7 @@ def handle(pkt):
     elif cmd == CMD_ARM:
         handle_arm(pkt)
     elif cmd == CMD_DISARM:
-        ARMED = False
-        script.halt()
-        clear_fire_outputs()
-        set_armed_outputs(False)
+        disarm()
         link.ack(pkt, CMD_DISARM)
         print("DISARMED")
     elif cmd == CMD_FIRE:
@@ -1361,8 +1351,6 @@ def loop_once():
 
 
 def main():
-    global ARMED
-
     radio_ready = setup()
     while True:
         try:
@@ -1385,10 +1373,7 @@ def main():
         except Exception as e:
             print("Field main loop error:", e)
             radio_ready = False
-            ARMED = False
-            script.halt()
-            clear_fire_outputs()
-            set_armed_outputs(False)
+            disarm()
             time.sleep_ms(100)
 
 

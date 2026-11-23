@@ -18,7 +18,7 @@ except Exception:
 
 
 APP_FIRMWARE_NAME = "nrf-dummy"
-APP_FIRMWARE_VERSION = "0.2.1"
+APP_FIRMWARE_VERSION = "0.2.2"
 
 DEFAULT_NETWORK_ID = 0x04D2
 DEFAULT_GROUP_ID = 0x0001
@@ -337,13 +337,15 @@ lcd = LcdMenu(
 )
 
 
-def disarm(reason):
+def disarm(reason=None):
+    """The one disarm path (command, link loss, main loop error)."""
     global ARMED
 
     ARMED = False
     script.halt()
     lcd.refresh()
-    print(reason)
+    if reason:
+        print(reason)
 
 
 def check_master_link_failsafe():
@@ -415,8 +417,7 @@ def handle(pkt):
         link.ack(pkt, CMD_ARM)
         print("ARMED")
     elif cmd == CMD_DISARM:
-        ARMED = False
-        script.halt()
+        disarm()
         link.ack(pkt, CMD_DISARM)
         print("DISARMED")
     elif cmd == CMD_FIRE:
@@ -470,8 +471,6 @@ def loop_once():
 
 
 def main():
-    global ARMED
-
     radio_ready = setup()
     while True:
         try:
@@ -492,6 +491,5 @@ def main():
         except Exception as e:
             print("Dummy main loop error:", e)
             radio_ready = False
-            ARMED = False
-            script.halt()
+            disarm()
             time.sleep_ms(100)

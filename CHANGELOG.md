@@ -14,13 +14,39 @@ installers), **Hardware**.
 | Part | Version | Note |
 |---|---|---|
 | Bridge | usb-master-0.4.5 | Cue hold time relay and module pairing. |
-| Field | field-module 0.3.1 | Adjustable cue hold time; pairing. |
-| Dummy | nrf-dummy 0.2.1 | Pairing. |
+| Field | field-module 0.3.2 | One disarm path. |
+| Dummy | nrf-dummy 0.2.2 | One disarm path. |
 | App | 0.4.0 (build 4) | |
 
 ## Unreleased
 
 Nothing yet.
+
+## 2026-11-23
+
+### Field field-module 0.3.2 — `PENDING`
+- **Changed:** one `disarm()` now makes the module safe on every path: the
+  disarm command, master link timeout, startup fault, a refused arm and a
+  main-loop error. Each path stops the script, clears every cue output,
+  ends any pre-test and drives the 595 drivers, LEDs and ARM_CONTROL to
+  SAFE. Before, the five copies differed slightly.
+- **Fixed:** an arm refused because of a startup fault left the script
+  running and the cue mask set (outputs were already disabled, and the
+  fault blocked firing). Disarm paths other than a startup fault didn't
+  switch PRE_TEST off. Every arm now starts from SAFE, re-arms included.
+
+### Dummy nrf-dummy 0.2.2 — `PENDING`
+- **Changed:** the disarm command and main-loop errors use `disarm()`, like
+  the link timeout already did.
+
+### Tools — `PENDING`
+- **Added:** `scripts/tests/test_module_disarm.py` drives every disarm path
+  of both firmwares on the trace harness's fake hardware and checks the
+  module ends up SAFE.
+- **Added:** simulator branding (icons and splash screens in
+  `design/simulator-branding/final/`) and
+  `scripts/generate_simulator_brand_assets.ps1`, which makes them from a
+  logo and a splash image.
 
 ## 2026-11-11
 
