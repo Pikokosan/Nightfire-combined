@@ -27,7 +27,7 @@ Nothing yet.
 
 ## 2026-11-23
 
-### nRF image 2026-11-23 (background receive) — `PENDING`
+### nRF image 2026-11-23 (background receive) — `8ab3ba6`
 - **Changed:** the radio listens all the time, not only while Python waits
   in `nrf_radio.recv()`. Before, `recv()` turned the receiver on at entry
   and off on return, so a board was deaf whenever its Python loop did
