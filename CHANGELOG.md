@@ -25,7 +25,7 @@ run).
 
 ## 2026-11-24
 
-### Field 0.3.3, Dummy 0.2.3 — chase mode (audio box sync, step 1)
+### Field 0.3.3, Dummy 0.2.3 — chase mode (audio box sync, step 1) — `2cac449`
 - **Added:** chase mode in the script engine (`module_script.py`), from
   `docs/audio_sync_design.md`. A SCRIPT_START of 18 bytes names an audio
   box (`source_uid`) and a track; the module ACKs with the new code
