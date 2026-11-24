@@ -27,7 +27,7 @@ run).
 
 ## 2026-11-24
 
-### Field 0.3.5, Dummy 0.2.5, Audio box 0.1.1 — calibrate the 32 kHz RC oscillator
+### Field 0.3.5, Dummy 0.2.5, Audio box 0.1.1 — calibrate the 32 kHz RC oscillator — `57948bc`
 - **Fixed:** on a board whose 32 kHz crystal doesn't run, `ticks_ms()` and
   `ticks_us()` followed the uncalibrated RC oscillator: COM16 (Pro Micro
   nRF52840 clone) ran 0.77% slow, about 460 ms a minute in a timed show.
@@ -52,7 +52,7 @@ run).
   crashed once while waiting); each send now drops the old reply.
 - **Installed:** COM16 runs field-module 0.3.5, COM18 audio-box 0.1.1.
 
-### Field 0.3.4, Dummy 0.2.4 — chase SHOW_TIME log (audio box sync, bench)
+### Field 0.3.4, Dummy 0.2.4 — chase SHOW_TIME log (audio box sync, bench) — `57948bc`
 - **Added:** in chase mode the script engine keeps every SHOW_TIME it
   accepts (error against the module's clock before correcting, mesh age,
   handling delay; up to 48 a show) and prints them as three
@@ -68,7 +68,7 @@ run).
   `test_audio_box_follow.py` reads the log after each show and sums it up.
 - **Installed:** COM16 runs field-module 0.3.4.
 
-### Audio box audio-box 0.1.0 — firmware on a fake clock (audio box sync, step 3)
+### Audio box audio-box 0.1.0 — firmware on a fake clock (audio box sync, step 3) — `57948bc`
 - **Added:** `audio_box/main/audio_main.py`, the first box firmware. A mesh
   node built from the module parts (`module_link.py`: pairing, INFO,
   settings, OTA, relaying) with no outputs, ARM or script engine. A fake
@@ -110,7 +110,7 @@ run).
 - **Not yet:** the app's Arm all would fail on the box's NACK; step 5 must
   leave device type 0x30 out.
 
-### Tools — audio box firmware tests and install (audio box sync, step 3)
+### Tools — audio box firmware tests and install (audio box sync, step 3) — `57948bc`
 - **Added:** `scripts/tests/test_audio_box.py` (17 tests on a fake µs clock
   that wraps; 16 of 17 rule-breaking mutations caught, the 17th changes
   nothing because `module_link.py` already filters by target).
