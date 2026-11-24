@@ -138,6 +138,7 @@ def build_bundle(main_dir):
         "nrf_module_common.valid_radio_channel = valid_radio_channel\n"
         "nrf_module_common.get_default_unique_id = get_default_unique_id\n"
         "nrf_module_common.send_with_cca = send_with_cca\n"
+        "nrf_module_common.LfrcCalibrator = LfrcCalibrator\n"
     )
 
     measurement = read_text(os.path.join(main_dir, "field_measurement.py"))

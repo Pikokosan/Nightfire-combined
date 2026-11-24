@@ -60,6 +60,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 MAIN_DIR = os.path.join(ROOT, "main")
 SIM_DIR = os.path.dirname(os.path.abspath(__file__))   # sim-only nodes
 AUDIO_SIM_DIR = os.path.join(ROOT, "audio_box", "sim")   # simulated audio box (sim_audio_node.py)
+AUDIO_MAIN_DIR = os.path.join(ROOT, "audio_box", "main")  # audio box firmware (audio_main.py)
 if MAIN_DIR not in sys.path:
     sys.path.append(MAIN_DIR)
 
@@ -875,6 +876,7 @@ ENTRY_POINTS = {
     "dummy": ("nrf_dummy_main", "nrf_node_config", True),
     "field": ("field_main", "nrf_node_config", False),
     "audio": ("sim_audio_node", "nrf_node_config", True),
+    "audiobox": ("audio_main", "nrf_node_config", True),   # the real box firmware
 }
 
 FIELD_DEFAULT_CONFIG = {
@@ -955,7 +957,7 @@ class Node(object):
         source = self.files.get(name + ".py")
         path = None
         if source is None:
-            for directory in (self.src_dir, MAIN_DIR, SIM_DIR, AUDIO_SIM_DIR):
+            for directory in (self.src_dir, MAIN_DIR, SIM_DIR, AUDIO_SIM_DIR, AUDIO_MAIN_DIR):
                 candidate = os.path.join(directory, name + ".py")
                 if os.path.exists(candidate):
                     path = candidate

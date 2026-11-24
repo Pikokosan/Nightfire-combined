@@ -74,6 +74,24 @@
             }
         },
         {
+            "label": "Audio box: upload",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\scripts\\install\\upload_audio_box.ps1"
+            ],
+            "group": "build",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            }
+        },
+        {
             "label": "Module OTA package: build",
             "type": "shell",
             "command": "powershell",

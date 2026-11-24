@@ -16,6 +16,7 @@ script takes `-Port` (PowerShell) or `--port` (Python).
 - `upload_field_module.ps1`: field module (`-Pinout ms88sfa|promicro`, or
   `-ConfigPath`).
 - `upload_nrf_dummy.ps1`: dummy module (`-ConfigPath`).
+- `upload_audio_box.ps1`: audio box (`audio_box/`, `-ConfigPath`).
 - `upload_field_hardware_test.ps1`, `upload_lcd_ui_test.ps1`,
   `upload_trellis_test.ps1`: stand-alone hardware tests.
 - `upload_esp32_master.ps1`, `upload_esp32_master_bridge.ps1`: the older
@@ -45,7 +46,10 @@ Get-ChildItem scripts\tests\test_*.py | ForEach-Object { py -3 $_.FullName }
 ## `bench/`: tests that drive real boards
 
 `test_master_*` need the ESP32 master (`--master COMx`); `test_nrf_*` drive
-nRF boards directly.
+nRF boards directly. `test_audio_box_bench.py` drives the audio box through
+a USB bridge (`--port COM12 --box-port COM18`) without arming anything;
+`test_audio_box_follow.py` arms one module (igniters off; it checks every
+cue reads open) and has it follow the box.
 
 ## `diagnostics/`
 
@@ -59,7 +63,8 @@ run on a board, not on the PC.
 ## `sim/`
 
 - `mesh_sim.py` (+ `mesh_scenarios.py`): multi-node radio simulator running
-  the real firmware. `--list` shows the scenarios.
+  the real firmware (node kind `audiobox` is the audio box's). `--list`
+  shows the scenarios.
 - `firmware_trace_harness.py`: run the field or dummy firmware on the PC and
   write a trace to compare before and after a change.
 - `bridge_trace_harness.py`: the same for the USB bridge (`--mode master` or

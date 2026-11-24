@@ -35,6 +35,10 @@ class ScriptEngine:
         self.chase_offset_ms = 0
         self.chase_heard_ms = 0
         self.chase_jumps = 0
+        # Every SHOW_TIME accepted in the current show, printed when it ends
+        # (bench measurement without USB in the timing path):
+        # (error_ms or "L"/"J" for a lock or jump, age_ms, handled_ms after arrival)
+        self.chase_log = []
         self.id_loaded = None
         self.entries = []
         self.running = False
@@ -229,6 +233,7 @@ class ScriptEngine:
     CHASE_JUMP_MS = 250
     CHASE_STEP_MS = 10
     CHASE_LATE_MS = 100
+    CHASE_LOG_MAX = 48
 
     def start_chase(self, pkt, data):
         source = int.from_bytes(data[12:16], "big")
@@ -246,6 +251,7 @@ class ScriptEngine:
         self.chase_offset_ms = offset
         self.chase_heard_ms = now
         self.chase_jumps = 0
+        self.chase_log = []
         self.next_index = 0
         self.start_ms = now
         self.running = True
@@ -261,6 +267,27 @@ class ScriptEngine:
         self.node.stop_outputs()
         self.last_event = reason
         print("SCRIPT stopped - %s" % reason)
+        self.print_chase_log()
+
+    def note_chase(self, error, pkt):
+        log = self.chase_log
+        if len(log) >= self.CHASE_LOG_MAX:
+            return
+        rx_us = pkt.get("rx_us")
+        handled = 0 if rx_us is None else time.ticks_diff(time.ticks_us(), rx_us) // 1000
+        log.append((error, self.age_ms(pkt), handled))
+
+    def print_chase_log(self):
+        """The SHOW_TIME messages of the show that just ended: the error of
+        each against the module's clock (before it corrected), its mesh age
+        and how long after arrival it was handled, all in ms."""
+        log = self.chase_log
+        if not log:
+            return
+        print("SCRIPT CHASE log n=%d err=%s" % (len(log), ",".join(str(e[0]) for e in log)))
+        print("SCRIPT CHASE log age=%s" % ",".join(str(e[1]) for e in log))
+        print("SCRIPT CHASE log handled=%s" % ",".join(str(e[2]) for e in log))
+        self.chase_log = []
 
     def lock_chase(self, implied_start_ms, event):
         """Take the audio box's position as it is (first lock, resume after a
@@ -301,9 +328,11 @@ class ScriptEngine:
         sent_ms = time.ticks_add(self.arrival_ms(pkt), -self.age_ms(pkt))
         implied = time.ticks_add(sent_ms, self.chase_offset_ms - position)
         if self.chase != "lock":
+            self.note_chase("L", pkt)
             self.lock_chase(implied, "chase lock")
             return
         error = time.ticks_diff(implied, self.start_ms)
+        self.note_chase(error if -self.CHASE_JUMP_MS <= error <= self.CHASE_JUMP_MS else "J", pkt)
         size = error if error >= 0 else -error
         if size <= self.CHASE_DEADBAND_MS:
             return
@@ -328,6 +357,7 @@ class ScriptEngine:
         self.last_event = "stop"
         self.node.stop_outputs()
         print("SCRIPT STOP")
+        self.print_chase_log()
         self.link.ack(pkt, CMD_SCRIPT_STOP)
 
     def handle_heartbeat(self, pkt):

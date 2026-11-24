@@ -141,6 +141,9 @@ class ModuleLink:
         # network/channel. paired = (network, channel) once a bridge paired it.
         self.pair_until = None
         self.paired = None
+        # Keeps ticks_ms() accurate on a board without a running 32 kHz
+        # crystal (nrf_module_common.LfrcCalibrator).
+        self.lfrc = nrf_module_common.LfrcCalibrator()
 
     # --- pairing -----------------------------------------------------------
     def ids(self):
@@ -320,6 +323,7 @@ class ModuleLink:
 
     def service(self):
         """Send queued repeats and relays that are due. Call every loop."""
+        self.lfrc.service()
         if self.pair_until is not None:
             self.service_pairing()
         if self.relays:

@@ -388,6 +388,51 @@ class ChaseTests(unittest.TestCase):
         self.assertFalse(show.engine.running)
         self.assertEqual(show.fired_at(0x8), [])
 
+    def log_lines(self, show):
+        """{"err": ..., "age": ..., "handled": ...} from the printed log."""
+        out = {}
+        for line in show.out.getvalue().splitlines():
+            if line.startswith("SCRIPT CHASE log "):
+                key, value = line.rsplit(" ", 1)[1].split("=", 1)
+                out[key] = value
+        return out
+
+    def test_error_log_is_printed_when_the_show_stops(self):
+        show = Show(self, delay_ms=4)
+        show.start()
+        show.play()
+        show.run_ms(1050)                 # SHOW_TIME every 100 ms: 11 messages
+        show.position_ms += 20            # one message 20 ms off, then corrected
+        show.run_ms(200)
+        show.position_ms += 1000          # a jump
+        show.run_ms(300)
+        show.state = nfcp.SHOW_STOPPED
+        show.run_ms(150)
+        self.assertFalse(show.engine.running)
+        log = self.log_lines(show)
+        errs = log["err"].split(",")
+        self.assertEqual(errs[0], "L")
+        self.assertIn("J", errs)
+        numbers = [int(e) for e in errs[1:] if e not in ("L", "J")]
+        self.assertTrue(all(abs(e) <= 1 for e in numbers[:9]), errs)
+        self.assertIn(-20, numbers)                 # the shifted message, before correction
+        self.assertEqual(log["age"].split(",")[:3], ["4", "4", "4"])
+        self.assertEqual(len(log["handled"].split(",")), len(errs))
+        self.assertIn("SCRIPT CHASE log n=%d " % len(errs), show.out.getvalue())
+        self.assertEqual(show.engine.chase_log, [])
+
+    def test_error_log_is_bounded_and_printed_on_stop_command(self):
+        show = Show(self)
+        show.start()
+        show.play()
+        show.run_ms(6000)                 # 60 messages, the log keeps 48
+        self.assertEqual(len(show.engine.chase_log), module_script.ScriptEngine.CHASE_LOG_MAX)
+        show.call(show.engine.handle, show.pkt(show.master.build_script_stop(show.uid, SCRIPT_ID), BRIDGE))
+        self.assertIn("SCRIPT CHASE log n=48 ", show.out.getvalue())
+        # A new show starts a new log.
+        show.start()
+        self.assertEqual(show.engine.chase_log, [])
+
     def test_start_refused_when_disarmed(self):
         show = Show(self)
         show.node.blocked = (nfcp.NACK_REJECTED_ARMED, "disarmed")

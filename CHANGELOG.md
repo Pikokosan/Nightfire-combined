@@ -5,7 +5,8 @@ entry names the commit it landed in. Add a line with every commit; put
 work that isn't committed yet under **Unreleased**.
 
 Parts: **Bridge** (USB radio dongle, `usb-master-*`), **Field** (field
-module firmware), **Dummy** (`nrf-dummy`), **Mesh** (radio layer shared by
+module firmware), **Dummy** (`nrf-dummy`), **Audio box** (`audio-box`,
+`audio_box/`), **Mesh** (radio layer shared by
 all of them), **App** (Android controller), **Tools** (scripts, simulator,
 installers), **Hardware**, **nRF image** (the MicroPython firmware with
 the native `nrf_radio` driver that the bridge, field modules and dummies
@@ -15,15 +16,121 @@ run).
 
 | Part | Version | Note |
 |---|---|---|
-| Bridge | usb-master-0.4.7 | Chase START and audio box commands (audio box sync). Not installed; COM12 runs 0.4.6. |
-| Field | field-module 0.3.3 | Chase mode (audio box sync). Not on hardware yet; COM16 runs 0.3.2. |
-| Dummy | nrf-dummy 0.2.3 | Chase mode (audio box sync). Not on hardware yet. |
+| Bridge | usb-master-0.4.7 | Chase START and audio box commands (audio box sync). On the COM12 bridge since 2026-11-24 (installed over USB, permanent; backup in `dist/bridge_backup_20261124_131832`). |
+| Field | field-module 0.3.5 | Chase mode, SHOW_TIME log, RC calibration. On COM16 since 2026-11-24 (backup of 0.3.2 in `dist/field_backup_COM16_20261124`). COM16 has no working 32 kHz crystal; calibrated it runs +389 ppm. |
+| Dummy | nrf-dummy 0.2.5 | Chase mode, SHOW_TIME log, RC calibration. Not on hardware (the only dummy, COM18, is now the audio box). |
+| Audio box | audio-box 0.1.1 | Fake clock (step 3). On the old LCD dummy (COM18), which no longer runs nrf-dummy; restore with `upload_nrf_dummy.ps1 -Port COM18 -ConfigPath main/configs/dummy_lcd.py`. |
 | App | 0.4.0 (build 4) | |
 | nRF image | 2026-11-06 build | On the field modules and dummies. The COM12 bridge runs the 2026-11-23 background-receive build: A/B retries 0.11% against 0.44%. |
 
 ## Unreleased
 
 ## 2026-11-24
+
+### Field 0.3.5, Dummy 0.2.5, Audio box 0.1.1 — calibrate the 32 kHz RC oscillator
+- **Fixed:** on a board whose 32 kHz crystal doesn't run, `ticks_ms()` and
+  `ticks_us()` followed the uncalibrated RC oscillator: COM16 (Pro Micro
+  nRF52840 clone) ran 0.77% slow, about 460 ms a minute in a timed show.
+  Its `LFCLKSTAT` showed the RC source although the crystal was requested,
+  and a manual restart from the crystal never completed. The module link
+  (`module_link.py`, shared by field, dummy and box) now finds this at boot,
+  prints `LFCLK on RC (32 kHz crystal not running): calibrating every 4 s`,
+  and calibrates the RC oscillator against the 32 MHz crystal every 4 s
+  (`nrf_module_common.LfrcCalibrator`, a hardware task, skipped unless the
+  32 MHz crystal runs). Boards with a working crystal are unchanged.
+- **Measured:** COM16 -7,749 ppm before, +389 ppm with 0.3.5 (COM18 +59, both
+  against the PC over 60 s). 10 chase shows on 0.3.5: the module's
+  SHOW_TIME error went from a steady -4 ms to a median of 0 (270 messages,
+  5–95% within ±1 ms, none past ±2 ms); every show behaved and the module
+  was disarmed and confirmed.
+- **Tools:** `test_audio_box_follow.py` judges timing on the module's own
+  log (every SHOW_TIME within 5 ms, no cue over 10 ms past its own time)
+  and only prints the USB print timing, which jitters by up to ~12 ms.
+- **Tools:** `scripts/tests/test_lfrc_calibration.py` (5 tests); the field
+  bundle exports `LfrcCalibrator`. Bench helper fix: sequence numbers wrap
+  after 255, so a stale reply could be read as a new one (the ARM key check
+  crashed once while waiting); each send now drops the old reply.
+- **Installed:** COM16 runs field-module 0.3.5, COM18 audio-box 0.1.1.
+
+### Field 0.3.4, Dummy 0.2.4 — chase SHOW_TIME log (audio box sync, bench)
+- **Added:** in chase mode the script engine keeps every SHOW_TIME it
+  accepts (error against the module's clock before correcting, mesh age,
+  handling delay; up to 48 a show) and prints them as three
+  `SCRIPT CHASE log` lines when the show stops (`module_script.py`). Printed
+  after the show, so it never delays a cue.
+- **Measured (COM16, 10 shows):** 258 messages, error median -4 ms, 5–95%
+  -5 to -2 ms, one +30 ms outlier; radio stamps steady to about ±2 ms.
+- **Found:** COM16's clock runs 0.77% slow (-7,749 ppm against the PC over
+  60 s; the box on COM18 +59 ppm). Chase mode follows it with a steady
+  4 ms lag; a timed show would drift 460 ms a minute on that board. Cause
+  not checked yet (likely the board's 32 kHz clock source).
+- **Tools:** 2 new tests in `test_module_chase.py` (22 in all);
+  `test_audio_box_follow.py` reads the log after each show and sums it up.
+- **Installed:** COM16 runs field-module 0.3.4.
+
+### Audio box audio-box 0.1.0 — firmware on a fake clock (audio box sync, step 3)
+- **Added:** `audio_box/main/audio_main.py`, the first box firmware. A mesh
+  node built from the module parts (`module_link.py`: pairing, INFO,
+  settings, OTA, relaying) with no outputs, ARM or script engine. A fake
+  player on the box's own clock: every track id exists and is 10 min long
+  (`FAKE_TRACK_MS`, or only those in `FAKE_TRACKS`); the position is exact
+  to the µs across `ticks_us()` wraps.
+- **Added:** AUDIO_LOAD, AUDIO_PLAY (start, or restart at `from_ms`: a
+  jump), AUDIO_STOP (stops whatever plays, any track id) and
+  AUDIO_STATUS_REQ (12-byte reply, `level` 0xFF until step 4).
+- **Added:** SHOW_TIME at once on play, then every 250 ms, 3 copies each,
+  its mesh age counting from the position read. At the track end or a stop,
+  4 more messages say `ended` or `stopped`, then the box goes quiet.
+- **Safety:** the box never claims to be armed. ARM, FIRE, scripts and any
+  other unique command get NACK_INVALID_VALUE; DISARM is ACKed and output
+  status says nothing is armed, so Disarm all includes it. A main loop error
+  stops the music (the modules then stop within 1.5 s). A test checks the
+  source never builds ARM, FIRE, SCRIPT_START or SCRIPT_STEP.
+- **Added:** `audio_boot.py` (the board's `main.py`), `audio_box/configs/
+  audio_box.py`, DISCOVER device type 0x30 with 0 cues.
+- **Bench (2026-11-24):** installed on the old LCD dummy (COM18, uid
+  0x62A75130) with the COM12 bridge on usb-master-0.4.7:
+  `test_audio_box_bench.py` passed 19 of 19 (discovery, INFO, DISARM,
+  output status, LOAD/PLAY/STOP, status, track end; SHOW_TIME counted on
+  air by the bridge's radio: 11.4 frames a second over idle while playing,
+  none after the end or STOP).
+- **Bench 3b (2026-11-24):** the COM16 field module (0.3.3, igniters
+  disconnected, every cue read open) followed the box in a chase show,
+  `test_audio_box_follow.py`. Run 3: 21 of 21, cues within 3.7 ms of the
+  box. Run 2: 18 of 21, the cues before the jump ~11.5 ms late (same
+  offset on every cue, so the lock or the measurement, not the module's
+  loop). Jump skip, stop and disarm worked in both. Then 10 shows on one
+  key turn (`--shows`): every show behaved and the module was disarmed and
+  confirmed, but cues were -10.6 to +15.4 ms from the box and no show had
+  all cues within 10 ms. The box's own USB prints jitter by up to ±9 ms,
+  so this method can't resolve the 10 ms goal; the module's clock also
+  stepped by up to 12 ms, which suggests single SHOW_TIME messages 15-25
+  ms off on real radios. Needs a measurement without USB (see the design
+  doc). Radio A/B (test 5) not done.
+- **Not yet:** the app's Arm all would fail on the box's NACK; step 5 must
+  leave device type 0x30 out.
+
+### Tools — audio box firmware tests and install (audio box sync, step 3)
+- **Added:** `scripts/tests/test_audio_box.py` (17 tests on a fake µs clock
+  that wraps; 16 of 17 rule-breaking mutations caught, the 17th changes
+  nothing because `module_link.py` already filters by target).
+- **Added:** simulator node kind `audiobox` (the real firmware) and
+  scenario `audio_box`: 59 of 60 seeds pass; the other lost one chase
+  START ACK over 2 hops. Cues within 3.5 ms of the box.
+- **Added:** `scripts/bench/test_audio_box_bench.py`: the box through the
+  bridge, with the box's own commands only (never ARM, FIRE or START).
+- **Added:** `scripts/bench/test_audio_box_follow.py` (arms a module):
+  bench test 3b, a module following the box; refuses to arm unless every
+  cue reads open, needs the bridge's ARM key, always disarms and confirms.
+  `--shows N` runs N shows on one key turn, `--log` saves both boards'
+  prints.
+- **Fixed (docs):** the design doc said the bridge passes SHOW_TIME on to
+  the app over USB; it passes only module replies.
+- **Added:** `scripts/install/upload_audio_box.ps1` (shared files from
+  `main/`, the box's from `audio_box/main/`) and the VS Code task "Audio
+  box: upload".
+- **Docs:** `audio_box/design.md` (box firmware, tests, build order) and
+  `audio_box/README.md`; `scripts/README.md`.
 
 ### Bridge usb-master-0.4.7 — chase START and audio box commands (audio box sync, step 2) — `67aa272`
 - **Added:** the app may send SCRIPT_START with 18 bytes (chase mode) as

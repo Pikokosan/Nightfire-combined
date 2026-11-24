@@ -1,8 +1,10 @@
 # Audio Box and Timecode Sync Design
 
-Status: draft, 2026-11-24. Steps 1 (module side) and 2 (bridge and app) are
-implemented and tested in unit tests and the simulator; nothing has run on
-hardware, and there is no audio box yet. See Build order.
+Status: draft, 2026-11-24. Steps 1 (module side), 2 (bridge and app) and
+the firmware half of step 3 (audio box on a fake clock) are implemented and
+tested in unit tests and the simulator. On hardware so far: the box with
+the bridge (bench test 3a) and one field module following it (3b, two
+runs). See Build order.
 
 An audio box is a new node on the mesh. It plays a show's soundtrack and
 broadcasts the show position, and armed field modules fire their cue
@@ -130,10 +132,10 @@ script_id(2) audio_offset_ms(2, signed) unused(8) source_uid(4) track_id(2)
   refused: only the box sends it.
 - `nfcp_frame.py`: the new command numbers and START lengths. `nfcp.py`:
   the AUDIO_* numbers and builders.
-- The bridge passes the SHOW_TIME it hears on to the app over USB, as it
-  does with every frame (4 small frames a second). The app ignores
-  everything but module responses, so it takes the show position from
-  AUDIO_STATUS_RSP instead.
+- The bridge passes only module replies to USB (`radio_reply()` in
+  `usb_monitor_nfcp.py`), so SHOW_TIME never reaches the app; the app takes
+  the show position from AUDIO_STATUS_RSP. (Corrected after the step 3
+  bench test: this note used to say the bridge passed SHOW_TIME on.)
 
 **Done in step 2 (app):** see App behaviour, below.
 
@@ -318,9 +320,37 @@ out, the same way the bridge stamps the age of timed frames. The box reads
 the position at a recorded `ticks_us` and adds the time from then until
 the send.
 
-**Box firmware.** A new `audio_main.py` built from the field module's
-parts (`module_link.py`, mesh, pairing, OTA, INFO) with no fire outputs,
-no ARM handling and no script engine. It sends only SHOW_TIME and replies.
+**Box firmware.** `audio_box/main/audio_main.py` (audio-box 0.1.0, step 3),
+built from the field module's parts (`module_link.py`, mesh, pairing, OTA,
+INFO, settings) with no fire outputs, no ARM and no script engine. It sends
+only SHOW_TIME and replies. Installed by `scripts/install/upload_audio_box.ps1`
+with `audio_box/configs/audio_box.py`.
+- **Clock (step 3):** a fake player on the box's own crystal. Every track
+  id exists and is `FAKE_TRACK_MS` long (10 min), or only the ones in
+  `FAKE_TRACKS`. The position is added up from short `ticks_us()` steps,
+  so it is exact to the µs and survives `ticks_us()` wrapping (~18 min).
+  Step 4 swaps this for the LTC decoder; nothing else changes.
+- **SHOW_TIME:** sent at once on play, then every 250 ms, each message 3
+  times 8–12 ms apart. Its mesh age counts from the moment the position was
+  read, like the bridge's time code. When the track ends or is stopped, 4
+  more messages carry `ended` or `stopped` (so modules stop at once instead
+  of after 1.5 s of silence), then the box goes quiet.
+- **Commands:**
+
+  | Command | Box |
+  |---|---|
+  | AUDIO_LOAD | ACK; NACK_INVALID_VALUE for track 0 or an unknown track, NACK_BUSY while playing |
+  | AUDIO_PLAY | Starts the track at `from_ms` (loading it first), or restarts it there if it's playing: that's a jump. NACK_INVALID_VALUE for a bad track or `from_ms` at or past the end |
+  | AUDIO_STOP | Stops whatever is playing, whatever the track id, then ACKs (NACK_BAD_LENGTH after stopping if the length is wrong) |
+  | AUDIO_STATUS_REQ | AUDIO_STATUS_RSP, 12 bytes; `level` is 0xFF (not measured) until step 4 |
+  | DISARM, OUTPUT_STATUS_REQ | ACK, and "nothing armed": the app's Disarm all includes the box |
+  | ARM, FIRE, SCRIPT_*, anything else unique | NACK_INVALID_VALUE |
+
+- **DISCOVER:** device type 0x30 (field module 0x20, dummy 0x10), 0 cues.
+- **Fail-stop:** a main loop error stops the music, so SHOW_TIME stops and
+  the modules stop within 1.5 s.
+- **App (step 5):** Arm all arms every discovered module, so it would fail
+  on the box's NACK. The app must leave out device type 0x30 when arming.
 
 ## Safety
 
@@ -391,10 +421,131 @@ travels about 0.34 m per ms, so the music reaches someone 100 m away about
    stops the track or plays another track, and operator stop. The Dart
    builders match the Python ones byte for byte
    (`export_master_android_goldens.py`).
-3. **Bench, fake clock.** Box firmware broadcasting its own `ticks_ms` as
-   the position. Two dummy modules on the bench; compare their FIRE prints
-   (or a GPIO pin on a logic analyser) against each other and against the
-   box's position. Then on field modules, with igniters disconnected.
+   **Box firmware (done, step 3).** `scripts/tests/test_audio_box.py` (17
+   tests) runs `audio_main.py` on a fake µs clock that wraps during the
+   tests: SHOW_TIME at once and every 250 ms, 3 copies each with the right
+   age, position exact across the wrap, replay jumps, track end (4 `ended`
+   messages, then quiet), stop (4 `stopped`, from any track id or a bad
+   length), LOAD/PLAY refusals, status format, ARM/FIRE/script NACKs,
+   DISARM and output status, INFO, main loop error, and a check that the
+   source never builds ARM, FIRE, SCRIPT_START or SCRIPT_STEP. Breaking
+   each rule one at a time (17 mutations) makes a test fail in 16; the
+   17th (dropping the box's own "is it for me" check) changes nothing,
+   because `module_link.py` already filters by target.
+   Simulator scenario `audio_box` runs the real firmware: INFO, ARM
+   refused, chase STARTs, AUDIO_PLAY, status while playing, a replay that
+   skips the 4.5 s cue, the track end stopping every module, AUDIO_STOP,
+   disarm (box included). Result over 60 seeds: 59 passed; in the other,
+   the module 2 hops out started but its ACK to the chase START was lost
+   on the way back (the bridge was busy each time a copy came), which the
+   app would treat as a failed start and stop the show. Cues were within
+   3.5 ms of the box (modules within 4.5 ms of each other). With the box's
+   relaying turned off, 60 of 60 passed, so relaying stays on, as on the
+   modules.
+
+       py -3 scripts/sim/mesh_sim.py --scenario audio_box
+3. **Bench, fake clock.**
+   **3a, the box with the bridge (done 2026-11-24).**
+   `scripts/bench/test_audio_box_bench.py` drives the box through the
+   bridge with the box's own commands only (no ARM, FIRE or START). The
+   old LCD dummy (COM18) runs the box firmware; the bridge (COM12) runs
+   usb-master-0.4.7. 19 of 19 checks passed: discovered as type 0x30 with
+   0 cues, INFO, DISARM and output status, LOAD (track 0 refused), PLAY,
+   status within 150 ms of the PC clock over 10 s of reads (round trips
+   included), the end of a track, STOP. SHOW_TIME on air, counted by the
+   bridge's radio: 12.6 frames a second while playing against 1.2 idle
+   (11.4 more; 4 messages × 3 copies is 12), and back to idle after the
+   end and after STOP.
+
+       py -3 scripts/bench/test_audio_box_bench.py --port COM12 --box-port COM18
+
+   **3b, a module following it (done 2026-11-24, one module, two runs).**
+   `scripts/bench/test_audio_box_follow.py`: the COM16 field module
+   (field-module 0.3.3, all 24 cues read open: no igniters) armed through
+   the bridge, a 6-cue chase show, a replay jump at ~3.4 s and AUDIO_STOP
+   at ~7 s. Each FIRE print is timed against the box's `AUDIO play` print
+   on the PC (both over USB). The test refuses to arm if any cue reads
+   closed, and disarms and confirms at the end.
+   - Both runs: ACK_CHASE, nothing before the music, the jump skipped the
+     4.5 s cue (`SCRIPT CHASE jump -1553 ms`, `skip 1 cues`), the 9 s cue
+     never fired, the module stopped on the box's `stopped`, then was
+     disarmed and confirmed.
+   - Run 3: 21 of 21. Cues -0.1, -3.7, -3.2 and +1.7 ms from the box; the
+     module fired 0–2 ms past its own cue time.
+   - Run 2: 18 of 21. The three cues before the jump were +11.8, +11.2 and
+     +11.5 ms, past the 10 ms goal; the one after it +8.6 ms. The offset
+     was the same for every cue, so it came from the lock (or the
+     measurement), not the module's loop, but that run didn't record
+     the module's own lateness, so it can't be split further.
+   - (Run 1 stopped before the show: the bridge refuses script uploads
+     while anything is armed, so the test now uploads, then arms.)
+   - **10 shows on one key turn** (`--shows 10`, the module armed
+     throughout): every show behaved (ACK_CHASE, jump skip, stop, final
+     disarm confirmed), but no show had all 4 timed cues within 10 ms.
+     Cues -10.6 to +15.4 ms from the box; per-show mean -2.0 to +10.5 ms;
+     spread inside one show up to 21 ms. 16 of 138 checks failed, all of
+     them cue timing.
+   - **The measurement can't resolve 10 ms.** The box's own `AUDIO play`
+     (jump) and `AUDIO stop` prints, compared with the positions the box
+     printed, disagree by -8.3 to +9.2 ms: that much is USB print latency
+     on the box side alone, and the module's prints have their own. So
+     these numbers bound the error (within ~15 ms) but don't show whether
+     it meets ±10 ms.
+   - **The module did move its clock in steps of up to 12 ms** (`elapsed`
+     past `event` in its own FIRE prints: 0–3 ms usually, 7–12 ms in 6 of
+     40 cues). A FIRE print can't be late by more than the loop, so steps
+     that size are most likely the gentle correction (half the error, at
+     most 10 ms per message) reacting to single SHOW_TIME messages that
+     looked 15–25 ms off. That points at jitter in the arrival or age
+     stamp on real radios, which the simulator doesn't show.
+   - **Note for the background-receive image (2026-11-23, only on the
+     bridge so far):** it keeps packets in a ring while Python is busy,
+     and `module_link.py` stamps `rx_us` when Python reads the packet, not
+     when it arrived. A module on that image would stamp time code late by
+     however long its loop was busy (the field LCD can take 27 ms). It
+     needs a per-packet arrival time from the driver before modules get it.
+   - **Module-side log (field-module 0.3.4, 10 more shows).** The module
+     now keeps every SHOW_TIME it accepts (error against its clock before
+     correcting, mesh age, handling delay; up to 48 a show) and prints them
+     when the show stops. 258 messages: error median -4 ms, 5–95% -5 to -2,
+     one outlier at +30 ms (then corrected over 4 messages); mesh age 5–51
+     ms. So the radio stamps are steady to about ±2 ms. The 15–25 ms
+     guess above was wrong: the 10–13 ms clock steps seen before are the
+     module's loop, not the messages (it handled one message 38 ms after
+     arrival, and fired the 0.5 s cue 10 ms past its own time in 3 of 10
+     shows).
+   - **COM16's clock runs 0.77% slow.** Its `ticks_us()` measured against
+     the PC over 60 s: -7,749 ppm; the box (COM18, a nice!nano): +59 ppm.
+     That explains the steady -4 ms: at 2 ms of drift per 250 ms message,
+     halving the error each time settles at a 4 ms lag. Chase mode copes;
+     a timed show (no SHOW_TIME) would drift 460 ms a minute on this
+     board.
+   - **Cause and fix (field 0.3.5).** COM16 (a Pro Micro nRF52840 clone)
+     asks for its 32 kHz crystal like every board, but its 32 kHz clock
+     runs from the internal RC oscillator (`LFCLKSTAT` source 0; COM18 and
+     the bridge: source 1, crystal). Restarting it from the crystal by
+     hand never completed in over a minute, so the crystal is missing or
+     dead. `ticks_ms()`/`ticks_us()` count RTC1 on that clock. The module
+     link now calibrates the RC oscillator against the 32 MHz crystal at
+     boot and every 4 s when it finds it running (`LfrcCalibrator` in
+     `nrf_module_common.py`, a hardware task); on boards with a working
+     crystal it does nothing. COM16 then measured +389 ppm instead of
+     -7,749 (+193 right after one calibration by hand).
+   - **The USB-print timing** (cues +10 to +26 ms against the box's print)
+     disagrees with the module's own log, and the box's two prints alone
+     disagree by up to 14 ms. It isn't usable at this level.
+   - **10 shows on field 0.3.5 (calibrated):** the module log's error went
+     from a steady -4 ms to a median of 0: 270 messages, 5–95% within ±1
+     ms, none past ±2 ms. The module fired 0–9 ms past its own cue time
+     (its loop). The USB print timing still wandered (cues -11.9 to +14.8
+     ms, box prints alone up to 11.6 ms), so the follow test now passes or
+     fails on the module's log and only prints the USB numbers.
+   - **Result:** a module follows the box to within about 2 ms by its own
+     clock, plus its loop's 0–9 ms. What's left for an end-to-end number
+     is a GPIO pulse on the box and a module output on a logic analyser.
+     Check other field boards for the same crystal fault (they print
+     `LFCLK on RC` at boot). Two modules at once (the original plan) need a second
+     module; the old dummy is now the box.
 4. **Bench, LTC.** Play a test track with LTC on the right channel and a
    click on the left at every cue. Record the click and a module output on
    two scope channels.
@@ -410,8 +561,10 @@ travels about 0.34 m per ms, so the music reaches someone 100 m away about
    (usb-master-0.4.7), chase START and AUDIO_* builders, version checks,
    `MasterController.startChase()` and the run it drives (App behaviour).
    No screen uses it yet.
-3. Audio box firmware with a fake clock, answering AUDIO_PLAY, AUDIO_STOP
-   and AUDIO_STATUS_REQ; bench tests 3 and 5.
+3. **Firmware done; box bench-tested with the bridge:** audio box firmware
+   with a fake clock (audio-box 0.1.0), answering AUDIO_LOAD, AUDIO_PLAY,
+   AUDIO_STOP and AUDIO_STATUS_REQ; bench test 3a. Still to do: bench
+   tests 3b (modules following it) and 5.
 4. Native LTC capture and decoder; AUDIO_LOAD and real tracks; bench test 4.
 5. App: track picker, box status, audio delay setting, jump and loss
    counts.
