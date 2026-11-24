@@ -118,7 +118,7 @@ def save_resistance_calibration_banks(banks):
 
 
 APP_FIRMWARE_NAME = "field-module"
-APP_FIRMWARE_VERSION = "0.3.2"
+APP_FIRMWARE_VERSION = "0.3.3"
 
 DEFAULT_NETWORK_ID = 0x04D2
 DEFAULT_GROUP_ID = 0x0001

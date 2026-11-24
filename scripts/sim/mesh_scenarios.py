@@ -29,7 +29,7 @@ SCRIPT_ID = 0x4D53
 
 
 def modules_of(sim):
-    return [n for n in sim.nodes.values() if n.kind != "bridge" and n.alive]
+    return [n for n in sim.nodes.values() if n.kind not in ("bridge", "audio") and n.alive]
 
 
 def standard_show(sim, app, modules=None, group=0x0001, label=""):
@@ -250,6 +250,99 @@ def field_fw(sim):
     return (lambda s, app: standard_show(s, app)), 120000
 
 
+# ---------------------------------------------------------------------------
+# Audio box chase (docs/audio_sync_design.md)
+# ---------------------------------------------------------------------------
+CHASE_TRACK = 0x0007
+CHASE_GOAL_MS = 10.0              # cue vs the audio box's position
+CHASE_CUES = [(500, 0x1), (1500, 0x2), (3000, 0x4), (4500, 0x8), (6000, 0x10), (9000, 0x20)]
+
+
+def audio_chase(sim, box_config=None):
+    """Cues follow a simulated audio box beside the bridge; one module is 2
+    hops out. Lock, drift, a forward jump, then the box goes quiet."""
+    sim.add_bridge(pos=(0, 0))
+    sim.add_node("audio", "audio", (5, 5), clock_ppm=150.0, config=box_config)
+    sim.add_module("M1", (40, 0))
+    sim.add_module("M2", (0, 45))
+    sim.add_module("F", (120, 10))
+
+    def script(s, app):
+        mods = modules_of(s)
+        box = s.nodes["audio"]
+        for node in mods:
+            s.check("arm %s" % node.name, app.arm(node.device_id))
+            uid = node.device_id
+            ok = (app.ack(uid, app.master.build_script_clear(uid, SCRIPT_ID), "script clear", nfcp.CMD_SCRIPT_CLEAR) and
+                  app.ack(uid, app.master.build_script_load(uid, SCRIPT_ID, 0, CHASE_CUES[:3]),
+                          "script load 0", nfcp.CMD_SCRIPT_LOAD) and
+                  app.ack(uid, app.master.build_script_load(uid, SCRIPT_ID, 1, CHASE_CUES[3:]),
+                          "script load 1", nfcp.CMD_SCRIPT_LOAD))
+            s.check("script upload %s" % node.name, ok)
+
+        def beat(ms):
+            end = app.now_ms() + ms
+            while app.now_ms() < end:
+                app.broadcast(app.master.build_script_heartbeat_broadcast(SCRIPT_ID, 0), "script heartbeat")
+                app.sleep(min(400, max(1, end - app.now_ms())))
+
+        started = app.actor.now()
+        for node in mods:
+            code = app.ack_code(node.device_id, app.master.build_script_start_chase(
+                node.device_id, SCRIPT_ID, box.device_id, CHASE_TRACK), "chase start %s" % node.name,
+                nfcp.CMD_SCRIPT_START)
+            s.check("chase start %s" % node.name, code == nfcp.ACK_CHASE, "ack code %s" % code)
+            app.broadcast(app.master.build_script_heartbeat_broadcast(SCRIPT_ID, 0), "script heartbeat")
+        beat(1000)
+        early = [n.name for n in mods if first_print(n, SCRIPT_FIRE_RE, started)]
+        s.check("nothing fires before the audio", not early, ",".join(early) or "none")
+
+        player = box.modules["sim_audio_node"].PLAYER
+        player.requests.append(("play", CHASE_TRACK))
+        beat(3400)
+        player.requests.append(("jump", 1500))       # ~3.4 s -> ~4.9 s: skips the 4.5 s cue
+        beat(1800)
+        player.requests.append(("silence",))
+        beat(2600)
+
+        rate = 1.0 + box.clock_ppm * 1e-6
+        play = first_print(box, r"^AUDIO play", started)
+        jump = first_print(box, r"^AUDIO jump", started)
+        jump_pos = int(jump[1].rsplit("pos=", 1)[1]) if jump else 0
+        for event_ms, mask in CHASE_CUES:
+            pattern = r"^SCRIPT FIRE mask=0x0*%X event=%d" % (mask, event_ms)
+            times = {}
+            for node in mods:
+                hit = first_print(node, pattern, started)
+                if hit:
+                    times[node.name] = hit[0] / 1000.0
+            label = "chase cue @%dms" % event_ms
+            if event_ms == 4500:
+                s.check(label + " skipped by the jump", not times, "fired on " + ",".join(times) if times else "")
+                continue
+            if event_ms == 9000:
+                s.check(label + " never fires (box quiet)", not times, "fired on " + ",".join(times) if times else "")
+                continue
+            if event_ms < 3400:
+                target = (play[0] + event_ms * 1000 / rate) / 1000.0
+            else:
+                target = (jump[0] + (event_ms - jump_pos) * 1000 / rate) / 1000.0
+            missing = [n.name for n in mods if n.name not in times]
+            errors = [t - target for t in times.values()]
+            worst = max(abs(e) for e in errors) if errors else float("nan")
+            spread = (max(times.values()) - min(times.values())) if len(times) > 1 else 0.0
+            s.check(label, not missing and worst <= CHASE_GOAL_MS and spread <= SCRIPT_SPREAD_GOAL_MS,
+                    "fired %d/%d, worst %.1f ms vs audio, spread %.1f ms%s" % (
+                        len(times), len(mods), worst, spread,
+                        (" missing " + ",".join(missing)) if missing else ""))
+        for node in mods:
+            lost = first_print(node, r"SCRIPT stopped - timecode lost", started)
+            s.check("timecode lost stops %s" % node.name, lost is not None)
+            s.check("disarm %s" % node.name, app.disarm(node.device_id))
+
+    return script, 60000
+
+
 SCENARIOS = collections.OrderedDict([
     ("star", star),
     ("chain", chain),
@@ -259,4 +352,5 @@ SCENARIOS = collections.OrderedDict([
     ("deep3", deep3),
     ("crowd", crowd),
     ("field_fw", field_fw),
+    ("audio_chase", audio_chase),
 ])

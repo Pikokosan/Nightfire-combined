@@ -93,6 +93,27 @@ def broadcast(fw, cmd, data=b""):
     return {"cmd": cmd, "frame_type": fw.SOF_BROADCAST, "data": data}
 
 
+def check_show_time_keeps_no_link(test, fw):
+    """SHOW_TIME from an audio box must not count as hearing the master, or
+    the box would hold off the link-loss disarm. A KEEPALIVE still does."""
+    mesh_build = type(fw.link).receive.__globals__["mesh_build"]
+    network = fw.link.ids()[0]
+    master = fw.NFCP(node_id=0x01)
+    fw.link.last_rx_ms = fw.time.ticks_ms()
+    before = fw.link.last_rx_ms
+    HARNESS._clock["ms"] += 10
+    heard = []
+    with contextlib.redirect_stdout(io.StringIO()):
+        fw.link.receive(mesh_build(network, 0xA0D10B0C, 0x1234,
+                                   master.build_show_time_broadcast(7, 1000), age=0), heard.append)
+        test.assertEqual([p["cmd"] for p in heard], [fw.CMD_SHOW_TIME])
+        test.assertEqual(fw.link.last_rx_ms, before)
+        fw.link.receive(mesh_build(network, 0x00B21D6E, 0x1235,
+                                   master.build_keepalive_broadcast(0)), heard.append)
+    test.assertEqual(len(heard), 2)
+    test.assertNotEqual(fw.link.last_rx_ms, before)
+
+
 class FieldDisarmTests(unittest.TestCase):
     fw = FIELD
 
@@ -146,6 +167,9 @@ class FieldDisarmTests(unittest.TestCase):
         self.assertSafe()
         self.assertIn("master link timeout", out)
 
+    def test_show_time_keeps_no_master_link(self):
+        check_show_time_keeps_no_link(self, self.fw)
+
     def test_startup_fault(self):
         self.quiet(self.fw.set_startup_fault, "test fault")
         self.assertSafe()
@@ -192,6 +216,9 @@ class DummyDisarmTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             fw.check_master_link_failsafe()
         self.assertSafe()
+
+    def test_show_time_keeps_no_master_link(self):
+        check_show_time_keeps_no_link(self, self.fw)
 
     def test_main_loop_error(self):
         run_one_failing_loop(self.fw)

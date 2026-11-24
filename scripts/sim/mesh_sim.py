@@ -58,6 +58,7 @@ import types
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MAIN_DIR = os.path.join(ROOT, "main")
+SIM_DIR = os.path.dirname(os.path.abspath(__file__))   # sim-only nodes (sim_audio_node.py)
 if MAIN_DIR not in sys.path:
     sys.path.append(MAIN_DIR)
 
@@ -872,6 +873,7 @@ ENTRY_POINTS = {
     "bridge": ("nrf_bridge_main", "nrf_bridge_config", False),
     "dummy": ("nrf_dummy_main", "nrf_node_config", True),
     "field": ("field_main", "nrf_node_config", False),
+    "audio": ("sim_audio_node", "nrf_node_config", True),
 }
 
 FIELD_DEFAULT_CONFIG = {
@@ -952,7 +954,7 @@ class Node(object):
         source = self.files.get(name + ".py")
         path = None
         if source is None:
-            for directory in (self.src_dir, MAIN_DIR):
+            for directory in (self.src_dir, MAIN_DIR, SIM_DIR):
                 candidate = os.path.join(directory, name + ".py")
                 if os.path.exists(candidate):
                     path = candidate
@@ -1281,6 +1283,12 @@ class App(object):
     def ack(self, uid, frame, label, cmd, timeout_ms=1500):
         """Send a command and wait for its ACK; True if acknowledged."""
         return self.request(uid, frame, label, nfcp.CMD_ACK, timeout_ms, acked_cmd=cmd) is not None
+
+    def ack_code(self, uid, frame, label, cmd, timeout_ms=1500):
+        """Send a command; the code of its ACK (ACK_OK, ACK_CHASE...) or None."""
+        pkt = self.request(uid, frame, label, nfcp.CMD_ACK, timeout_ms)
+        data = bytes(pkt.get("data") or b"") if pkt else b""
+        return data[1] if len(data) == 2 and data[0] == cmd else None
 
     def info(self, uid):
         return self.request(uid, self.master.build_info_request(uid), "info %08X" % uid, nfcp.CMD_INFO_RSP)

@@ -48,7 +48,7 @@ MESH_RELAY_GAP_MS = 6
 # as of the moment the frame has arrived at the receiver. Each sender sets it
 # just before transmitting, so bridge hold time, repeats and relay waits are
 # all accounted for.
-MESH_TIMED_CMDS = (0x72, 0x75)       # SCRIPT_START, TIME_SYNC
+MESH_TIMED_CMDS = (0x72, 0x75, 0x77) # SCRIPT_START, TIME_SYNC, SHOW_TIME
 MESH_RAMP_US = 40                    # radio ramp-up before the first bit
 MESH_BYTE_US = 8                     # 1 Mbit/s
 MESH_FRAME_OVERHEAD = 8              # preamble, address, length, CRC bytes

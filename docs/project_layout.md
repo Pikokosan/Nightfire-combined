@@ -103,6 +103,7 @@ The Android controller app (Flutter). See its `README.md`.
 | `command_interface_wiring.md` | Bridge switch and LED wiring, USB status protocol |
 | `field_module_pinout.md`, `field_module_lcd.md` | Field-module pins, LCD and buttons |
 | `mesh_radio_design.md` | Mesh radio design and test results |
+| `audio_sync_design.md` | Audio box and timecode sync design (draft) |
 | `android_command_module.md`, `android_master_port.md` | App design notes |
 | `script_workspace.md`, `ui_backlog.md` | App scripting and UI plans |
 | `esp32_master.md` | The older ESP32 touchscreen master |

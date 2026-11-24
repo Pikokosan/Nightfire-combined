@@ -61,6 +61,18 @@ CMD_SCRIPT_HEARTBEAT = 0x74
 CMD_TIME_SYNC = 0x75
 CMD_SCRIPT_STEP = 0x76
 SCRIPT_ENTRY_BYTES = 12
+# Audio box show position (docs/audio_sync_design.md), broadcast by the
+# audio box: track_id(2) position_ms(4) state(1). Timed (mesh age field).
+CMD_SHOW_TIME = 0x77
+SHOW_STOPPED = 0
+SHOW_PLAYING = 1
+SHOW_PAUSED = 2
+SHOW_ENDED = 3
+# SCRIPT_START data in chase mode (follow an audio box):
+# script_id(2) audio_offset_ms(2, signed) offset(4) start_master_ms(4)
+# source_uid(4) track_id(2). A module that understands it ACKs with
+# ACK_CHASE; older firmware ACKs ACK_OK and runs on its own clock.
+SCRIPT_START_CHASE_BYTES = 18
 
 # INFO_RSP text fields, in order:
 # app_name, app_version, radio_version, script_status,
@@ -96,6 +108,7 @@ NACK_BAD_LENGTH     = 0x02
 NACK_INVALID_VALUE  = 0x03
 NACK_INTERNAL_ERROR = 0x04
 NACK_BUSY           = 0x05
+ACK_CHASE           = 0x06   # SCRIPT_START accepted, waiting for SHOW_TIME
 
 
 # CRC16-CCITT (poly 0x1021) by table lookup: one step per byte instead of
@@ -198,8 +211,8 @@ class NFCP:
 
     # Broadcast commands that do not target a single module.
     def build_broadcast(self, cmd: int, data: bytes = b"") -> bytes:
-        if cmd not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER, CMD_KEEPALIVE, CMD_SCRIPT_START, CMD_SCRIPT_STOP, CMD_SCRIPT_HEARTBEAT, CMD_TIME_SYNC, CMD_PAIR):
-            raise NFCPError("Broadcast only allowed for ARM/DISARM/DISCOVER/KEEPALIVE/SCRIPT")
+        if cmd not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER, CMD_KEEPALIVE, CMD_SCRIPT_START, CMD_SCRIPT_STOP, CMD_SCRIPT_HEARTBEAT, CMD_TIME_SYNC, CMD_PAIR, CMD_SHOW_TIME):
+            raise NFCPError("Broadcast only allowed for ARM/DISARM/DISCOVER/KEEPALIVE/SCRIPT/SHOW_TIME")
         return self._frame(SOF_BROADCAST, bytes([self.node_id, cmd]) + data)
 
     def build_arm_broadcast(self) -> bytes:
@@ -434,6 +447,30 @@ class NFCP:
         if start_master_ms is not None:
             data += (int(start_master_ms) & 0xFFFFFFFF).to_bytes(4, "big")
         return self.build_unique_command(target_unique, CMD_SCRIPT_START, data)
+
+    def build_script_start_chase(self, target_unique: int, script_id: int, source_uid: int,
+                                 track_id: int, audio_offset_ms: int = 0) -> bytes:
+        """SCRIPT_START in chase mode: the module waits for SHOW_TIME from
+        source_uid for track_id and fires on its position. audio_offset_ms
+        (-32768..32767) moves every cue later (positive) or earlier."""
+        if not -32768 <= audio_offset_ms <= 32767:
+            raise NFCPError("audio_offset_ms out of range")
+        data = (
+            (script_id & 0xFFFF).to_bytes(2, "big") +
+            (audio_offset_ms & 0xFFFF).to_bytes(2, "big") +
+            bytes(8) +
+            (source_uid & 0xFFFFFFFF).to_bytes(4, "big") +
+            (track_id & 0xFFFF).to_bytes(2, "big")
+        )
+        return self.build_unique_command(target_unique, CMD_SCRIPT_START, data)
+
+    def build_show_time_broadcast(self, track_id: int, position_ms: int, state: int = SHOW_PLAYING) -> bytes:
+        data = (
+            (track_id & 0xFFFF).to_bytes(2, "big") +
+            (position_ms & 0xFFFFFFFF).to_bytes(4, "big") +
+            bytes((state & 0xFF,))
+        )
+        return self.build_broadcast(CMD_SHOW_TIME, data)
 
     def build_script_stop_broadcast(self, script_id: int = 0) -> bytes:
         return self.build_broadcast(CMD_SCRIPT_STOP, (script_id & 0xFFFF).to_bytes(2, "big"))
@@ -671,7 +708,7 @@ class NFCPStreamParser:
             pkt["src"] = payload[0]
             pkt["cmd"] = payload[1]
             pkt["data"] = payload[2:]
-            if pkt["cmd"] not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER, CMD_KEEPALIVE, CMD_SCRIPT_START, CMD_SCRIPT_STOP, CMD_SCRIPT_HEARTBEAT, CMD_TIME_SYNC, CMD_PAIR):
+            if pkt["cmd"] not in (CMD_ARM, CMD_DISARM, CMD_DISCOVER, CMD_KEEPALIVE, CMD_SCRIPT_START, CMD_SCRIPT_STOP, CMD_SCRIPT_HEARTBEAT, CMD_TIME_SYNC, CMD_PAIR, CMD_SHOW_TIME):
                 return None
 
         elif self.frame_type == SOF_GROUP:

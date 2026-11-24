@@ -16,14 +16,58 @@ run).
 | Part | Version | Note |
 |---|---|---|
 | Bridge | usb-master-0.4.6 | Listens more: fewer reliable-delivery retries. |
-| Field | field-module 0.3.2 | One disarm path. |
-| Dummy | nrf-dummy 0.2.2 | One disarm path. |
+| Field | field-module 0.3.3 | Chase mode (audio box sync). Not on hardware yet; COM16 runs 0.3.2. |
+| Dummy | nrf-dummy 0.2.3 | Chase mode (audio box sync). Not on hardware yet. |
 | App | 0.4.0 (build 4) | |
 | nRF image | 2026-11-06 build | On the field modules and dummies. The COM12 bridge runs the 2026-11-23 background-receive build: A/B retries 0.11% against 0.44%. |
 
 ## Unreleased
 
-Nothing yet.
+## 2026-11-24
+
+### Field 0.3.3, Dummy 0.2.3 — chase mode (audio box sync, step 1)
+- **Added:** chase mode in the script engine (`module_script.py`), from
+  `docs/audio_sync_design.md`. A SCRIPT_START of 18 bytes names an audio
+  box (`source_uid`) and a track; the module ACKs with the new code
+  ACK_CHASE (0x06), fires nothing until that box's SHOW_TIME arrives, then
+  fires its cues on the box's play position. Small differences are
+  corrected gently (half the error, at most 10 ms per message); a
+  difference over 250 ms is a jump: cues jumped over are skipped, never
+  fired, and cues already fired never fire again. Paused holds, ended
+  stops. No SHOW_TIME for 1.5 s once running, or 10 s after the START,
+  stops the show and outputs. The bridge heartbeat is still needed as
+  before. A per-show audio offset (signed ms) sits in the START's delay
+  field.
+- **Added:** NFCP CMD_SHOW_TIME (0x77): `track_id(2) position_ms(4)
+  state(1)`, broadcast, timed (mesh age field); the SHOW_* states,
+  ACK_CHASE, `NFCP.build_script_start_chase()` and
+  `build_show_time_broadcast()` (`nfcp.py`). **Mesh:** 0x77 added to
+  `MESH_TIMED_CMDS`.
+- **Fixed (safety, before it could matter):** a module counted every
+  broadcast it heard as hearing the master, so an audio box's SHOW_TIME
+  would have held off the link-loss auto-disarm. SHOW_TIME no longer
+  refreshes the master-link timer (`module_link.py`).
+- **Unchanged:** shows without chase. The firmware trace harness gives the
+  same trace before and after for the field and dummy firmware.
+- **Tools:** `scripts/tests/test_module_chase.py` (20 tests on a fake clock
+  that wraps; 11 of 11 rule-breaking mutations caught);
+  `test_module_disarm.py` checks SHOW_TIME doesn't keep the master link on
+  either firmware. Simulator: node kind `audio`
+  (`scripts/sim/sim_audio_node.py`, a simulated box on its own drifting
+  clock) and scenario `audio_chase` (box beside the bridge, one module 2
+  hops out, forward jump, box going quiet); `App.ack_code()`;
+  `modules_of()` leaves the audio node out.
+- **Measured (simulator):** at 10 SHOW_TIME a second the module 2 hops out
+  missed 4 bridge heartbeats in a row and stopped in 2 of 12 runs; at 4 a
+  second (the default now) 20 of 20 runs passed, cues within 2.3 ms of the
+  music (mean 1.1 ms) and within 2.3 ms of each other.
+- **Note:** existing scenarios: deep3 and crowd fail the same checks as
+  before (4 and 5 failures over seeds 2-5). field: 6 failures over seeds
+  2-9 against 5 before, all in the cue-spread check of a plain script
+  start, which already failed on some seeds; it moved because
+  `handle_start` makes one more call, which the simulator charges.
+- **Note:** not on hardware yet. The bridge (`usb_master_control.py`)
+  still refuses an 18-byte SCRIPT_START from the app; that is step 2.
 
 ## 2026-11-23
 

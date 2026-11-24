@@ -484,7 +484,10 @@ class ModuleLink:
 
         # Act on it before any relay goes out (relays wait in self.relays).
         if self.matches(pkt) and not new_attempt:
-            self.last_rx_ms = now
+            # SHOW_TIME comes from an audio box, not the master: it must not
+            # keep the master link (and with it the armed state) alive.
+            if pkt["cmd"] != CMD_SHOW_TIME:
+                self.last_rx_ms = now
             if for_me:
                 self.request = (key, parsed[2], mode,
                                 parsed[3] if mode == MESH_MODE_VIA else None, uid)
