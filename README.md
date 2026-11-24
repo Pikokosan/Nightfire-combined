@@ -19,7 +19,7 @@ Android app ──USB── bridge (dongle) ~~radio~~ field modules / dummy modu
 | Look up field-module pins | [docs/field_module_pinout.md](docs/field_module_pinout.md), [docs/field_module_lcd.md](docs/field_module_lcd.md) |
 | Build or work on the Android app | [apps/nightfire_controller/README.md](apps/nightfire_controller/README.md) |
 | Understand the mesh radio | [docs/mesh_radio_design.md](docs/mesh_radio_design.md) |
-| Sync a show to an audio box (design) | [docs/audio_sync_design.md](docs/audio_sync_design.md) |
+| Sync a show to an audio box (design) | [audio_box/design.md](audio_box/design.md) |
 | Use the older ESP32 touchscreen master | [docs/esp32_master.md](docs/esp32_master.md) |
 | See what changed | [CHANGELOG.md](CHANGELOG.md) |
 | Find a file | [docs/project_layout.md](docs/project_layout.md) |

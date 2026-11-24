@@ -27,7 +27,7 @@ try:
 except ImportError:
     config = None
 
-MASTER_VERSION = b"usb-master-0.4.6"
+MASTER_VERSION = b"usb-master-0.4.7"
 MONITOR_VERSION = b"usb-monitor-0.3.4"
 RADIO_POLL_MS = 20   # was 50; bounds how long an app command waits
 

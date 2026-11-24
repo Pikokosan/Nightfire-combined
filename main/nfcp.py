@@ -61,7 +61,7 @@ CMD_SCRIPT_HEARTBEAT = 0x74
 CMD_TIME_SYNC = 0x75
 CMD_SCRIPT_STEP = 0x76
 SCRIPT_ENTRY_BYTES = 12
-# Audio box show position (docs/audio_sync_design.md), broadcast by the
+# Audio box show position (audio_box/design.md), broadcast by the
 # audio box: track_id(2) position_ms(4) state(1). Timed (mesh age field).
 CMD_SHOW_TIME = 0x77
 SHOW_STOPPED = 0
@@ -73,6 +73,13 @@ SHOW_ENDED = 3
 # source_uid(4) track_id(2). A module that understands it ACKs with
 # ACK_CHASE; older firmware ACKs ACK_OK and runs on its own clock.
 SCRIPT_START_CHASE_BYTES = 18
+# Audio box commands from the bridge, unique only (none of them can fire).
+CMD_AUDIO_LOAD = 0x79        # track_id(2) -> ACK
+CMD_AUDIO_PLAY = 0x7A        # track_id(2) from_ms(4) -> ACK
+CMD_AUDIO_STOP = 0x7B        # track_id(2) -> ACK
+CMD_AUDIO_STATUS_REQ = 0x7C  # (none) -> AUDIO_STATUS_RSP
+# track_id(2) position_ms(4) state(1, SHOW_*) level(1) length_ms(4)
+CMD_AUDIO_STATUS_RSP = 0x7D
 
 # INFO_RSP text fields, in order:
 # app_name, app_version, radio_version, script_status,
@@ -471,6 +478,22 @@ class NFCP:
             bytes((state & 0xFF,))
         )
         return self.build_broadcast(CMD_SHOW_TIME, data)
+
+    def build_audio_load(self, target_unique: int, track_id: int) -> bytes:
+        return self.build_unique_command(target_unique, CMD_AUDIO_LOAD,
+                                         (track_id & 0xFFFF).to_bytes(2, "big"))
+
+    def build_audio_play(self, target_unique: int, track_id: int, from_ms: int = 0) -> bytes:
+        return self.build_unique_command(
+            target_unique, CMD_AUDIO_PLAY,
+            (track_id & 0xFFFF).to_bytes(2, "big") + (from_ms & 0xFFFFFFFF).to_bytes(4, "big"))
+
+    def build_audio_stop(self, target_unique: int, track_id: int) -> bytes:
+        return self.build_unique_command(target_unique, CMD_AUDIO_STOP,
+                                         (track_id & 0xFFFF).to_bytes(2, "big"))
+
+    def build_audio_status_request(self, target_unique: int) -> bytes:
+        return self.build_unique_command(target_unique, CMD_AUDIO_STATUS_REQ)
 
     def build_script_stop_broadcast(self, script_id: int = 0) -> bytes:
         return self.build_broadcast(CMD_SCRIPT_STOP, (script_id & 0xFFFF).to_bytes(2, "big"))

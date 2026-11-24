@@ -1,7 +1,7 @@
 """Simulated audio box for scripts/sim/mesh_sim.py (kind "audio").
 
 Not device firmware: it stands in for the audio box of
-docs/audio_sync_design.md so the field side can be tested before the box
+audio_box/design.md so the field side can be tested before the box
 exists. It plays a "track" on its own clock (with the node's drift) and
 broadcasts SHOW_TIME every SHOW_TIME_GAP_MS (250) while it has a track loaded,
 using the real mesh code, so the frames carry the mesh age field like the

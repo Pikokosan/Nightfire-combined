@@ -49,7 +49,14 @@ def _master_unique_valid(command, data):
         return (len(data) >= 4 and 1 <= data[3] <= 3 and
                 len(data) == 4 + data[3] * NFCP_SCRIPT_ENTRY_BYTES)
     if command == NFCP_CMD_SCRIPT_START:
-        return len(data) == 12
+        # timed, or chase: follow an audio box (audio_box/design.md)
+        return len(data) in (NFCP_SCRIPT_START_BYTES, NFCP_SCRIPT_START_CHASE_BYTES)
+    if command in (NFCP_CMD_AUDIO_LOAD, NFCP_CMD_AUDIO_STOP):
+        return len(data) == 2                       # track_id
+    if command == NFCP_CMD_AUDIO_PLAY:
+        return len(data) == 6                       # track_id from_ms
+    if command == NFCP_CMD_AUDIO_STATUS_REQ:
+        return not data
     if command in (NFCP_CMD_SCRIPT_HEARTBEAT, NFCP_CMD_SCRIPT_STEP):
         return len(data) == 6
     return False
@@ -78,7 +85,7 @@ def decode_master(frame):
 # ARM need a module this bridge armed.
 MASTER_ARMING = (NFCP_CMD_ARM, NFCP_CMD_FIRE, NFCP_CMD_SCRIPT_START, NFCP_CMD_SCRIPT_STEP)
 # Commands that stop things: allowed even after the app session expired.
-MASTER_STOPPING = (NFCP_CMD_DISARM, NFCP_CMD_SCRIPT_STOP)
+MASTER_STOPPING = (NFCP_CMD_DISARM, NFCP_CMD_SCRIPT_STOP, NFCP_CMD_AUDIO_STOP)
 # Changes refused while any module may be armed.
 MASTER_SAFE_ONLY = (NFCP_CMD_SET_RESISTANCE_CAL, NFCP_CMD_SET_UNIQUE, NFCP_CMD_SET_GROUP,
                     NFCP_CMD_SET_NETWORK, NFCP_CMD_SET_RADIO_CHANNEL,

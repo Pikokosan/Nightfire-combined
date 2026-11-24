@@ -37,7 +37,8 @@ Uint8List discoverQuery(int nonce) =>
     encodeNfcp(0xfd, [1, 0x40, ...bigEndian(nonce, 2)]);
 
 Uint8List moduleQuery(int uid, int command) {
-  if (![0x22, 0x24, 0x27, 0x52].contains(command)) {
+  // 0x7C: an audio box's status (read-only, like the others).
+  if (![0x22, 0x24, 0x27, 0x52, 0x7c].contains(command)) {
     throw ArgumentError('Unsupported diagnostic query');
   }
   return encodeNfcp(0xfb, [1, ...bigEndian(uid, 4), command]);
@@ -254,5 +255,38 @@ class ResistanceSnapshot {
       }
     }
     return ResistanceSnapshot(data[3], calibrated, cues);
+  }
+}
+
+/// SHOW_TIME and AUDIO_STATUS states.
+enum ShowState { stopped, playing, paused, ended }
+
+/// An audio box's reply to AUDIO_STATUS_REQ (0x7C → 0x7D):
+/// `track_id(2) position_ms(4) state(1) level(1) [length_ms(4)]`.
+class AudioStatus {
+  const AudioStatus(
+    this.trackId,
+    this.positionMs,
+    this.state,
+    this.level, [
+    this.lengthMs,
+  ]);
+  final int trackId;
+  final int positionMs;
+  final ShowState state;
+  final int level;
+  final int? lengthMs;
+
+  static AudioStatus parse(List<int> data) {
+    if ((data.length != 8 && data.length != 12) || data[6] > 3) {
+      throw const FormatException('Bad audio box status');
+    }
+    return AudioStatus(
+      readUnsigned(data, 0, 2),
+      readUnsigned(data, 2, 4),
+      ShowState.values[data[6]],
+      data[7],
+      data.length == 12 ? readUnsigned(data, 8, 4) : null,
+    );
   }
 }

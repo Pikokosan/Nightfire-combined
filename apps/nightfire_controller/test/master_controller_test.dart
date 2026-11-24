@@ -39,6 +39,13 @@ class MasterRadio implements RadioTransport {
   final scriptRunning = <int, bool>{};
   final fireSequences = <int, int>{};
   final lastFireMasks = <int, BigInt>{};
+  // INFO fields the modules report.
+  String infoApp = '';
+  String infoFirmware = '';
+  // ACK code a module answers a chase START (18 bytes) with: ACK_CHASE.
+  int chaseAck = 6;
+  // The audio box's AUDIO_STATUS reply; null = no reply.
+  List<int>? boxStatus;
   Completer<void>? transmitGate;
   List<int> fixedMask(BigInt value) => List.generate(
     8,
@@ -75,8 +82,11 @@ class MasterRadio implements RadioTransport {
     stream.add(
       usbLine(BridgeFrame(request.sequence, request.command, [0], flags: 2)),
     );
-    if (request.command != 0x10) return;
-    final packet = decodeNfcp(request.payload)!;
+    // 0x1A (mesh bridges): reliable delivery, uid(4) timeout(2) frame.
+    if (request.command != 0x10 && request.command != 0x1a) return;
+    final packet = decodeNfcp(
+      request.command == 0x1a ? request.payload.sublist(6) : request.payload,
+    )!;
     packets.add(packet);
     // STOP halts the scheduler, broadcast or unique, and keeps the arm.
     if (packet.command == 0x73) {
@@ -106,7 +116,19 @@ class MasterRadio implements RadioTransport {
       final text = utf8.encode(
         'id=$id entries=${wrongReadback ? 0 : scriptCounts[packet.target!] ?? 0} run=0',
       );
-      reply(packet.target!, 0x53, [0, 0, 0, text.length, ...text]);
+      final app = utf8.encode(infoApp);
+      final firmware = utf8.encode(infoFirmware);
+      reply(packet.target!, 0x53, [
+        app.length,
+        ...app,
+        firmware.length,
+        ...firmware,
+        0,
+        text.length,
+        ...text,
+      ]);
+    } else if (packet.command == 0x7c) {
+      if (boxStatus != null) reply(packet.target!, 0x7d, boxStatus!);
     } else if (packet.command == 0x27) {
       final target = packet.target!;
       if (dropStatusReplies > 0) {
@@ -155,7 +177,10 @@ class MasterRadio implements RadioTransport {
         dropLoadReplies--;
         return; // LOAD applied, its ACK lost over RF.
       }
-      reply(packet.target! + (wrongAck ? 1 : 0), 0x50, [packet.command, 0]);
+      final code = packet.command == 0x72 && packet.data.length == 18
+          ? chaseAck
+          : 0;
+      reply(packet.target! + (wrongAck ? 1 : 0), 0x50, [packet.command, code]);
     } else {
       final target = packet.target!;
       fireSequences[target] = (fireSequences[target] ?? 0) + 1;
@@ -243,6 +268,10 @@ void main() {
         'otaEnd': masterUnique(uid, 0x62, [0xab, 0xcd]),
         'otaAbort': masterUnique(uid, 0x63, [0xab, 0xcd]),
         'otaReboot': masterUnique(uid, 0x64),
+        'chaseStart': scriptStartChase(uid, 0xabcd, 0xa0d10bff, 0x0102, -40),
+        'audioPlay': audioPlay(0xa0d10bff, 0x0102, 1500),
+        'audioStop': audioStop(0xa0d10bff, 0x0102),
+        'audioStatus': moduleQuery(0xa0d10bff, 0x7c),
       };
       expect(frames.keys.toSet(), golden.keys.toSet());
       for (final entry in frames.entries) {
@@ -754,6 +783,212 @@ void main() {
         radio.packets.where((p) => p.command == 0x11 && p.target == uid),
         hasLength(1),
       );
+    });
+  });
+
+  group('show following an audio box', () {
+    const box = 0xa0d10b0c;
+    const track = 7;
+    List<int> status(int state, [int position = 1000]) => [
+      ...bigEndian(track, 2),
+      ...bigEndian(position, 4),
+      state,
+      200,
+    ];
+
+    setUp(() {
+      session.values['Firmware'] = 'usb-master-0.4.7';
+      radio
+        ..infoApp = 'field-module'
+        ..infoFirmware = '0.3.3'
+        ..boxStatus = status(1);
+      session.master.audioStatusEvery = 1;
+    });
+
+    Future<void> ready() async {
+      expect(
+        await session.master.uploadScript(
+          script('0.000,1,64,first\n1.000,1,1,second\n2.000,1,2,third'),
+        ),
+        isTrue,
+        reason: session.master.status,
+      );
+      expect(
+        await session.master.armScriptModules(),
+        isTrue,
+        reason: session.master.status,
+      );
+    }
+
+    Future<bool> start({int offset = 0}) => session.master.startChase(
+      boxUid: box,
+      trackId: track,
+      audioOffsetMs: offset,
+    );
+
+    Future<void> waitUntil(bool Function() done, [int seconds = 3]) async {
+      final deadline = DateTime.now().add(Duration(seconds: seconds));
+      while (!done() && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+    }
+
+    test('every module gets a chase START naming the box, then the box '
+        'plays', () async {
+      await ready();
+      expect(await start(offset: -40), isTrue, reason: session.master.status);
+      final starts = radio.packets.where((p) => p.command == 0x72).toList();
+      expect(starts, hasLength(1));
+      final data = starts.single.data;
+      expect(data, hasLength(18));
+      expect(readUnsigned(data, 2, 2), (-40) & 0xffff);
+      expect(readUnsigned(data, 12, 4), box);
+      expect(readUnsigned(data, 16, 2), track);
+      final play = radio.packets.indexWhere((p) => p.command == 0x7a);
+      expect(play, greaterThan(radio.packets.indexOf(starts.single)));
+      expect(radio.packets[play].target, box);
+      // No TIME_SYNC: the music is the clock.
+      expect(radio.packets.where((p) => p.command == 0x75), isEmpty);
+      expect(session.master.running, isTrue);
+      expect(session.master.chase, (uid: box, track: track));
+      await waitUntil(() => session.master.audioStatus != null);
+      expect(radio.packets.where((p) => p.command == 0x74), isNotEmpty);
+      expect(session.master.elapsedMs, greaterThanOrEqualTo(1000));
+      await session.master.emergencyStop();
+    });
+
+    test('old module firmware is refused before anything is sent', () async {
+      radio.infoFirmware = '0.3.2';
+      await ready();
+      final before = radio.packets.length;
+      expect(await start(), isFalse);
+      expect(session.master.lastError, contains('field-module 0.3.3'));
+      expect(
+        radio.packets.skip(before).where((p) => p.command == 0x72 || p.command == 0x7a),
+        isEmpty,
+      );
+      expect(session.master.running, isFalse);
+      expect(session.master.armed, {uid}); // nothing started, nothing lost
+    });
+
+    test('an older bridge is refused before anything is sent', () async {
+      await ready();
+      session.values['Firmware'] = 'usb-master-0.4.6';
+      expect(await start(), isFalse);
+      expect(session.master.lastError, contains('usb-master-0.4.7'));
+      expect(radio.packets.where((p) => p.command == 0x72), isEmpty);
+    });
+
+    test('a module that ACKs OK (own clock) is stopped with the show', () async {
+      radio.chaseAck = 0;
+      await ready();
+      expect(await start(), isFalse);
+      expect(session.master.lastError, contains('without following'));
+      expect(
+        radio.packets.where((p) => p.command == 0x73 && p.target == uid),
+        hasLength(1),
+      );
+      expect(radio.scriptRunning[uid], isFalse);
+      expect(radio.packets.where((p) => p.command == 0x7a), isEmpty);
+      // Emergency stop: STOP and DISARM broadcasts, and the music.
+      expect(radio.packets.where((p) => p.command == 0x11), isNotEmpty);
+      expect(
+        radio.packets.where((p) => p.command == 0x7b && p.target == box),
+        isNotEmpty,
+      );
+      expect(session.master.chase, isNull);
+    });
+
+    test('a refused START (NACK) stops the show', () async {
+      radio.chaseAck = 3;
+      await ready();
+      expect(await start(), isFalse);
+      expect(radio.packets.where((p) => p.command == 0x7a), isEmpty);
+      expect(session.master.running, isFalse);
+    });
+
+    test('the end of the track ends the run, counts unfired cues and '
+        'disarms', () async {
+      await ready();
+      expect(await start(), isTrue);
+      radio.fireSequences[uid] = 2; // the audio jumped past one cue
+      radio.boxStatus = status(3, 2500);
+      await waitUntil(() => !session.master.running);
+      await waitUntil(() => radio.armed[uid] == false);
+      expect(session.master.completed, isTrue);
+      expect(session.master.chaseUnfired, 1);
+      expect(session.master.armed, isEmpty);
+      expect(radio.armed[uid], isFalse);
+      expect(session.master.status, contains('1 cue(s) not fired'));
+      expect(session.master.chase, isNull);
+    });
+
+    test('a box that stops answering ends the run', () async {
+      await ready();
+      expect(await start(), isTrue);
+      radio.boxStatus = null;
+      // Each unanswered read waits out the reliable-delivery timeout (~1 s).
+      await waitUntil(() => !session.master.running, 6);
+      expect(session.master.running, isFalse);
+      expect(session.master.status, contains('Audio box stopped answering'));
+      expect(radio.packets.where((p) => p.command == 0x11), isNotEmpty);
+    });
+
+    test('a box that stopped the track ends the run', () async {
+      await ready();
+      expect(await start(), isTrue);
+      radio.boxStatus = status(0);
+      await waitUntil(() => !session.master.running);
+      expect(session.master.status, contains('Audio box stopped the track'));
+      expect(session.master.armed, isEmpty);
+    });
+
+    test('another track on the box ends the run', () async {
+      await ready();
+      expect(await start(), isTrue);
+      radio.boxStatus = [0, 8, ...status(1).sublist(2)];
+      await waitUntil(() => !session.master.running);
+      expect(session.master.status, contains('another track'));
+    });
+
+    test('stop halts the modules, then the music; modules stay armed', () async {
+      await ready();
+      expect(await start(), isTrue);
+      expect(await session.master.pauseScript(), isFalse);
+      expect(session.master.running, isTrue);
+      expect(await session.master.stopScript(), isTrue, reason: session.master.status);
+      final stop = radio.packets.indexWhere((p) => p.command == 0x73);
+      final music = radio.packets.indexWhere((p) => p.command == 0x7b);
+      expect(stop, greaterThanOrEqualTo(0));
+      expect(music, greaterThan(stop));
+      expect(radio.packets[music].target, box);
+      expect(radio.scriptRunning[uid], isFalse);
+      expect(session.master.armed, {uid});
+      expect(session.master.chase, isNull);
+    });
+
+    test('codec: version checks and audio status', () {
+      expect(bridgeSupportsChase('usb-master-0.4.7'), isTrue);
+      expect(bridgeSupportsChase('usb-master-0.5.0'), isTrue);
+      expect(bridgeSupportsChase('usb-master-0.4.6'), isFalse);
+      expect(bridgeSupportsChase('usb-monitor-0.3.4'), isFalse);
+      expect(moduleSupportsChase('field-module', '0.3.3'), isTrue);
+      expect(moduleSupportsChase('field-module', '0.10.0'), isTrue);
+      expect(moduleSupportsChase('field-module', '0.3.2'), isFalse);
+      expect(moduleSupportsChase('nrf-dummy', '0.2.3'), isTrue);
+      expect(moduleSupportsChase('nrf-dummy', '0.2.2'), isFalse);
+      expect(moduleSupportsChase('audio-box', '9.9.9'), isFalse);
+      expect(moduleSupportsChase('field-module', null), isFalse);
+      final parsed = AudioStatus.parse([
+        ...status(2, 0x01020304),
+        ...bigEndian(90000, 4),
+      ]);
+      expect(parsed.positionMs, 0x01020304);
+      expect(parsed.state, ShowState.paused);
+      expect(parsed.lengthMs, 90000);
+      expect(() => AudioStatus.parse([0, 7, 0, 0, 0, 0, 4, 0]), throwsFormatException);
+      expect(() => scriptStartChase(uid, 1, 0, track), throwsArgumentError);
+      expect(() => scriptStartChase(uid, 1, box, track, 40000), throwsArgumentError);
     });
   });
 

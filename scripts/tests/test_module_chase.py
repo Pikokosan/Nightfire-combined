@@ -1,4 +1,4 @@
-"""Chase mode of the module script engine (docs/audio_sync_design.md): cues
+"""Chase mode of the module script engine (audio_box/design.md): cues
 follow an audio box's SHOW_TIME broadcasts.
 
 ScriptEngine runs on a fake clock that starts just before the MicroPython

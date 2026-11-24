@@ -60,3 +60,38 @@ List<int> otaBegin(int uid, int transfer, String path, List<int> bytes) {
     ...name,
   ]);
 }
+
+/// SCRIPT_START in chase mode (audio_box/design.md): the module fires
+/// its cues on the audio box's SHOW_TIME instead of its own clock.
+/// `script_id(2) audio_offset_ms(2, signed) unused(8) source_uid(4) track_id(2)`.
+List<int> scriptStartChase(
+  int uid,
+  int scriptId,
+  int boxUid,
+  int trackId, [
+  int audioOffsetMs = 0,
+]) {
+  if (boxUid <= 0 || boxUid > 0xffffffff) {
+    throw ArgumentError('Invalid audio box UID');
+  }
+  if (audioOffsetMs < -32768 || audioOffsetMs > 32767) {
+    throw ArgumentError('Audio offset must be -32768 to 32767 ms');
+  }
+  return masterUnique(uid, 0x72, [
+    ...bigEndian(scriptId, 2),
+    ...bigEndian(audioOffsetMs & 0xffff, 2),
+    ...List.filled(8, 0),
+    ...bigEndian(boxUid, 4),
+    ...bigEndian(trackId, 2),
+  ]);
+}
+
+/// Audio box commands. None of them can fire anything.
+List<int> audioPlay(int boxUid, int trackId, [int fromMs = 0]) =>
+    masterUnique(boxUid, 0x7a, [
+      ...bigEndian(trackId, 2),
+      ...bigEndian(fromMs, 4),
+    ]);
+
+List<int> audioStop(int boxUid, int trackId) =>
+    masterUnique(boxUid, 0x7b, bigEndian(trackId, 2));

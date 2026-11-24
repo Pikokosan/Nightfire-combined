@@ -1,7 +1,8 @@
 # Audio Box and Timecode Sync Design
 
-Status: draft, 2026-11-24. Step 1 (module side) is implemented and tested in
-the simulator; nothing has run on hardware. See Build order.
+Status: draft, 2026-11-24. Steps 1 (module side) and 2 (bridge and app) are
+implemented and tested in unit tests and the simulator; nothing has run on
+hardware, and there is no audio box yet. See Build order.
 
 An audio box is a new node on the mesh. It plays a show's soundtrack and
 broadcasts the show position, and armed field modules fire their cue
@@ -53,7 +54,8 @@ app ──USB──> bridge ──mesh──> field modules
 
 1. **Load.** The app loads the cue script into each module (SCRIPT_CLEAR /
    SCRIPT_LOAD, unchanged). It sends AUDIO_LOAD to the box with the track
-   id. The box checks the track exists and replies with its length.
+   id. The box checks the track exists and ACKs; AUDIO_STATUS_REQ then
+   gives its length.
 2. **Arm.** Modules are armed as today. The box has nothing to arm.
 3. **Start.** The bridge sends each module a SCRIPT_START in *chase* mode
    that names the box's unique id and the track id. Modules reply
@@ -75,10 +77,14 @@ app's `bridge_codec.dart` before using them):
 | Cmd | Name | Sent by | Kind | Data |
 |---|---|---|---|---|
 | 0x77 | SHOW_TIME | audio box | broadcast, timed | `track_id(2) position_ms(4) state(1)` |
-| 0x79 | AUDIO_LOAD | bridge | unique, reliable | `track_id(2)` → ACK + `length_ms(4)` |
-| 0x7A | AUDIO_PLAY | bridge | unique, reliable | `track_id(2) from_ms(4)` |
-| 0x7B | AUDIO_STOP | bridge | unique, reliable | `track_id(2)` |
-| 0x7C | AUDIO_STATUS_REQ | bridge | unique, reliable | none → `track_id(2) position_ms(4) state(1) level(1)` |
+| 0x79 | AUDIO_LOAD | bridge | unique, reliable | `track_id(2)` → ACK |
+| 0x7A | AUDIO_PLAY | bridge | unique, reliable | `track_id(2) from_ms(4)` → ACK |
+| 0x7B | AUDIO_STOP | bridge | unique, reliable | `track_id(2)` → ACK |
+| 0x7C | AUDIO_STATUS_REQ | bridge | unique, reliable | none → AUDIO_STATUS_RSP |
+| 0x7D | AUDIO_STATUS_RSP | audio box | response | `track_id(2) position_ms(4) state(1) level(1) [length_ms(4)]` |
+
+The track length moved from AUDIO_LOAD's ACK to AUDIO_STATUS_RSP, so every
+command gets the plain 2-byte ACK. `length_ms` is optional (8 or 12 bytes).
 
 SHOW_TIME `state`: 0 stopped, 1 playing, 2 paused, 3 ended.
 
@@ -114,11 +120,22 @@ script_id(2) audio_offset_ms(2, signed) unused(8) source_uid(4) track_id(2)
   auto-disarm. Any other node's broadcasts still count, as before.
 - `module_script.py`: chase mode (Module behaviour, below).
 
-**Still needed (step 2):**
-- `usb_master_control.py`: allow SCRIPT_START with 18 bytes; allow
-  AUDIO_LOAD/PLAY/STOP/STATUS_REQ to one node (any state, since they
-  can't fire). Chase START stays in `MASTER_ARMING`.
-- `nfcp_frame.py`, `bridge_codec.dart`: the new constants and builders.
+**Done in step 2 (bridge usb-master-0.4.7):**
+- `usb_master_control.py`: SCRIPT_START with 12 or 18 bytes; AUDIO_LOAD,
+  AUDIO_PLAY, AUDIO_STOP and AUDIO_STATUS_REQ to one node, with their
+  exact lengths. Chase START stays in `MASTER_ARMING` (ARM key on, module
+  armed through this bridge). The AUDIO_* commands need neither, since
+  they can't fire; AUDIO_STOP joins the stopping commands, so it goes out
+  even after the app session has expired. SHOW_TIME from the app is
+  refused: only the box sends it.
+- `nfcp_frame.py`: the new command numbers and START lengths. `nfcp.py`:
+  the AUDIO_* numbers and builders.
+- The bridge passes the SHOW_TIME it hears on to the app over USB, as it
+  does with every frame (4 small frames a second). The app ignores
+  everything but module responses, so it takes the show position from
+  AUDIO_STATUS_RSP instead.
+
+**Done in step 2 (app):** see App behaviour, below.
 
 **Rate: 4 SHOW_TIME a second (every 250 ms), not 10.** Measured in the
 simulator (`audio_chase`, below): at 10 a second, the module 2 hops out
@@ -135,7 +152,7 @@ is 6 missed messages.
   about 1–3 ms per message.
 - *CPU, and with it deaf time.* Handling a script heartbeat takes a module
   about 3 ms, and each duplicate copy about 0.7 ms
-  ([mesh_radio_design.md](mesh_radio_design.md)). With several copies of
+  ([mesh_radio_design.md](../docs/mesh_radio_design.md)). With several copies of
   each message heard, that's a few % of every module's time at 4 a second. The bridge hears SHOW_TIME too, and the
   bridge only listens while it's inside `recv()`, so this costs it
   reliable-delivery retries. If the bridge's background-receive firmware
@@ -210,6 +227,58 @@ script and outputs.
 **The bridge heartbeat still applies.** Losing SCRIPT_HEARTBEAT stops the
 show exactly as today. Both liveness checks must pass for cues to fire.
 
+## App behaviour
+
+`MasterController.startChase(boxUid:, trackId:, audioOffsetMs:)` in
+`master_controller.dart` (step 2). No screen calls it yet; that is step 5.
+
+**Before anything is sent** it refuses the show unless:
+- the script is uploaded and every script module is armed;
+- the bridge runs usb-master-0.4.7 or later (`bridgeSupportsChase()`);
+- every script module's INFO says field-module 0.3.3+ or nrf-dummy 0.2.3+
+  (`moduleSupportsChase()`);
+- the box isn't one of the script modules, and the track id, box UID and
+  offset are in range.
+
+**Start.**
+1. Bridge heartbeats begin (every 200 ms, as for a timed run): the modules
+   need them while they wait for the music. No TIME_SYNC is sent.
+2. Each module in turn: read its fire counter, send the chase START,
+   then read its output state.
+   - ACK_CHASE: it must then report armed and running.
+   - ACK_OK: the module would run on its own clock. The app sends it
+     SCRIPT_STOP and stops the show.
+   - Anything else (a NACK): the show stops.
+3. AUDIO_PLAY to the box.
+4. If starting takes over 8 s (`chaseStartBudgetMs`), the show stops. The
+   first modules give up after 10 s without SHOW_TIME.
+
+Any failure here is an emergency stop: STOP and DISARM broadcasts, plus
+AUDIO_STOP to the box.
+
+**Running.**
+- Once a second (every 5th heartbeat) the app reads AUDIO_STATUS_REQ.
+  The position it reports drives the app's elapsed time.
+- The run ends with an emergency stop if:
+  - 3 reads in a row go unanswered;
+  - the box reports another track;
+  - the box reports `stopped`.
+- `paused` keeps the run going. `ended` finishes it:
+  1. STOP broadcasts.
+  2. Each module's fire counter is read. The cues that didn't fire
+     (jumped past, or timecode lost) are counted and shown.
+  3. Every module is disarmed and confirms it, as for a timed run.
+- The modules don't depend on these reads: they follow SHOW_TIME and stop
+  on their own. The reads only tell the app where the show is and when it
+  is over.
+
+**Operator controls.**
+- Pause is refused: the music sets the time, so a resume couldn't line up
+  with it.
+- Stop halts the modules (STOP broadcast, then a unique STOP to each one)
+  and then sends AUDIO_STOP. The modules stay armed.
+- Emergency stop and disarm work as for any run, and also send AUDIO_STOP.
+
 ## Audio box
 
 **Hardware.**
@@ -236,7 +305,7 @@ but loses that check.
 - Edge times are captured by hardware (COMP → PPI → TIMER capture into a
   buffer) in native C, next to `nrf_radio`. **Not** Python pin interrupts:
   that would load the CPU and add deaf time (see
-  [mesh_radio_design.md](mesh_radio_design.md)).
+  [mesh_radio_design.md](../docs/mesh_radio_design.md)).
 - The end of each frame's sync word (bits 64–79, `0x3FFD`) is the reference
   instant. Its timestamp is accurate to well under 1 ms, even though a
   frame lasts 33 ms.
@@ -289,7 +358,7 @@ travels about 0.34 m per ms, so the music reaches someone 100 m away about
 
 ## Testing
 
-1. **Simulator (done).** `scripts/sim/sim_audio_node.py` is a simulated
+1. **Simulator (done).** `audio_box/sim/sim_audio_node.py` is a simulated
    box (node kind `audio`) that plays a track on its own drifting clock
    and broadcasts SHOW_TIME through the real mesh code. The `audio_chase`
    scenario has the box beside the bridge, two modules near it and one 2
@@ -310,6 +379,18 @@ travels about 0.34 m per ms, so the music reaches someone 100 m away about
    the engine one at a time (11 mutations) makes a test fail.
    `test_module_disarm.py` checks that SHOW_TIME doesn't keep the master
    link alive on the field and dummy firmware.
+   **Bridge and app (done, step 2).** `test_usb_master_control.py`: the
+   chase START and AUDIO_* commands pass the bridge with exact lengths and
+   nothing else; chase START needs the ARM key and an armed module;
+   AUDIO_STOP goes out without the app. `master_controller_test.dart`
+   (11 chase tests; 12 of 12 rule-breaking mutations caught) runs
+   `startChase()` against a fake bridge, modules and
+   box: frame contents and order, refusals for old modules and old
+   bridges, a plain-ACK module stopped, a NACK, track end with unfired
+   cues counted and everything disarmed, a box that stops answering,
+   stops the track or plays another track, and operator stop. The Dart
+   builders match the Python ones byte for byte
+   (`export_master_android_goldens.py`).
 3. **Bench, fake clock.** Box firmware broadcasting its own `ticks_ms` as
    the position. Two dummy modules on the bench; compare their FIRE prints
    (or a GPIO pin on a logic analyser) against each other and against the
@@ -325,9 +406,13 @@ travels about 0.34 m per ms, so the music reaches someone 100 m away about
 1. **Done (not on hardware):** module side: SHOW_TIME, chase START,
    correction and jump rules, timecode loss. Simulator and unit tests.
    Field module 0.3.3, dummy 0.2.3.
-2. Bridge and app: whitelist changes, chase START builder, version check.
-3. Audio box firmware with a fake clock; bench tests 3 and 5.
-4. Native LTC capture and decoder; AUDIO_* commands; bench test 4.
+2. **Done (not on hardware):** bridge and app: bridge rules
+   (usb-master-0.4.7), chase START and AUDIO_* builders, version checks,
+   `MasterController.startChase()` and the run it drives (App behaviour).
+   No screen uses it yet.
+3. Audio box firmware with a fake clock, answering AUDIO_PLAY, AUDIO_STOP
+   and AUDIO_STATUS_REQ; bench tests 3 and 5.
+4. Native LTC capture and decoder; AUDIO_LOAD and real tracks; bench test 4.
 5. App: track picker, box status, audio delay setting, jump and loss
    counts.
 

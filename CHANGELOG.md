@@ -15,7 +15,7 @@ run).
 
 | Part | Version | Note |
 |---|---|---|
-| Bridge | usb-master-0.4.6 | Listens more: fewer reliable-delivery retries. |
+| Bridge | usb-master-0.4.7 | Chase START and audio box commands (audio box sync). Not installed; COM12 runs 0.4.6. |
 | Field | field-module 0.3.3 | Chase mode (audio box sync). Not on hardware yet; COM16 runs 0.3.2. |
 | Dummy | nrf-dummy 0.2.3 | Chase mode (audio box sync). Not on hardware yet. |
 | App | 0.4.0 (build 4) | |
@@ -24,6 +24,58 @@ run).
 ## Unreleased
 
 ## 2026-11-24
+
+### Bridge usb-master-0.4.7 — chase START and audio box commands (audio box sync, step 2)
+- **Added:** the app may send SCRIPT_START with 18 bytes (chase mode) as
+  well as 12. It is still an arming command: ARM key on, and a module
+  this bridge armed.
+- **Added:** AUDIO_LOAD (0x79), AUDIO_PLAY (0x7A), AUDIO_STOP (0x7B) and
+  AUDIO_STATUS_REQ (0x7C) to one node, each with its exact length. None
+  of them needs the ARM key or an armed module, since they can't fire.
+  AUDIO_STOP is a stopping command, so it goes out even after the app
+  session has expired.
+- **Mesh / protocol:** `nfcp_frame.py` gains the new command numbers and
+  START lengths; `nfcp.py` gains the AUDIO_* numbers (AUDIO_STATUS_RSP
+  0x7D) and builders.
+- **Note:** not installed on the COM12 bridge yet. Build it with
+  `py -3 scripts/build/build_usb_master_bundle.py` (28,827 bytes).
+
+### App — follow an audio box (audio box sync, step 2)
+- **Added:** `MasterController.startChase()`.
+  - It refuses before sending anything unless the bridge is
+    usb-master-0.4.7+ and every script module reports field-module 0.3.3+
+    or nrf-dummy 0.2.3+.
+  - Each module gets a chase START. A module that answers ACK_OK (it would
+    run on its own clock) is sent STOP, and the show stops.
+  - Then the box is told to play.
+  - Once a second it reads the box's status. That gives the show position.
+    A track end finishes the run: it counts the cues that didn't fire and
+    disarms everything.
+  - A box that stops answering (3 reads), stops the track or plays another
+    track ends the run with an emergency stop.
+  - Pause is refused. Stop halts the modules, then the music. Emergency
+    stop also sends AUDIO_STOP.
+  - No screen uses it yet (step 5).
+- **Added:** codec: `scriptStartChase()`, `audioPlay()`, `audioStop()`,
+  `AudioStatus`, `bridgeSupportsChase()`, `moduleSupportsChase()`;
+  `moduleQuery()` allows 0x7C.
+- **Tools:** 11 chase tests in `master_controller_test.dart`; breaking
+  each chase rule in the controller one at a time (12 mutations) makes one
+  fail. Its fake radio now handles reliable delivery (0x1A) and reports
+  module app/firmware in INFO. The golden frames gain the chase START and the
+  audio commands (`export_master_android_goldens.py`).
+  `test_usb_master_control.py`: 2 new tests.
+- **Docs:** `audio_box/design.md`: App behaviour section, protocol
+  table (AUDIO_STATUS_RSP; the track length moved there from
+  AUDIO_LOAD's ACK), step 2 marked done.
+
+### Tools — audio box gets its own folder
+- **Moved:** `docs/audio_sync_design.md` → `audio_box/design.md`;
+  `scripts/sim/sim_audio_node.py` → `audio_box/sim/sim_audio_node.py`
+  (the simulator also looks in `audio_box/sim/`). New
+  `audio_box/README.md`. The box firmware (step 3) will go in
+  `audio_box/`; shared code stays in `main/`. References updated in code
+  comments, `README.md` and `docs/project_layout.md`.
 
 ### Field 0.3.3, Dummy 0.2.3 — chase mode (audio box sync, step 1) — `2cac449`
 - **Added:** chase mode in the script engine (`module_script.py`), from

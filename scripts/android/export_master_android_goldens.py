@@ -34,6 +34,10 @@ def main():
         'otaEnd': p.build_ota_update_end(uid, 0xabcd),
         'otaAbort': p.build_ota_update_abort(uid, 0xabcd),
         'otaReboot': p.build_ota_update_reboot(uid),
+        'chaseStart': p.build_script_start_chase(uid, 0xabcd, 0xa0d10bff, 0x0102, -40),
+        'audioPlay': p.build_audio_play(0xa0d10bff, 0x0102, 1500),
+        'audioStop': p.build_audio_stop(0xa0d10bff, 0x0102),
+        'audioStatus': p.build_audio_status_request(0xa0d10bff),
     }
     destination = root / 'apps/nightfire_controller/test/fixtures/master_golden.json'
     destination.parent.mkdir(parents=True, exist_ok=True)

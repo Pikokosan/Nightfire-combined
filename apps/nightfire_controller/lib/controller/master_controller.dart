@@ -55,8 +55,45 @@ class MasterController {
     }
   }
 
+  /// The audio box a chase run follows (audio_box/design.md); null
+  /// for a timed run.
+  ({int uid, int track})? chase;
+
+  /// The box's last status during a chase run.
+  AudioStatus? audioStatus;
+
+  /// Cues a finished chase run did not fire.
+  int chaseUnfired = 0;
+  int _audioStatusAtMs = 0;
+  int _audioMisses = 0;
+  int _chaseTicks = 0;
+  bool _chaseLive = false; // AUDIO_PLAY confirmed
+
+  /// Box status is read every [audioStatusEvery] heartbeats (1 s); this many
+  /// unanswered reads in a row end the run.
+  int audioStatusEvery = 5;
+  int audioMissLimit = 3;
+
+  /// Modules give up 10 s after a chase START without SHOW_TIME
+  /// (`chase_wait_ms`), so the box must be playing well before that.
+  static const chaseStartBudgetMs = 8000;
+
+  void _endChase() {
+    chase = null;
+    _chaseLive = false;
+  }
+
   int get ticks => _clock.elapsedMilliseconds & 0x3fffffff;
-  int get elapsedMs => running ? _clock.elapsedMilliseconds - _startMs : 0;
+  int get elapsedMs {
+    if (!running) return 0;
+    if (chase == null) return _clock.elapsedMilliseconds - _startMs;
+    final audio = audioStatus;
+    if (audio == null) return 0;
+    return audio.positionMs +
+        (audio.state == ShowState.playing
+            ? _clock.elapsedMilliseconds - _audioStatusAtMs
+            : 0);
+  }
   bool get supported =>
       session.ready && isMasterFirmware(session.values['Firmware']);
   bool get available => supported && !session.busy && !interrupted && !stopping;
@@ -83,6 +120,8 @@ class MasterController {
     stepping = false;
     pausedAtMs = null;
     completed = false;
+    _endChase();
+    audioStatus = null;
     interrupted = true;
     status = 'Session ended. Remote arm state is unknown.';
   }
@@ -134,20 +173,39 @@ class MasterController {
     List<int>? frame,
     Duration? timeout,
   ]) async {
+    final code = await _ackCode(
+      uid,
+      command,
+      epoch,
+      frame ?? masterUnique(uid, command, data),
+      timeout,
+    );
+    if (code != 0) {
+      throw StateError('Module did not acknowledge command $command');
+    }
+  }
+
+  /// The ACK code a module answers [frame] with (0 = OK).
+  Future<int> _ackCode(
+    int uid,
+    int command,
+    int epoch,
+    List<int> frame, [
+    Duration? timeout,
+  ]) async {
     _check(epoch);
     final reply = await session._queryModule(
       uid,
       command,
       0x50,
-      frame: frame ?? masterUnique(uid, command, data),
+      frame: frame,
       timeout: timeout,
     );
     _check(epoch);
-    if (reply.data.length != 2 ||
-        reply.data[0] != command ||
-        reply.data[1] != 0) {
+    if (reply.data.length != 2 || reply.data[0] != command) {
       throw StateError('Module did not acknowledge command $command');
     }
+    return reply.data[1];
   }
 
   Future<void> _broadcast(
@@ -299,11 +357,18 @@ class MasterController {
   Future<void> _finishRun() async {
     _scriptTimer?.cancel();
     _scriptTimer = null;
+    final chased = chase != null;
+    _endChase();
     running = false;
     pausedAtMs = null;
     completed = true;
     if (await disarmAll()) {
       status = 'Script complete; all modules disarmed';
+      if (chased && chaseUnfired > 0) {
+        status = 'Show complete; $chaseUnfired cue(s) not fired '
+            '(the audio jumped past them, or a module lost the timecode); '
+            'all modules disarmed';
+      }
     } else {
       await emergencyStop();
       status = 'Script complete; DISARM not confirmed for every module. Press Disarm.';
@@ -332,6 +397,9 @@ class MasterController {
     if (pending != null && !pending.isCompleted) {
       pending.completeError(StateError('Stopped by operator'));
     }
+    // Stopping the music is a courtesy: the modules stop on STOP/DISARM.
+    final box = chase;
+    _endChase();
     status = 'Sending STOP and DISARM; remote state unconfirmed';
     session.notifyListeners();
     Object? failure;
@@ -339,6 +407,7 @@ class MasterController {
       for (final frame in [
         masterBroadcast(0x73, [0, 0]),
         masterBroadcast(0x11),
+        if (box != null) audioStop(box.uid, box.track),
       ]) {
         try {
           await session._request(0x10, frame);
@@ -719,6 +788,7 @@ class MasterController {
         }
         stepIndex = eventTimes.indexWhere((time) => time >= offsetMs);
         completed = false;
+        _endChase();
         if (step) {
           pausedAtMs = null;
           stepping = true;
@@ -769,6 +839,173 @@ class MasterController {
         }
       });
 
+  /// Starts the uploaded show following an audio box: every module gets a
+  /// chase START naming [boxUid] and [trackId], then the box is told to
+  /// play. Cues fire on the music's position, [audioOffsetMs] later
+  /// (negative: earlier). Firmware that does not follow an audio box is
+  /// refused before anything is sent; a module that still answers a chase
+  /// START with a plain ACK (it would run on its own clock) is stopped.
+  Future<bool> startChase({
+    required int boxUid,
+    required int trackId,
+    int audioOffsetMs = 0,
+  }) => _operation('Start show with audio', (epoch) async {
+    if (document == null ||
+        uploaded.isEmpty ||
+        running ||
+        stepping ||
+        uploaded.keys.any((uid) => !armed.contains(uid))) {
+      throw StateError('Upload and arm every script module first');
+    }
+    if (!bridgeSupportsChase(session.values['Firmware'])) {
+      throw StateError(
+        'Following an audio box needs bridge firmware usb-master-0.4.7 or later',
+      );
+    }
+    if (uploaded.containsKey(boxUid)) {
+      throw StateError('The audio box cannot also be a script module');
+    }
+    if (trackId < 0 || trackId > 0xffff) {
+      throw StateError('Track must be 0-65535');
+    }
+    for (final uid in uploaded.keys) {
+      final module = session.modules[uid];
+      final info = module?.info ?? const <String, String>{};
+      if (!moduleSupportsChase(info['App'], info['Firmware'])) {
+        throw StateError(
+          '${module?.id ?? uid} runs ${info['App'] ?? '?'} '
+          '${info['Firmware'] ?? '?'}; following an audio box needs '
+          'field-module 0.3.3 or nrf-dummy 0.2.3 or later',
+        );
+      }
+    }
+    // Built first: a bad box UID or offset fails before anything is sent.
+    final starts = {
+      for (final uid in uploaded.keys)
+        uid: scriptStartChase(uid, scriptId!, boxUid, trackId, audioOffsetMs),
+    };
+    final play = audioPlay(boxUid, trackId);
+    stepIndex = 0;
+    completed = false;
+    pausedAtMs = null;
+    skippedOnPause = 0;
+    _runOffsetMs = 0;
+    chase = (uid: boxUid, track: trackId);
+    audioStatus = null;
+    chaseUnfired = 0;
+    _audioMisses = 0;
+    _chaseTicks = 0;
+    _chaseLive = false;
+    running = true;
+    // Modules need the bridge heartbeat while they wait for the music.
+    _scriptTimer = Timer.periodic(
+      const Duration(milliseconds: 200),
+      (_) => unawaited(_scriptHeartbeat(epoch)),
+    );
+    final begun = _clock.elapsedMilliseconds;
+    void inTime() {
+      if (_clock.elapsedMilliseconds - begun > chaseStartBudgetMs) {
+        throw StateError('Start took too long; show stopped');
+      }
+    }
+
+    try {
+      for (final uid in uploaded.keys) {
+        final id = session.modules[uid]?.id ?? '$uid';
+        final before = await _outputStatus(uid, epoch);
+        _scriptStartSequence[uid] = before.fireSequence;
+        inTime();
+        final code = await _ackCode(uid, 0x72, epoch, starts[uid]!);
+        if (code == 0x00) {
+          // Firmware without chase mode starts on its own clock.
+          await _ack(uid, 0x73, epoch, bigEndian(scriptId!, 2));
+          throw StateError(
+            '$id started without following the audio box; stopped',
+          );
+        }
+        if (code != 0x06) {
+          throw StateError('$id did not accept the show (code $code)');
+        }
+        final started = await _outputStatus(uid, epoch);
+        if (!started.armed ||
+            !started.driverEnabled ||
+            !started.scriptRunning) {
+          throw StateError('Field module did not confirm script start');
+        }
+      }
+      inTime();
+      await _ack(boxUid, 0x7a, epoch, const [], play);
+      _audioStatusAtMs = _clock.elapsedMilliseconds;
+      _chaseLive = true;
+    } catch (_) {
+      await emergencyStop();
+      rethrow;
+    }
+  });
+
+  /// One box status read during a chase run. The modules follow the box's
+  /// SHOW_TIME on their own; this only tells the app where the show is and
+  /// when it is over.
+  Future<void> _checkAudio(int epoch) async {
+    final box = chase!;
+    final AudioStatus audio;
+    try {
+      _check(epoch);
+      final reply = await session._queryModule(
+        box.uid,
+        0x7c,
+        0x7d,
+        frame: moduleQuery(box.uid, 0x7c),
+      );
+      _check(epoch);
+      audio = AudioStatus.parse(reply.data);
+    } on TimeoutException {
+      if (++_audioMisses >= audioMissLimit) {
+        throw StateError('Audio box stopped answering');
+      }
+      return;
+    }
+    _audioMisses = 0;
+    if (audio.trackId != box.track) {
+      throw StateError('Audio box is playing another track');
+    }
+    audioStatus = audio;
+    _audioStatusAtMs = _clock.elapsedMilliseconds;
+    switch (audio.state) {
+      case ShowState.playing || ShowState.paused:
+        return;
+      case ShowState.stopped:
+        throw StateError('Audio box stopped the track');
+      case ShowState.ended:
+        await _finishChase(epoch);
+    }
+  }
+
+  /// The track ended: the modules stopped on its last SHOW_TIME. STOP makes
+  /// sure, then each module's fire counter says how many cues fired.
+  Future<void> _finishChase(int epoch) async {
+    final stop = bigEndian(scriptId!, 2);
+    for (var i = 0; i < 3; i++) {
+      await _broadcast(0x73, epoch, stop);
+    }
+    var unfired = 0;
+    for (final module in uploaded.entries) {
+      final output = await _outputStatus(module.key, epoch);
+      final fired =
+          (output.fireSequence -
+              (_scriptStartSequence[module.key] ?? output.fireSequence)) &
+          0xffffffff;
+      if (fired > module.value.length) {
+        throw StateError(
+          '${session.modules[module.key]!.id} reported more outputs than scheduled',
+        );
+      }
+      unfired += module.value.length - fired;
+    }
+    chaseUnfired = unfired;
+    await _finishRun();
+  }
+
   Future<void> _scriptHeartbeat(int epoch) async {
     if (_heartbeatBusy || !running) return;
     _heartbeatBusy = true;
@@ -777,6 +1014,13 @@ class MasterController {
         ...bigEndian(scriptId!, 2),
         ...bigEndian(elapsedMs.clamp(0, 0xffffffff), 4),
       ]);
+      if (chase != null) {
+        if (_chaseLive && ++_chaseTicks % audioStatusEvery == 0) {
+          await _checkAudio(epoch);
+        }
+        session.notifyListeners();
+        return;
+      }
       if (elapsedMs > eventTimes.last + 1000) {
         for (final module in uploaded.entries) {
           final output = await _outputStatus(module.key, epoch);
@@ -836,6 +1080,10 @@ class MasterController {
   /// resumed run never fires an event twice.
   Future<bool> pauseScript() => _operation('Pause script', (epoch) async {
     if (!running) throw StateError('No script is running');
+    if (chase != null) {
+      // The music sets the show's time; a resume could not line up with it.
+      throw StateError('A show following the audio box cannot be paused');
+    }
     await _haltScript(epoch);
     final stoppedAt = elapsedMs;
     running = false;
@@ -894,6 +1142,12 @@ class MasterController {
     stepping = false;
     pausedAtMs = null;
     skippedOnPause = 0;
+    final box = chase;
+    _endChase();
+    if (box != null) {
+      // The modules are already stopped; now the music.
+      await _ack(box.uid, 0x7b, epoch, const [], audioStop(box.uid, box.track));
+    }
   });
 
   Future<bool> nextStep() => _operation('Step event', (epoch) async {

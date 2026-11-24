@@ -58,7 +58,8 @@ import types
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MAIN_DIR = os.path.join(ROOT, "main")
-SIM_DIR = os.path.dirname(os.path.abspath(__file__))   # sim-only nodes (sim_audio_node.py)
+SIM_DIR = os.path.dirname(os.path.abspath(__file__))   # sim-only nodes
+AUDIO_SIM_DIR = os.path.join(ROOT, "audio_box", "sim")   # simulated audio box (sim_audio_node.py)
 if MAIN_DIR not in sys.path:
     sys.path.append(MAIN_DIR)
 
@@ -954,7 +955,7 @@ class Node(object):
         source = self.files.get(name + ".py")
         path = None
         if source is None:
-            for directory in (self.src_dir, MAIN_DIR, SIM_DIR):
+            for directory in (self.src_dir, MAIN_DIR, SIM_DIR, AUDIO_SIM_DIR):
                 candidate = os.path.join(directory, name + ".py")
                 if os.path.exists(candidate):
                     path = candidate

@@ -251,7 +251,7 @@ def field_fw(sim):
 
 
 # ---------------------------------------------------------------------------
-# Audio box chase (docs/audio_sync_design.md)
+# Audio box chase (audio_box/design.md)
 # ---------------------------------------------------------------------------
 CHASE_TRACK = 0x0007
 CHASE_GOAL_MS = 10.0              # cue vs the audio box's position

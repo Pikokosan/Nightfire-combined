@@ -51,7 +51,7 @@ class MasterTests(unittest.TestCase):
             self.assertIsNotNone(decode_master(frame), frame.hex())
 
     def test_unknown_commands_and_bad_lengths_rejected(self):
-        no_data_allowed = {0x10, 0x11, 0x22, 0x24, 0x27, 0x29, 0x52, 0x64, 0x7f}
+        no_data_allowed = {0x10, 0x11, 0x22, 0x24, 0x27, 0x29, 0x52, 0x64, 0x7c, 0x7f}
         for command in range(256):
             self.assertEqual(decode_master(self.p.build_unique_command(self.uid, command)) is not None,
                              command in no_data_allowed)
@@ -59,6 +59,38 @@ class MasterTests(unittest.TestCase):
                       self.p.build_unique_fire(self.uid, 0),
                       self.p.build_script_load(self.uid, 1, 0, [])):
             self.assertIsNone(decode_master(frame))
+
+    def test_chase_start_and_audio_commands(self):
+        box = 0xA0D10B0C
+        chase = self.p.build_script_start_chase(self.uid, 1, box, 7, -40)
+        audio = [self.p.build_audio_load(box, 7), self.p.build_audio_play(box, 7, 0),
+                 self.p.build_audio_stop(box, 7), self.p.build_audio_status_request(box)]
+        for frame in [chase] + audio:
+            self.assertIsNotNone(decode_master(frame), frame.hex())
+        # Other START lengths, audio commands with the wrong length, and
+        # SHOW_TIME (the box's own broadcast) are refused.
+        for frame in (self.p.build_unique_command(self.uid, 0x72, bytes(13)),
+                      self.p.build_unique_command(self.uid, 0x72, bytes(19)),
+                      self.p.build_unique_command(box, 0x7A, bytes(2)),
+                      self.p.build_unique_command(box, 0x7B, b''),
+                      self.p.build_unique_command(box, 0x7C, b'\x00'),
+                      self.p.build_show_time_broadcast(7, 0),
+                      self.p.build_unique_command(box, 0x77, bytes(7))):
+            self.assertIsNone(decode_master(frame), frame.hex())
+
+    def test_chase_start_needs_arm_and_audio_never_does(self):
+        box = 0xA0D10B0C
+        chase = self.p.build_script_start_chase(self.uid, 1, box, 7)
+        play = self.p.build_audio_play(box, 7, 0)
+        self.assertFalse(self.master.permit(chase, True))      # not armed here
+        self.assertTrue(self.master.permit(play, True))
+        self.master.permit(self.p.build_arm_unique(self.uid), True, 2)
+        self.assertFalse(self.master.permit(chase, True, 1))   # ARM key off
+        self.assertTrue(self.master.permit(chase, True, 2))
+        self.assertTrue(self.master.permit(play, True, 1))     # armed, key off: still fine
+        # AUDIO_STOP stops things, so it goes out even without the app.
+        self.assertFalse(self.master.permit(play, False))
+        self.assertTrue(self.master.permit(self.p.build_audio_stop(box, 7), False))
 
     def test_crc_escaping_concatenation_and_source(self):
         frame = self.p.build_arm_unique(self.uid)

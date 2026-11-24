@@ -94,6 +94,13 @@ list.
 
 The Android controller app (Flutter). See its `README.md`.
 
+## `audio_box/`
+
+The audio box: the mesh node that plays a show's soundtrack and broadcasts
+its position. See its `README.md`. Only box-specific files live here; the
+protocol, mesh, module, bridge and app code it shares stays in `main/` and
+`apps/`.
+
 ## `docs/`
 
 | File | About |
@@ -103,7 +110,6 @@ The Android controller app (Flutter). See its `README.md`.
 | `command_interface_wiring.md` | Bridge switch and LED wiring, USB status protocol |
 | `field_module_pinout.md`, `field_module_lcd.md` | Field-module pins, LCD and buttons |
 | `mesh_radio_design.md` | Mesh radio design and test results |
-| `audio_sync_design.md` | Audio box and timecode sync design (draft) |
 | `android_command_module.md`, `android_master_port.md` | App design notes |
 | `script_workspace.md`, `ui_backlog.md` | App scripting and UI plans |
 | `esp32_master.md` | The older ESP32 touchscreen master |
@@ -116,6 +122,7 @@ write; delete old backups when you no longer need them.
 
 ## Where new files go
 
+- Audio box files: `audio_box/`.
 - New board code: `main/`. If a device needs it, add it to that device's
   install script in `scripts/install/`.
 - A new kind of device config: `main/configs/`.

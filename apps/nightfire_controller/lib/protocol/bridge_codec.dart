@@ -235,3 +235,35 @@ const bridgeFirmwareFiles = [
 String? embeddedBridgeVersion(List<int> bytes) => RegExp(
   r'usb-master-\d+\.\d+\.\d+',
 ).firstMatch(latin1.decode(bytes))?.group(0);
+
+bool _atLeast(List<int> version, List<int> minimum) {
+  for (var i = 0; i < minimum.length; i++) {
+    if (version[i] != minimum[i]) return version[i] > minimum[i];
+  }
+  return true;
+}
+
+List<int>? _version(String? text, RegExp pattern) {
+  final match = pattern.firstMatch(text ?? '');
+  if (match == null) return null;
+  return [for (var i = 1; i <= 3; i++) int.parse(match.group(i)!)];
+}
+
+/// usb-master 0.4.7+ passes the chase SCRIPT_START and the audio box
+/// commands (audio_box/design.md); older bridges refuse them.
+bool bridgeSupportsChase(String? firmware) {
+  final version = _version(firmware, RegExp(r'^usb-master-(\d+)\.(\d+)\.(\d+)'));
+  return version != null && _atLeast(version, [0, 4, 7]);
+}
+
+/// Module firmware that follows an audio box: field-module 0.3.3+ and
+/// nrf-dummy 0.2.3+. `app` and `firmware` are the module's INFO fields.
+bool moduleSupportsChase(String? app, String? firmware) {
+  final minimum = switch (app) {
+    'field-module' => [0, 3, 3],
+    'nrf-dummy' => [0, 2, 3],
+    _ => null,
+  };
+  final version = _version(firmware, RegExp(r'^(\d+)\.(\d+)\.(\d+)$'));
+  return minimum != null && version != null && _atLeast(version, minimum);
+}

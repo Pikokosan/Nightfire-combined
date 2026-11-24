@@ -1,6 +1,6 @@
 # Script engine shared by the field and dummy module firmware: time sync,
 # script upload, start/stop/heartbeat, step mode, chase mode (cues follow an
-# audio box's SHOW_TIME, docs/audio_sync_design.md) and the scheduler.
+# audio box's SHOW_TIME, audio_box/design.md) and the scheduler.
 #
 # The firmware passes a "node" object. ScriptEngine calls:
 #   node.fire(mask)        -> ACK_OK or a NACK code
@@ -24,7 +24,7 @@ class ScriptEngine:
         self.max_entries = max_entries
         self.heartbeat_timeout_ms = heartbeat_timeout_ms
         self.sync_valid_ms = sync_valid_ms
-        # Chase mode (docs/audio_sync_design.md): cues follow an audio box's
+        # Chase mode (audio_box/design.md): cues follow an audio box's
         # SHOW_TIME. Stop if it goes quiet for chase_timeout_ms once locked,
         # or never arrives within chase_wait_ms of the START.
         self.chase_timeout_ms = chase_timeout_ms
