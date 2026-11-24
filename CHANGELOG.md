@@ -25,7 +25,7 @@ run).
 
 ## 2026-11-24
 
-### Bridge usb-master-0.4.7 — chase START and audio box commands (audio box sync, step 2)
+### Bridge usb-master-0.4.7 — chase START and audio box commands (audio box sync, step 2) — `67aa272`
 - **Added:** the app may send SCRIPT_START with 18 bytes (chase mode) as
   well as 12. It is still an arming command: ARM key on, and a module
   this bridge armed.
@@ -40,7 +40,7 @@ run).
 - **Note:** not installed on the COM12 bridge yet. Build it with
   `py -3 scripts/build/build_usb_master_bundle.py` (28,827 bytes).
 
-### App — follow an audio box (audio box sync, step 2)
+### App — follow an audio box (audio box sync, step 2) — `67aa272`
 - **Added:** `MasterController.startChase()`.
   - It refuses before sending anything unless the bridge is
     usb-master-0.4.7+ and every script module reports field-module 0.3.3+
@@ -69,7 +69,7 @@ run).
   table (AUDIO_STATUS_RSP; the track length moved there from
   AUDIO_LOAD's ACK), step 2 marked done.
 
-### Tools — audio box gets its own folder
+### Tools — audio box gets its own folder — `67aa272`
 - **Moved:** `docs/audio_sync_design.md` → `audio_box/design.md`;
   `scripts/sim/sim_audio_node.py` → `audio_box/sim/sim_audio_node.py`
   (the simulator also looks in `audio_box/sim/`). New
