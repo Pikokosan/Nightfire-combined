@@ -74,8 +74,11 @@ run on a board, not on the PC.
 
 ## `android/`
 
-App build (`build_android_app.ps1`), tablet emulator and USB passthrough,
-the emulator serial relay, app icons.
+Tablet emulator and USB passthrough, the emulator serial relay, and
+`export_master_android_goldens.py`, which writes the app's NFCP test
+fixtures into nightfire-app (`--app`, or `NIGHTFIRE_APP`; default the
+sibling folder `../../nightfire-app`). The app build and icon scripts
+moved to nightfire-app's `tool/`.
 
 ## `lib/`: shared helpers
 

@@ -1,5 +1,11 @@
-"""Generate Dart parity fixtures from the original MicroPython NFCP builders."""
+"""Generate Dart parity fixtures from the original MicroPython NFCP builders.
+
+Writes into the nightfire-app repo: --app PATH, or NIGHTFIRE_APP, or the
+sibling folder ../../nightfire-app.
+"""
+import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -8,7 +14,16 @@ sys.path.insert(0, str(root / 'main'))
 import nfcp
 
 
+def app_root():
+    return Path(os.environ.get('NIGHTFIRE_APP') or root.parents[1] / 'nightfire-app')
+
+
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--app', type=Path, default=app_root(), help='nightfire-app folder')
+    args = ap.parse_args()
+    if not (args.app / 'pubspec.yaml').exists():
+        sys.exit('nightfire-app not found at %s (use --app)' % args.app)
     p = nfcp.NFCP(1)
     uid = 0x12ff5678
     frames = {
@@ -39,7 +54,7 @@ def main():
         'audioStop': p.build_audio_stop(0xa0d10bff, 0x0102),
         'audioStatus': p.build_audio_status_request(0xa0d10bff),
     }
-    destination = root / 'apps/nightfire_controller/test/fixtures/master_golden.json'
+    destination = args.app / 'test/fixtures/master_golden.json'
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps({key: list(value) for key, value in frames.items()}, indent=2) + '\n')
     print('Wrote', len(frames), 'original NFCP frames to', destination)

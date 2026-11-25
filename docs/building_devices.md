@@ -11,7 +11,7 @@ the steps in order. Every command runs in PowerShell from the repository root
 | **USB bridge** (dongle) | Plugs into the Android tablet; radio link to every module | nice!nano v2 (nRF52840) | `main/nrf_usb_monitor_main.py` |
 | **Field module** | Fires cues, checks continuity | MS88SFA field-module PCB, or a Pro Micro nRF52840 test board | `main/field_main.py` |
 | **Dummy module** | Behaves like a field module with no outputs; for bench and range tests | Any nice!nano / Pro Micro nRF52840 | `main/nrf_dummy_main.py` |
-| **Controller app** | The Android app that runs the show | Android 7+ tablet with USB host (OTG) | `apps/nightfire_controller` |
+| **Controller app** | The Android app that runs the show | Android 7+ tablet with USB host (OTG) | [nightfire-app](https://github.com/Pikokosan/nightfire-app) repo |
 
 All the boards run the same custom MicroPython build. Only the files copied
 onto each board differ.
@@ -163,14 +163,14 @@ the PC, to see its side of the conversation.
 
 ## 5. Install the app and connect
 
-1. Build the app (needs Flutter and the Android SDK; see
-   `apps/nightfire_controller/README.md`):
+1. Build the app (needs Flutter and the Android SDK; see the
+   [nightfire-app](https://github.com/Pikokosan/nightfire-app) README). From the nightfire-app folder:
 
    ```powershell
-   ./scripts/android/build_android_app.ps1 -JdkPath 'C:/Program Files/Java/jdk-23' -Check
+   ./tool/build_android_app.ps1 -JdkPath 'C:/Program Files/Java/jdk-23' -Check
    ```
 
-   The APK is `apps/nightfire_controller/build/app/outputs/flutter-apk/app-debug.apk`.
+   The APK is `build/app/outputs/flutter-apk/app-debug.apk` in nightfire-app.
 2. Install it on the tablet: copy the APK over and open it, or with USB
    debugging on, `adb install -r <apk>`.
 3. Plug the bridge into the tablet through a USB OTG adapter or hub.

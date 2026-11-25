@@ -87,19 +87,22 @@ list.
 | `bench/` | Tests that drive real boards |
 | `diagnostics/` | Probes and one-off checks |
 | `sim/` | Mesh simulator, firmware trace harnesses, PC module emulator |
-| `android/` | App build, tablet emulator, icons |
+| `android/` | Tablet emulator, USB passthrough, app test fixtures |
 | `lib/` | Helpers the other scripts import |
 
-## `apps/nightfire_controller/`
+## The app
 
-The Android controller app (Flutter). See its `README.md`.
+The Android controller app (Flutter) is in its own repo,
+[nightfire-app](https://github.com/Pikokosan/nightfire-app), checked out next to this one
+(`../../nightfire-app`). It moved there on 2026-11-25 with its history,
+its build and icon scripts (`tool/`) and its design notes (`docs/`).
 
 ## `audio_box/`
 
 The audio box: the mesh node that plays a show's soundtrack and broadcasts
 its position. See its `README.md`. Only box-specific files live here; the
-protocol, mesh, module, bridge and app code it shares stays in `main/` and
-`apps/`.
+protocol, mesh, module and bridge code it shares stays in `main/`; the app
+code is in nightfire-app.
 
 ## `docs/`
 
@@ -110,8 +113,6 @@ protocol, mesh, module, bridge and app code it shares stays in `main/` and
 | `command_interface_wiring.md` | Bridge switch and LED wiring, USB status protocol |
 | `field_module_pinout.md`, `field_module_lcd.md` | Field-module pins, LCD and buttons |
 | `mesh_radio_design.md` | Mesh radio design and test results |
-| `android_command_module.md`, `android_master_port.md` | App design notes |
-| `script_workspace.md`, `ui_backlog.md` | App scripting and UI plans |
 | `esp32_master.md` | The older ESP32 touchscreen master |
 
 ## Not in git

@@ -21,12 +21,30 @@ run).
 | Dummy | nrf-dummy 0.2.5 | Chase mode, SHOW_TIME log, RC calibration. Not on hardware (the only dummy, COM18, is now the audio box). |
 | Audio box | audio-box 0.2.0 | Fake clock or the ESP32 player (`PLAYER = "uart"`, not on hardware). COM18 runs 0.1.1 (fake clock). On the old LCD dummy (COM18), which no longer runs nrf-dummy; restore with `upload_nrf_dummy.ps1 -Port COM18 -ConfigPath main/configs/dummy_lcd.py`. |
 | Audio player | audio-player 0.1.0 | ESP32 + PCM5102A. Not on hardware yet. |
-| App | 0.4.0 (build 4) | |
+| App | 0.4.0 (build 4) | In its own repo, [nightfire-app](https://github.com/Pikokosan/nightfire-app), since 2026-11-25. App changes before then are below. |
 | nRF image | 2026-11-06 build | On the field modules and dummies. The COM12 bridge runs the 2026-11-23 background-receive build: A/B retries 0.11% against 0.44%. |
 
 ## Unreleased
 
 ## 2026-11-25
+
+### Repo — the app moves to its own repo, nightfire-app
+- **Moved:** `apps/nightfire_controller/` is now the nightfire-app repo
+  (`git subtree split`, so its 10 commits come along), checked out next to
+  this one at `../../nightfire-app`. With it went the app build and icon
+  scripts (now its `tool/`) and the app design notes
+  (`android_command_module.md`, `android_master_port.md`,
+  `script_workspace.md`, `ui_backlog.md`, now its `docs/`).
+- **Changed:** `export_master_android_goldens.py` writes the app's NFCP
+  fixtures into nightfire-app (`--app`, `NIGHTFIRE_APP`, or the sibling
+  folder); the output is unchanged. `test_usb_master_bundle.py` reads the
+  app's `bridge_codec.dart` from there and skips that check if the app
+  isn't checked out.
+- **Changed:** README, `project_layout.md`, `building_devices.md` and
+  `scripts/README.md` point to nightfire-app; `.vscode/settings.json` no
+  longer names the app's CMake folder; `.gitignore` ignores the old
+  `/apps/` folder (local build output only).
+- **Tests:** all 24 test files pass.
 
 ### Repo — on GitHub, GPL v3 licence — `2ed4732`
 - **Added:** the GitHub repo (`github` remote,

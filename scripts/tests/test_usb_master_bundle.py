@@ -1,4 +1,5 @@
 import ast
+import os
 import sys
 from pathlib import Path
 import unittest
@@ -39,7 +40,12 @@ class BundleTests(unittest.TestCase):
     def test_the_bridge_accepts_every_file_the_app_may_send(self):
         import re
         root = Path(__file__).resolve().parents[2]
-        dart = (root / 'apps/nightfire_controller/lib/protocol/bridge_codec.dart').read_text(encoding='utf-8')
+        # The app is its own repo (nightfire-app), usually next to this one.
+        app = Path(os.environ.get('NIGHTFIRE_APP') or root.parents[1] / 'nightfire-app')
+        codec = app / 'lib/protocol/bridge_codec.dart'
+        if not codec.exists():
+            self.skipTest('nightfire-app not found at %s (set NIGHTFIRE_APP)' % app)
+        dart = codec.read_text(encoding='utf-8')
         listed = re.search(r'const bridgeFirmwareFiles = \[(.*?)\];', dart, re.S).group(1)
         app_files = re.findall(r"'([^']+)'", listed)
         sys.path.insert(0, str(root / 'main'))

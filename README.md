@@ -17,7 +17,7 @@ Android app ──USB── bridge (dongle) ~~radio~~ field modules / dummy modu
 | Change the bridge's status LEDs (WS2811, SK6812...) | [docs/bridge_status_leds.md](docs/bridge_status_leds.md) |
 | Wire the bridge's SAFE/ARM switch and LEDs | [docs/command_interface_wiring.md](docs/command_interface_wiring.md) |
 | Look up field-module pins | [docs/field_module_pinout.md](docs/field_module_pinout.md), [docs/field_module_lcd.md](docs/field_module_lcd.md) |
-| Build or work on the Android app | [apps/nightfire_controller/README.md](apps/nightfire_controller/README.md) |
+| Build or work on the Android app | The [nightfire-app](https://github.com/Pikokosan/nightfire-app) repo (a sibling folder, `../../nightfire-app`) |
 | Understand the mesh radio | [docs/mesh_radio_design.md](docs/mesh_radio_design.md) |
 | Sync a show to an audio box (design) | [audio_box/design.md](audio_box/design.md) |
 | Use the older ESP32 touchscreen master | [docs/esp32_master.md](docs/esp32_master.md) |
@@ -28,7 +28,6 @@ Android app ──USB── bridge (dongle) ~~radio~~ field modules / dummy modu
 
 | Folder | Contents |
 |---|---|
-| `apps/nightfire_controller/` | Android controller app (Flutter) |
 | `main/` | Code that runs on the boards, flat, as it is stored on a board |
 | `main/configs/` | One config per kind of device; installed on the board as its config file |
 | `firmware/` | MicroPython images and bootloaders (`nrf52840/`) and the source to rebuild them (`micropython/`) |
@@ -38,7 +37,7 @@ Android app ──USB── bridge (dongle) ~~radio~~ field modules / dummy modu
 | `scripts/bench/` | Tests that drive real boards |
 | `scripts/diagnostics/` | Probes and one-off checks |
 | `scripts/sim/` | Mesh simulator and firmware trace harness |
-| `scripts/android/` | App build, tablet emulator and icon tools |
+| `scripts/android/` | Tablet emulator, USB passthrough, app test fixtures |
 | `scripts/lib/` | Shared helpers the other scripts import (raw REPL upload, bridge requests) |
 | `docs/` | Guides and design notes |
 

@@ -1,4 +1,3 @@
 {
-    "python.terminal.activateEnvironment": false,
-    "cmake.sourceDirectory": "C:/Users/hog28/OneDrive/Documents/NightfirePY/Nightfire-combined/Nightfire-combined/apps/nightfire_controller/windows"
+    "python.terminal.activateEnvironment": false
 }
