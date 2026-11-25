@@ -11,10 +11,10 @@ now, and what has to be bought before the work can go on.
 | 1 | Modules follow the box's SHOW_TIME (chase mode) | Done, committed (`2cac449`). Field 0.3.3+, dummy 0.2.3+ |
 | 2 | Bridge and app start and run a chase show | Done, committed (`67aa272`). Bridge usb-master-0.4.7 on COM12. No app screen yet |
 | 3 | Box firmware on a fake clock, bench-tested | Done, committed (`57948bc`). Box on COM18, one module (COM16) followed it in 10 shows within ~2 ms by its own clock |
-| 4 | A real player and LTC | Half done, **not committed** (see below) |
+| 4 | A real player and LTC | Half done, committed (`e2a71bd`, see below) |
 | 5 | App screens: track picker, box status, audio delay, jump and loss counts | Not started |
 
-**Step 4, done (tested on the PC only, not committed):**
+**Step 4, done (tested on the PC only, committed in `e2a71bd`):**
 - `main/ltc.py`: LTC encoder and decoder (the reference for the nRF's C
   decoder). Sync times within 0.3 µs on generated audio.
 - `tools/make_ltc_track.py`: test tracks, LTC on the right, a click on the

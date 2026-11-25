@@ -28,13 +28,13 @@ run).
 
 ## 2026-11-25
 
-### Docs — audio box status and parts list
+### Docs — audio box status and parts list — `e2a71bd`
 - **Added:** `audio_box/STATUS.md`: where each step stands, what step 4
   still needs, the bench boards (COM12, COM16, COM18) and the parts to
   order (ESP32 DevKit, PCM5102A, SD card module, LTC input parts, a logic
   analyser, another nice!nano).
 
-### Audio box audio-box 0.2.0 — drives the ESP32 player (audio box sync, step 4)
+### Audio box audio-box 0.2.0 — drives the ESP32 player (audio box sync, step 4) — `e2a71bd`
 - **Added:** `audio_box/main/player_link.py`, `UartPlayer`: the box's
   driver for the ESP32 player, with the fake player's interface. Chosen in
   the config: `PLAYER = "uart"` (UART 0, P0.06 TX / P0.08 RX, 115200); the
@@ -58,7 +58,7 @@ run).
 - **Not on hardware yet.** Until the native LTC capture, SHOW_TIME runs on
   the box's clock from the player's PLAY answer.
 
-### Audio player audio-player 0.1.0 — ESP32 + PCM5102A firmware (audio box sync, step 4)
+### Audio player audio-player 0.1.0 — ESP32 + PCM5102A firmware (audio box sync, step 4) — `e2a71bd`
 - **Added:** `audio_box/player/player_main.py`, stock MicroPython on an
   ESP32 DevKit: plays `NNN.wav` (16-bit stereo, 44.1/48 kHz) from an SPI
   SD card into a PCM5102A over I2S (4 KB writes, 16 KB DMA buffer), and
@@ -75,7 +75,7 @@ run).
   ±1 ms), position against the DAC, track end, stop, jump, 44.1 kHz.
   10 of 10 rule-breaking mutations caught.
 
-### Tools — LTC encoder, decoder and test tracks (audio box sync, step 4)
+### Tools — LTC encoder, decoder and test tracks (audio box sync, step 4) — `e2a71bd`
 - **Added:** `audio_box/main/ltc.py`: SMPTE LTC frame bits, `LtcEncoder`
   (edge times) and `LtcDecoder` (edge times from a wrapping µs counter in,
   (position_ms, sync-end time) out; 24/25/30 fps; learns the bit length;
