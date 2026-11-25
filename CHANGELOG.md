@@ -28,7 +28,7 @@ run).
 
 ## 2026-11-25
 
-### Repo — on GitHub, GPL v3 licence
+### Repo — on GitHub, GPL v3 licence — `2ed4732`
 - **Added:** the GitHub repo (`github` remote,
   `git@github.com:Pikokosan/Nightfire-combined.git`). Its `main` now holds
   the Mesh work, merged with GitHub's initial commit.
