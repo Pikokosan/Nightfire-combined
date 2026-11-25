@@ -187,7 +187,7 @@ def main():
         while d:
             fields.append(d[1:1 + d[0]].decode("utf-8", "replace"))
             d = d[1 + d[0]:]
-        check("box INFO", fields[:2] == ["audio-box", "0.1.1"], " | ".join(fields[:4]))
+        check("box INFO", fields[:2] == ["audio-box", "0.2.0"], " | ".join(fields[:4]))
 
         check("DISARM acked", ack(bridge, uid, master.build_disarm_unique(uid), nfcp.CMD_DISARM) == ("ACK", 0))
         pkt = bridge.request(uid, master.build_output_status_request(uid), nfcp.CMD_OUTPUT_STATUS_RSP)

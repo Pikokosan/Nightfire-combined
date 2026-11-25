@@ -19,11 +19,82 @@ run).
 | Bridge | usb-master-0.4.7 | Chase START and audio box commands (audio box sync). On the COM12 bridge since 2026-11-24 (installed over USB, permanent; backup in `dist/bridge_backup_20261124_131832`). |
 | Field | field-module 0.3.5 | Chase mode, SHOW_TIME log, RC calibration. On COM16 since 2026-11-24 (backup of 0.3.2 in `dist/field_backup_COM16_20261124`). COM16 has no working 32 kHz crystal; calibrated it runs +389 ppm. |
 | Dummy | nrf-dummy 0.2.5 | Chase mode, SHOW_TIME log, RC calibration. Not on hardware (the only dummy, COM18, is now the audio box). |
-| Audio box | audio-box 0.1.1 | Fake clock (step 3). On the old LCD dummy (COM18), which no longer runs nrf-dummy; restore with `upload_nrf_dummy.ps1 -Port COM18 -ConfigPath main/configs/dummy_lcd.py`. |
+| Audio box | audio-box 0.2.0 | Fake clock or the ESP32 player (`PLAYER = "uart"`, not on hardware). COM18 runs 0.1.1 (fake clock). On the old LCD dummy (COM18), which no longer runs nrf-dummy; restore with `upload_nrf_dummy.ps1 -Port COM18 -ConfigPath main/configs/dummy_lcd.py`. |
+| Audio player | audio-player 0.1.0 | ESP32 + PCM5102A. Not on hardware yet. |
 | App | 0.4.0 (build 4) | |
 | nRF image | 2026-11-06 build | On the field modules and dummies. The COM12 bridge runs the 2026-11-23 background-receive build: A/B retries 0.11% against 0.44%. |
 
 ## Unreleased
+
+## 2026-11-25
+
+### Docs — audio box status and parts list
+- **Added:** `audio_box/STATUS.md`: where each step stands, what step 4
+  still needs, the bench boards (COM12, COM16, COM18) and the parts to
+  order (ESP32 DevKit, PCM5102A, SD card module, LTC input parts, a logic
+  analyser, another nice!nano).
+
+### Audio box audio-box 0.2.0 — drives the ESP32 player (audio box sync, step 4)
+- **Added:** `audio_box/main/player_link.py`, `UartPlayer`: the box's
+  driver for the ESP32 player, with the fake player's interface. Chosen in
+  the config: `PLAYER = "uart"` (UART 0, P0.06 TX / P0.08 RX, 115200); the
+  default stays `"fake"`. LOAD asks the player for the track and its real
+  length; PLAY checks the range and starts the box's clock when the player
+  confirms; switching to an unloaded track sends STOP, LOAD, PLAY; STOP
+  stops the box at once whatever the player says.
+- **Safety (fail-stop):** STATUS every 500 ms. The player ending ends the
+  track; the player stopped, on another track, more than 150 ms off the
+  box's clock, or 2 polls unanswered: the box stops the track itself
+  (`AUDIO player fault: ...`), sends 4 `stopped` SHOW_TIME and goes quiet.
+- **Changed:** `audio_main.py` prints `AUDIO stopped` (not `ended`) when the
+  player link stops a track; INFO says `player-clock` with the real player.
+  The install script copies `player_link.py`; the default config lists the
+  player settings.
+- **Tests:** `scripts/tests/test_player_link.py` (14): the driver against
+  the real player code through a fake UART on one clock; the box's
+  position 1 ms behind the DAC; track end, early end, stop, dead and
+  stalled players, busy, switching tracks; 11 of 11 mutations caught.
+  `test_audio_box.py`: a player fault sends `stopped` (18 tests).
+- **Not on hardware yet.** Until the native LTC capture, SHOW_TIME runs on
+  the box's clock from the player's PLAY answer.
+
+### Audio player audio-player 0.1.0 — ESP32 + PCM5102A firmware (audio box sync, step 4)
+- **Added:** `audio_box/player/player_main.py`, stock MicroPython on an
+  ESP32 DevKit: plays `NNN.wav` (16-bit stereo, 44.1/48 kHz) from an SPI
+  SD card into a PCM5102A over I2S (4 KB writes, 16 KB DMA buffer), and
+  takes commands from the box's nRF over UART: PING, LIST, LOAD, PLAY
+  (restart = jump), STOP, STATUS, with ERR replies and an unasked
+  `ENDED n`. Drains the buffer with silence at the end; STOP and the end
+  close I2S and mute the DAC (XSMT). Reported position within ~21 ms of
+  the DAC (the nRF will check it against the LTC). Not on hardware yet.
+- **Added:** `player_config.py` (pins), `player_boot.py`,
+  `scripts/install/upload_audio_player.ps1`; wiring in `audio_box/README.md`.
+- **Tests:** `scripts/tests/test_audio_player.py` (12) with a fake I2S that
+  drains in real time: WAV headers (and refusals), every command, seeking
+  (the LTC decoded from the output after `PLAY 7 1500` starts at 1500 ms
+  ±1 ms), position against the DAC, track end, stop, jump, 44.1 kHz.
+  10 of 10 rule-breaking mutations caught.
+
+### Tools — LTC encoder, decoder and test tracks (audio box sync, step 4)
+- **Added:** `audio_box/main/ltc.py`: SMPTE LTC frame bits, `LtcEncoder`
+  (edge times) and `LtcDecoder` (edge times from a wrapping µs counter in,
+  (position_ms, sync-end time) out; 24/25/30 fps; learns the bit length;
+  2 frames in sequence to lock; drops the lock on a gap). The reference
+  for the nRF's native decoder to come.
+- **Added:** `audio_box/tools/make_ltc_track.py`: stereo WAV test tracks,
+  LTC on the right (-10 dBFS, ~25 µs edges), a click on the left at each
+  cue; options for start frame, speed, noise and polarity.
+- **Tests:** `scripts/tests/test_ltc.py` (16): frame bits and polarity
+  bit, every rate, lock, counter wrap, ±3% speed, mid-frame start,
+  dropout and relock, glitches, random edges never lock, and generated
+  audio through an emulated comparator (48 and 44.1 kHz, inverted, -30
+  dBFS, noise with hysteresis): sync-word end within 0.3 µs clean, 5 µs
+  noisy.
+- **Docs:** player decided (ESP32 + PCM5102A); step 4 plan in
+  `audio_box/design.md`.
+- **Fixed:** `.gitignore`'s `tools/` ignored every folder of that name, so
+  `audio_box/tools/` would never have been committed; now `/tools/` (the
+  local toolchain folder at the root only).
 
 ## 2026-11-24
 

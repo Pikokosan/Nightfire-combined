@@ -64,7 +64,13 @@ class _Pin(object):
         return 1
 
 
+class _Uart(object):
+    def __init__(self, *args, **kwargs):
+        pass
+
+
 fake_machine.Pin = _Pin
+fake_machine.UART = _Uart
 fake_machine.reset = lambda: None
 fake_machine.unique_id = lambda: b"\x00\x00\x00\x01"
 
@@ -305,6 +311,31 @@ class StopTests(BoxTest):
         self.assertEqual((reply["cmd"], reply["data"][1]), (BOX.CMD_NACK, BOX.NACK_BAD_LENGTH))
         self.assertEqual(self.status()[2], BOX.SHOW_STOPPED)
 
+    def test_player_fault_sends_stopped(self):
+        # A real player (player_link.UartPlayer) can stop the track itself
+        # when the ESP32 stops answering: advance() says so with state
+        # stopped, and the box tells the modules at once.
+        self.play()
+        self.run_ms(500)
+        player = BOX.box.player
+        real_advance = player.advance
+
+        def faulty(now_us):
+            player.state = BOX.SHOW_STOPPED
+            player.advance = real_advance
+            return True
+
+        player.advance = faulty
+        at = clock["us"]
+        try:
+            self.run_ms(1500)
+        finally:
+            player.__dict__.pop("advance", None)
+        msgs = self.messages(at)
+        self.assertEqual([p["state"] for t, p in msgs], [BOX.SHOW_STOPPED] * 4)
+        self.assertIn("AUDIO stopped track=7", self.out.getvalue())
+        self.assertNotIn("AUDIO ended", self.out.getvalue())
+
     def test_stop_when_idle_acks_and_sends_nothing(self):
         start = clock["us"]
         self.assertEqual(self.stop(), BOX.ACK_OK)
@@ -409,7 +440,7 @@ class CommandTests(BoxTest):
         while data:
             fields.append(data[1:1 + data[0]].decode())
             data = data[1 + data[0]:]
-        self.assertEqual(fields[:2], ["audio-box", "0.1.1"])
+        self.assertEqual(fields[:2], ["audio-box", "0.2.0"])
         self.assertTrue(fields[3].startswith("fake-clock stopped"), fields[3])
 
 

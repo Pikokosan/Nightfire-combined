@@ -17,6 +17,7 @@ script takes `-Port` (PowerShell) or `--port` (Python).
   `-ConfigPath`).
 - `upload_nrf_dummy.ps1`: dummy module (`-ConfigPath`).
 - `upload_audio_box.ps1`: audio box (`audio_box/`, `-ConfigPath`).
+- `upload_audio_player.ps1`: the audio box's ESP32 player (`audio_box/player/`).
 - `upload_field_hardware_test.ps1`, `upload_lcd_ui_test.ps1`,
   `upload_trellis_test.ps1`: stand-alone hardware tests.
 - `upload_esp32_master.ps1`, `upload_esp32_master_bridge.ps1`: the older

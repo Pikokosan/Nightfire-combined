@@ -373,7 +373,7 @@ def audio_box(sim, box_config=None):
         master = app.master
 
         info = app.info(uid)
-        s.check("box INFO", info is not None and info_fields(info)[:2] == ["audio-box", "0.1.1"],
+        s.check("box INFO", info is not None and info_fields(info)[:2] == ["audio-box", "0.2.0"],
                 str(info_fields(info)[:4]) if info else "no reply")
         nack = app.request(uid, master.build_arm_unique(uid), "arm box", nfcp.CMD_NACK)
         s.check("box refuses ARM", nack is not None and bytes(nack["data"]) ==

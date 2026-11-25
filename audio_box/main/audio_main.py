@@ -25,7 +25,7 @@ import time
 import module_ota
 import nrf_module_common
 import nrf_radio
-from machine import Pin
+from machine import Pin, UART
 from module_link import ModuleLink, encode_text_field, ticks_rand
 from mesh import MESH_DEFAULT_MAX_HOPS, MESH_RADIO_ADDRESS, mesh_build, mesh_transit_us
 from nfcp import *
@@ -37,8 +37,7 @@ except Exception:
 
 
 APP_FIRMWARE_NAME = "audio-box"
-APP_FIRMWARE_VERSION = "0.1.1"
-CLOCK_SOURCE = "fake-clock"
+APP_FIRMWARE_VERSION = "0.2.0"
 
 DEFAULT_NETWORK_ID = 0x04D2
 DEFAULT_GROUP_ID = 0x0001
@@ -80,6 +79,15 @@ FAKE_TRACK_MS = getattr(node_config, "FAKE_TRACK_MS", 600000)
 FAKE_TRACKS = getattr(node_config, "FAKE_TRACKS", None)
 LEVEL_UNKNOWN = 0xFF        # AUDIO_STATUS_RSP level: not measured
 
+# The player: "fake" (the box's own clock, no audio) or "uart" (the ESP32
+# player of audio_box/player/ on a UART, player_link.py).
+PLAYER = getattr(node_config, "PLAYER", "fake")
+PLAYER_UART_ID = getattr(node_config, "PLAYER_UART_ID", 0)
+PLAYER_UART_BAUD = getattr(node_config, "PLAYER_UART_BAUD", 115200)
+PLAYER_UART_TX_PIN = getattr(node_config, "PLAYER_UART_TX_PIN", 6)    # to the ESP32's RX
+PLAYER_UART_RX_PIN = getattr(node_config, "PLAYER_UART_RX_PIN", 8)    # from the ESP32's TX
+CLOCK_SOURCE = "player-clock" if PLAYER == "uart" else "fake-clock"
+
 # Holding this pin low (button to ground) at power-up starts pairing.
 PAIR_BUTTON_PIN = getattr(node_config, "PAIR_BUTTON_PIN", None)
 PAIR_HOLD_MS = 1000
@@ -108,6 +116,12 @@ def save_runtime_config():
             f.write("FAKE_TRACK_MS = %d\n" % FAKE_TRACK_MS)
             if FAKE_TRACKS is not None:
                 f.write("FAKE_TRACKS = %r\n" % (FAKE_TRACKS,))
+            f.write("PLAYER = %r\n" % PLAYER)
+            if PLAYER == "uart":
+                f.write("PLAYER_UART_ID = %d\n" % PLAYER_UART_ID)
+                f.write("PLAYER_UART_BAUD = %d\n" % PLAYER_UART_BAUD)
+                f.write("PLAYER_UART_TX_PIN = %d\n" % PLAYER_UART_TX_PIN)
+                f.write("PLAYER_UART_RX_PIN = %d\n" % PLAYER_UART_RX_PIN)
             if PAIR_BUTTON_PIN is None:
                 f.write("PAIR_BUTTON_PIN = None\n")
             else:
@@ -196,13 +210,25 @@ class FakePlayer:
         return playing
 
 
+def make_player():
+    if PLAYER != "uart":
+        return FakePlayer(FAKE_TRACKS, FAKE_TRACK_MS)
+    import player_link
+    try:
+        uart = UART(PLAYER_UART_ID, baudrate=PLAYER_UART_BAUD, tx=Pin(PLAYER_UART_TX_PIN),
+                    rx=Pin(PLAYER_UART_RX_PIN))
+    except TypeError:
+        uart = UART(PLAYER_UART_ID, PLAYER_UART_BAUD)
+    return player_link.UartPlayer(uart)
+
+
 class AudioBox:
     """Firmware state and the hooks module_link.py calls."""
 
     firmware_version = APP_FIRMWARE_VERSION
 
     def __init__(self):
-        self.player = FakePlayer(FAKE_TRACKS, FAKE_TRACK_MS)
+        self.player = make_player()
         self.next_show_ms = None   # when the next SHOW_TIME is due (None: quiet)
         self.tail = 0              # SHOW_TIME still to send after an end or stop
         self.sent = 0
@@ -261,7 +287,10 @@ class AudioBox:
         read_us = time.ticks_us()
         player = self.player
         if player.advance(read_us):
-            print("AUDIO ended track=%d pos=%d" % (player.track, player.position_ms()))
+            # The track ended, or (a real player) the box stopped it because
+            # the player stopped answering or drifted.
+            print("AUDIO %s track=%d pos=%d" % ("ended" if player.state == SHOW_ENDED else "stopped",
+                                                player.track, player.position_ms()))
             self.tail = SHOW_TIME_TAIL
             self.next_show_ms = time.ticks_ms()
         if self.next_show_ms is None or time.ticks_diff(time.ticks_ms(), self.next_show_ms) < 0:

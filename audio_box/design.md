@@ -286,7 +286,10 @@ AUDIO_STOP to the box.
 **Hardware.**
 - nice!nano (nRF52840) running the mesh code shared with the field modules.
   It pairs like a field module and has its own unique id.
-- Any audio player that can start a chosen track on command (UART or GPIO).
+- **Player: an ESP32 with a PCM5102A I2S DAC and an SD card** (decided
+  2026-11-24). It plays stereo WAV files from the SD card and takes
+  commands from the nRF over UART (see Step 4 plan). Chosen over a
+  DFPlayer Mini for cleaner audio and an exact sample position.
 - The player's right channel (LTC, from the track) goes back into the nRF:
   AC coupling, bias to mid-supply, then the nRF COMP peripheral or an
   external comparator. The left channel goes to the amplifier.
@@ -314,6 +317,64 @@ but loses that check.
 - Position = frame timecode as ms, plus the time since that sync edge.
 - The track's timecode should start at 00:00:00:00 at the show's zero, or
   the box is told the starting value with the track.
+- **Reference code (step 4, done):** `audio_box/main/ltc.py` has
+  `LtcEncoder` and `LtcDecoder` (24, 25 and 30 fps non-drop). The decoder
+  takes edge times from a µs counter that may wrap, learns the bit length
+  from the signal (follows ±3% speed), needs 2 frames in sequence to lock,
+  and drops the lock on a gap. `audio_box/tools/make_ltc_track.py` makes
+  test tracks: LTC on the right at -10 dBFS with ~25 µs edges, a click on
+  the left at each cue. Through an emulated comparator on the generated
+  48 kHz audio, the sync-word end comes out within 0.3 µs (5 µs with -40 dB
+  noise and hysteresis). On the nRF the decoder will run in C next to the
+  capture; `ltc.py` is the reference its tests compare against.
+
+**Step 4 plan.**
+1. *Done:* LTC encoder, decoder and test-track generator, with tests
+   (`scripts/tests/test_ltc.py`).
+2. *Done (not on hardware): ESP32 player firmware*
+   (`audio_box/player/player_main.py`, audio-player 0.1.0, stock
+   MicroPython on an ESP32 DevKit): tracks are `NNN.wav` (16-bit stereo,
+   44.1 or 48 kHz) on an SPI SD card, copied by hand. `machine.I2S` to the
+   PCM5102A in 4 KB writes (~21 ms) with a 16 KB DMA buffer (~85 ms), so a
+   command waits at most one write. UART line protocol to the nRF (115200
+   baud): `PING` → `PONG audio-player 0.1.0`; `LIST` → `TRACKS 7,8`;
+   `LOAD n` → `OK LOAD n length_ms`; `PLAY n from_ms` → `OK PLAY n`
+   (restarting while playing is a jump); `STOP` → `OK STOP`; `STATUS` →
+   `STATUS n pos_ms state length_ms`; failures `ERR LOAD|PLAY n
+   nofile|format|range|busy`, anything else `ERR ?`; `ENDED n` unasked at
+   the end of a track. At the end the buffer is drained with silence so
+   the last samples play; STOP and the end close I2S and mute the DAC
+   (XSMT). The reported position (samples written minus the buffer) is
+   within one write (~21 ms) of the DAC; the nRF only checks it against
+   the LTC. Tests: `scripts/tests/test_audio_player.py` (12, a fake I2S
+   that drains in real time; the LTC decoded from what the player outputs
+   after `PLAY 7 1500` starts at 1500 ms ±1 ms; 10 of 10 mutations caught).
+3. *Done (not on hardware): box player driver* (audio-box 0.2.0,
+   `audio_box/main/player_link.py`, config `PLAYER = "uart"`; the default
+   stays `"fake"`). `UartPlayer` has `FakePlayer`'s interface. LOAD asks
+   the player (track length from its reply, so AUDIO_STATUS_RSP carries
+   the real length); PLAY checks the range, then starts the box's clock
+   when the player confirms (it starts the DAC right after it answers);
+   PLAY of an unloaded track while another plays sends STOP, LOAD, PLAY;
+   STOP stops the box at once whatever the player says. Commands wait up
+   to 80 ms for the answer. Every 500 ms the box sends STATUS without
+   waiting and checks the answer later: the player ending (or `ENDED`)
+   ends the track; the player stopped, another track, more than 150 ms
+   off the box's clock, or 2 polls unanswered stop it (fail-stop: the box
+   sends 4 `stopped` SHOW_TIME and goes quiet). Until the native LTC
+   capture, SHOW_TIME runs on the box's clock from PLAY: 1 ms behind the
+   DAC in the tests (the UART latency). Tests:
+   `scripts/tests/test_player_link.py` (14) runs the driver against the
+   real player code through a fake UART; 11 of 11 mutations caught.
+   UART: nice!nano P0.06 (TX) / P0.08 (RX) to the ESP32's GPIO16 / GPIO17.
+4. *Native LTC capture* in the `nrf_radio` C module (new MicroPython
+   image): comparator (COMP, or an external one into GPIOTE) → PPI →
+   TIMER capture into a ring, and the decoder state machine in C, so
+   Python gets frames, not edges. `nrf_radio.ltc_frame()` returns the
+   latest (position_ms, µs since its sync edge). The box sends SHOW_TIME
+   from that instead of the fake clock, and reports `level` from it.
+5. *Bench test 4:* a generated track on the ESP32; the box decodes it;
+   the left-channel click and a module output on two scope channels.
 
 **Sending SHOW_TIME.** The position must match the moment the frame goes
 out, the same way the bridge stamps the age of timed frames. The box reads
@@ -565,7 +626,10 @@ travels about 0.34 m per ms, so the music reaches someone 100 m away about
    with a fake clock (audio-box 0.1.0), answering AUDIO_LOAD, AUDIO_PLAY,
    AUDIO_STOP and AUDIO_STATUS_REQ; bench test 3a. Still to do: bench
    tests 3b (modules following it) and 5.
-4. Native LTC capture and decoder; AUDIO_LOAD and real tracks; bench test 4.
+4. **Started:** LTC reference encoder, decoder and test-track generator
+   done. Next: the ESP32 + PCM5102A player firmware, the box's player
+   driver, native LTC capture and decoder in `nrf_radio`, bench test 4
+   (see Step 4 plan under Audio box).
 5. App: track picker, box status, audio delay setting, jump and loss
    counts.
 
@@ -577,8 +641,9 @@ Decided in step 1, open to change:
 - A backward jump holds until the music catches up; it doesn't stop the
   show.
 
+Decided 2026-11-24:
+- Player: ESP32 + PCM5102A DAC, WAV files on its SD card.
+
 Still open:
-- Which player board? It needs track select over UART and a clean line
-  output for the LTC channel.
-- How does the box get tracks: SD card loaded by hand, or uploaded over
-  USB from the app?
+- How does the box get tracks: SD card loaded by hand (the plan to start
+  with), or uploaded over USB from the app?

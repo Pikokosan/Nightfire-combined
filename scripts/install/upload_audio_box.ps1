@@ -47,6 +47,7 @@ function Compile-Mpy {
 # Board file name -> source, for every file the box runs.
 $Files = [ordered]@{
     "audio_main" = ".\audio_box\main\audio_main.py"
+    "player_link" = ".\audio_box\main\player_link.py"
     "nfcp" = ".\main\nfcp.py"
     "module_ota" = ".\main\module_ota.py"
     "nrf_module_common" = ".\main\nrf_module_common.py"
