@@ -36,7 +36,6 @@ Android app ──USB── bridge (dongle) ~~radio~~ field modules / dummy modu
 | `scripts/tests/` | Offline tests, no hardware needed |
 | `scripts/bench/` | Tests that drive real boards |
 | `scripts/diagnostics/` | Probes and one-off checks |
-| `scripts/sim/` | Mesh simulator and firmware trace harness |
 | `scripts/android/` | Tablet emulator, USB passthrough, app test fixtures |
 | `scripts/lib/` | Shared helpers the other scripts import (raw REPL upload, bridge requests) |
 | `docs/` | Guides and design notes |
@@ -57,9 +56,6 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install\upload_nrf_dummy.ps1 
 
 # Run every offline test
 Get-ChildItem scripts\tests\test_*.py | ForEach-Object { py -3 $_.FullName }
-
-# Run the mesh simulator
-py -3 scripts/sim/mesh_sim.py --list
 ```
 
 ## Notes

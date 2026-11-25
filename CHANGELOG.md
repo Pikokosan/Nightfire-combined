@@ -28,6 +28,25 @@ run).
 
 ## 2026-11-25
 
+### Tools — remove the simulator and the tests built on it
+- **Removed:** `scripts/sim/` (`mesh_sim.py`, `mesh_scenarios.py`,
+  `firmware_trace_harness.py`, `bridge_trace_harness.py`,
+  `PC_multi_module_emulator.py`), the audio box's simulated node
+  (`audio_box/sim/`), `scripts/tests/test_module_disarm.py` (ran on the
+  trace harness's fakes), `scripts/diagnostics/mesh_cpu_benchmark.py`
+  (calibrated the simulator's CPU model), and the simulator's branding
+  (`design/simulator-branding/`, `scripts/generate_simulator_brand_assets.ps1`).
+  All of it is in git history up to `d6a428e`.
+- **Changed:** README, `project_layout.md`, `scripts/README.md` and
+  `audio_box/README.md` no longer list them; `mesh_radio_design.md` and
+  `audio_box/design.md` keep the simulator results as a record, with a note
+  that it is gone.
+- **Not changed:** `loop_once()` in `field_main.py` and `nrf_dummy_main.py`
+  was only called by the trace harness and is now unused. It is left in, so
+  the firmware on the boards stays as it is.
+- **Tests:** the 23 remaining test files pass. The disarm paths no longer
+  have an offline test.
+
 ### Repo — the app moves to its own repo, nightfire-app — `e57c7b2`
 - **Moved:** `apps/nightfire_controller/` is now the nightfire-app repo
   (`git subtree split`, so its 10 commits come along), checked out next to

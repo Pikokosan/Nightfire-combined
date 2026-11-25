@@ -420,6 +420,9 @@ results" below.
 
 ### The simulator
 
+The simulator, the trace harnesses and the tests built on them were
+removed on 2026-11-25; they are in git history up to `d6a428e`. The results below came from it and are kept as a record.
+
 `scripts/sim/mesh_sim.py` runs the real, unmodified firmware on several
 simulated nodes:
 - a bridge running `nrf_bridge_main.py`;

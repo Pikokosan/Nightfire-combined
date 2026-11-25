@@ -86,7 +86,6 @@ list.
 | `tests/` | Offline unit tests (`test_*.py`), no hardware |
 | `bench/` | Tests that drive real boards |
 | `diagnostics/` | Probes and one-off checks |
-| `sim/` | Mesh simulator, firmware trace harnesses, PC module emulator |
 | `android/` | Tablet emulator, USB passthrough, app test fixtures |
 | `lib/` | Helpers the other scripts import |
 

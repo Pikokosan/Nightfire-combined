@@ -2,7 +2,7 @@
 
 Status: draft, 2026-11-24. Steps 1 (module side), 2 (bridge and app) and
 the firmware half of step 3 (audio box on a fake clock) are implemented and
-tested in unit tests and the simulator. On hardware so far: the box with
+tested in unit tests and the simulator (since removed; see Testing). On hardware so far: the box with
 the bridge (bench test 3a) and one field module following it (3b, two
 runs). See Build order.
 
@@ -448,6 +448,9 @@ travels about 0.34 m per ms, so the music reaches someone 100 m away about
 300 ms late.
 
 ## Testing
+
+The simulator, the trace harnesses and the tests built on them were
+removed on 2026-11-25; they are in git history up to `d6a428e`. Their results below are kept as a record.
 
 1. **Simulator (done).** `audio_box/sim/sim_audio_node.py` is a simulated
    box (node kind `audio`) that plays a track on its own drifting clock

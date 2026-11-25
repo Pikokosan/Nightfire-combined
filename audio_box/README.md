@@ -37,12 +37,10 @@ Where the work stands, the bench, and the parts to order before going on:
 | `player/player_main.py` | ESP32 player firmware: WAV from SD card to the PCM5102A, UART commands |
 | `player/player_config.py` | Player pins, installed as `player_config.py` |
 | `player/player_boot.py` | Installed on the ESP32 as `main.py` |
-| `sim/sim_audio_node.py` | Scripted stand-in box for the simulator (node kind `audio`) |
 
 Code the box shares with the other devices (`nfcp.py`, `mesh.py`,
 `module_link.py`, `module_ota.py`, `nrf_module_common.py`) stays in
-`../main/`. The tests are `../scripts/tests/test_audio_box.py`; the
-simulator runs the real firmware as node kind `audiobox`.
+`../main/`. The tests are `../scripts/tests/test_audio_box.py`.
 
 ## Installing
 
@@ -91,5 +89,3 @@ From the repository root:
     py -3 scripts/tests/test_ltc.py
     py -3 scripts/tests/test_audio_player.py
     py -3 scripts/tests/test_player_link.py
-    py -3 scripts/sim/mesh_sim.py --scenario audio_box
-    py -3 scripts/sim/mesh_sim.py --scenario audio_chase

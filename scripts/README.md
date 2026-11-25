@@ -61,17 +61,6 @@ trips of reliable pings to one module.
 `micropython_*.py`, `probe_radio_io_api.py` and `read_field_resistance_points.py`
 run on a board, not on the PC.
 
-## `sim/`
-
-- `mesh_sim.py` (+ `mesh_scenarios.py`): multi-node radio simulator running
-  the real firmware (node kind `audiobox` is the audio box's). `--list`
-  shows the scenarios.
-- `firmware_trace_harness.py`: run the field or dummy firmware on the PC and
-  write a trace to compare before and after a change.
-- `bridge_trace_harness.py`: the same for the USB bridge (`--mode master` or
-  `monitor`): every USB command, sessions, arming, pairing and maintenance.
-- `PC_multi_module_emulator.py`: fake modules on a serial port.
-
 ## `android/`
 
 Tablet emulator and USB passthrough, the emulator serial relay, and
