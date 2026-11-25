@@ -28,7 +28,7 @@ run).
 
 ## 2026-11-25
 
-### Repo — the app moves to its own repo, nightfire-app
+### Repo — the app moves to its own repo, nightfire-app — `e57c7b2`
 - **Moved:** `apps/nightfire_controller/` is now the nightfire-app repo
   (`git subtree split`, so its 10 commits come along), checked out next to
   this one at `../../nightfire-app`. With it went the app build and icon
