@@ -28,7 +28,7 @@ run).
 
 ## 2026-11-25
 
-### Tools — remove the simulator and the tests built on it
+### Tools — remove the simulator and the tests built on it — `627ca0c`
 - **Removed:** `scripts/sim/` (`mesh_sim.py`, `mesh_scenarios.py`,
   `firmware_trace_harness.py`, `bridge_trace_harness.py`,
   `PC_multi_module_emulator.py`), the audio box's simulated node
