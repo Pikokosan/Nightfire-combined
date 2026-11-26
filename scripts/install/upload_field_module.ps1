@@ -75,21 +75,55 @@ function Compile-Mpy {
 }
 
 function Wait-SerialPort {
+    # The cleanup ends with machine.reset(). For a moment after that the port
+    # is still listed but can't be opened, then it drops off USB and comes back
+    # about a second later. So wait for it to go, then until it really opens:
+    # checking that it is listed returned at once and the upload then failed.
     param(
         [string]$PortName,
         [int]$TimeoutSeconds = 15
     )
 
+    $GoneBy = [DateTime]::UtcNow.AddSeconds(3)
+    while ([DateTime]::UtcNow -lt $GoneBy -and ([IO.Ports.SerialPort]::GetPortNames() -contains $PortName)) {
+        Start-Sleep -Milliseconds 50
+    }
+
     $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
-        if ([IO.Ports.SerialPort]::GetPortNames() -contains $PortName) {
+        $Probe = New-Object IO.Ports.SerialPort $PortName
+        try {
+            $Probe.Open()
+            $Probe.Close()
             Start-Sleep -Milliseconds 500
             return
         }
-        Start-Sleep -Milliseconds 250
+        catch {
+            Start-Sleep -Milliseconds 250
+        }
+        finally {
+            $Probe.Dispose()
+        }
     } while ([DateTime]::UtcNow -lt $Deadline)
 
-    throw "$PortName did not return after the cleanup reset."
+    throw "$PortName did not come back after the cleanup reset."
+}
+
+function Invoke-Uploader {
+    # With $ErrorActionPreference = "Stop", Windows PowerShell stops on the
+    # first line a native command writes to stderr, so a Python traceback was
+    # cut to its first line. Run it with Continue and print every line.
+    param([string[]]$Arguments)
+
+    $Previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Python @Arguments 2>&1 | ForEach-Object { Write-Host "$_" }
+        return $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $Previous
+    }
 }
 
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
@@ -166,16 +200,15 @@ if ($ConfigPath) {
 Push-Location $Root
 try {
     Write-Host "Removing the previous field image and reclaiming flash..."
-    & $Python @CleanupArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "nRF52840 field module cleanup failed with exit code $LASTEXITCODE."
+    $Code = Invoke-Uploader $CleanupArgs
+    if ($Code -ne 0) {
+        throw "nRF52840 field module cleanup failed with exit code $Code."
     }
 
     Wait-SerialPort $Port
-    & $Python @UploadArgs
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "nRF52840 field module upload failed with exit code $LASTEXITCODE."
+    $Code = Invoke-Uploader $UploadArgs
+    if ($Code -ne 0) {
+        throw "nRF52840 field module upload failed with exit code $Code."
     }
 
     Write-Host "Done. compact field firmware is installed on $Port (pinout: $Pinout)."

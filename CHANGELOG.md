@@ -28,6 +28,20 @@ run).
 
 ## 2026-11-25
 
+### Tools — `upload_field_module.ps1` waits for the port properly
+- **Fixed:** the upload after the cleanup step failed, and left the board
+  without `field_main.mpy` until it was run again. After the cleanup's
+  `machine.reset()` the port is still listed but can't be opened, then
+  drops off USB and is back after about 0.97 s (COM16). The script only
+  checked that the port was listed, so it started the upload while the
+  port was gone. It now waits for the port to go, then until it opens.
+- **Fixed:** the uploader's errors are printed in full. With
+  `$ErrorActionPreference = "Stop"`, Windows PowerShell stopped on the
+  first stderr line, so a traceback showed only its first line.
+- **Tested:** three uploads in a row on COM16 all worked (before, two of
+  two failed), then `mesh_hw_smoke.py` passed 11 of 11. The other install
+  scripts call the uploader once, so they don't have this race.
+
 ### Field 0.3.6, Dummy 0.2.6 — remove the dead `loop_once()` — `e8129ce`
 - **Removed:** `loop_once()` from `field_main.py` and `nrf_dummy_main.py`.
   Only the trace harness called it, and that went with the simulator
