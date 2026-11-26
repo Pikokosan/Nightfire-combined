@@ -28,7 +28,7 @@ run).
 
 ## 2026-11-25
 
-### nRF image 2026-11-25 — three named images: Nightfire Radio, Field and Audio
+### nRF image 2026-11-25 — three named images: Nightfire Radio, Field and Audio — `e9434e1`
 - **Changed:** boards no longer call themselves nice!nano or MicroPython.
   The image is built three times, differing only in the name: **Nightfire
   Radio** (USB bridge), **Nightfire Field** (field modules and dummies) and
