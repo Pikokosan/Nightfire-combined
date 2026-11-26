@@ -28,7 +28,7 @@ run).
 
 ## 2026-11-25
 
-### Tools — `upload_field_module.ps1` waits for the port properly
+### Tools — `upload_field_module.ps1` waits for the port properly — `b4c20be`
 - **Fixed:** the upload after the cleanup step failed, and left the board
   without `field_main.mpy` until it was run again. After the cleanup's
   `machine.reset()` the port is still listed but can't be opened, then
