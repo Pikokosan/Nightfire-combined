@@ -118,7 +118,7 @@ def save_resistance_calibration_banks(banks):
 
 
 APP_FIRMWARE_NAME = "field-module"
-APP_FIRMWARE_VERSION = "0.3.5"
+APP_FIRMWARE_VERSION = "0.3.6"
 
 DEFAULT_NETWORK_ID = 0x04D2
 DEFAULT_GROUP_ID = 0x0001
@@ -1338,16 +1338,6 @@ def setup():
         (UNIQUE_ID, GROUP_ID, NETWORK_ID)
     )
     return radio_ready
-
-
-def loop_once():
-    """One main-loop pass without radio receive (used by the PC trace harness)."""
-    module_ota.poll_timeout()
-    poll_fire_outputs()
-    script.run()
-    check_master_link_failsafe()
-    link.service()
-    lcd.service()
 
 
 def main():

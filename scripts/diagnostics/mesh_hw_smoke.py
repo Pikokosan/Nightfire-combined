@@ -8,7 +8,7 @@ No ARM and no FIRE are sent. It runs:
 The module's console (optional --module-port) is captured, so the trace
 shows each command was handled once even though the bridge sends 3 copies.
 
-    py -3 scripts/diagnostics/mesh_hw_smoke.py --bridge COM12 --module-port COM16
+    py -3 scripts/diagnostics/mesh_hw_smoke.py --bridge COM12 --module-port COM16 --uid D96E30DD
 """
 
 from __future__ import print_function
@@ -160,6 +160,8 @@ def main():
     ap.add_argument("--bridge", default="COM12")
     ap.add_argument("--module-port", help="field module console port (optional)")
     ap.add_argument("--repeat", type=int, default=20)
+    ap.add_argument("--uid", type=lambda s: int(s, 16),
+                    help="module to test, hex (default: the lowest uid that answers discover)")
     args = ap.parse_args()
 
     console = Console(args.module_port) if args.module_port else None
@@ -198,7 +200,10 @@ def main():
         check("discover", bool(found), " ".join("%08X rssi=%d %.0fms" % (u, r, d * 1000) for u, (r, d) in found.items()))
         if not found:
             return 1
-        uid = sorted(found)[0]
+        uid = args.uid if args.uid is not None else sorted(found)[0]
+        if uid not in found:
+            check("module %08X found" % uid, False, "did not answer discover")
+            return 1
         copies = bridge.count_rx(lambda p: p.get("cmd") == nfcp.CMD_DISCOVER_RSP and p.get("src") == uid, since)
         check("discover reply deduplicated", copies == 1, "%d copies forwarded to USB" % copies)
 

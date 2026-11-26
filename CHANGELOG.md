@@ -17,8 +17,8 @@ run).
 | Part | Version | Note |
 |---|---|---|
 | Bridge | usb-master-0.4.7 | Chase START and audio box commands (audio box sync). On the COM12 bridge since 2026-11-24 (installed over USB, permanent; backup in `dist/bridge_backup_20261124_131832`). |
-| Field | field-module 0.3.5 | Chase mode, SHOW_TIME log, RC calibration. On COM16 since 2026-11-24 (backup of 0.3.2 in `dist/field_backup_COM16_20261124`). COM16 has no working 32 kHz crystal; calibrated it runs +389 ppm. |
-| Dummy | nrf-dummy 0.2.5 | Chase mode, SHOW_TIME log, RC calibration. Not on hardware (the only dummy, COM18, is now the audio box). |
+| Field | field-module 0.3.6 | Dead `loop_once()` removed. On COM16 since 2026-11-25 (backup of 0.3.5 in `dist/field_backup_COM16_20261125`). Chase mode, SHOW_TIME log, RC calibration since 0.3.5, on COM16 since 2026-11-24 (backup of 0.3.2 in `dist/field_backup_COM16_20261124`). COM16 has no working 32 kHz crystal; calibrated it runs +389 ppm. |
+| Dummy | nrf-dummy 0.2.6 | Dead `loop_once()` removed (0.2.6). Chase mode, SHOW_TIME log, RC calibration. Not on hardware (the only dummy, COM18, is now the audio box). |
 | Audio box | audio-box 0.2.0 | Fake clock or the ESP32 player (`PLAYER = "uart"`, not on hardware). COM18 runs 0.1.1 (fake clock). On the old LCD dummy (COM18), which no longer runs nrf-dummy; restore with `upload_nrf_dummy.ps1 -Port COM18 -ConfigPath main/configs/dummy_lcd.py`. |
 | Audio player | audio-player 0.1.0 | ESP32 + PCM5102A. Not on hardware yet. |
 | App | 0.4.0 (build 4) | In its own repo, [nightfire-app](https://github.com/Pikokosan/nightfire-app), since 2026-11-25. App changes before then are below. |
@@ -27,6 +27,23 @@ run).
 ## Unreleased
 
 ## 2026-11-25
+
+### Field 0.3.6, Dummy 0.2.6 — remove the dead `loop_once()`
+- **Removed:** `loop_once()` from `field_main.py` and `nrf_dummy_main.py`.
+  Only the trace harness called it, and that went with the simulator
+  (`627ca0c`). The main loops are unchanged. The bridge's
+  `loop_once()` in `nrf_usb_monitor_main.py` is still used and stays.
+- **On hardware:** field 0.3.6 is on COM16 (backup of 0.3.5 in
+  `dist/field_backup_COM16_20261125`). `mesh_hw_smoke.py --uid D96E30DD`
+  through the COM12 bridge: 11 of 11 checks pass (info, output status,
+  resistance scan, script clear + load, disarm, 20 pings, 50 reliable pings
+  with none failed). No ARM or FIRE was sent. Dummy 0.2.6 is not on
+  hardware (there is no dummy board now).
+
+### Tools — `mesh_hw_smoke.py --uid`
+- **Added:** `--uid` picks the module to test. Without it the test takes
+  the lowest uid that answers discover, which is now the audio box
+  (`62A75130`), not the field module.
 
 ### Tools — remove the simulator and the tests built on it — `627ca0c`
 - **Removed:** `scripts/sim/` (`mesh_sim.py`, `mesh_scenarios.py`,

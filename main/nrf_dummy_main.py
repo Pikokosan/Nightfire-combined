@@ -18,7 +18,7 @@ except Exception:
 
 
 APP_FIRMWARE_NAME = "nrf-dummy"
-APP_FIRMWARE_VERSION = "0.2.5"
+APP_FIRMWARE_VERSION = "0.2.6"
 
 DEFAULT_NETWORK_ID = 0x04D2
 DEFAULT_GROUP_ID = 0x0001
@@ -460,14 +460,6 @@ def setup():
         (UNIQUE_ID, GROUP_ID, NETWORK_ID)
     )
     return radio_ready
-
-
-def loop_once():
-    module_ota.poll_timeout()
-    script.run()
-    check_master_link_failsafe()
-    link.service()
-    lcd.service()
 
 
 def main():
