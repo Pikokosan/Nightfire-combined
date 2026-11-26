@@ -53,7 +53,7 @@ now, and what has to be bought before the work can go on.
 |---|---|---|
 | COM12 | USB bridge | usb-master-0.4.7 (backup of 0.4.6 in `dist/bridge_backup_20261124_131832`) |
 | COM16 | Field module, Pro Micro nRF52840 clone, uid 0xD96E30DD | field-module 0.3.6; no working 32 kHz crystal; all 24 cues open (no igniters) |
-| COM18 | Old LCD dummy, nice!nano, uid 0x62A75130 | audio-box 0.1.1 (fake clock). To make it a dummy again: `upload_nrf_dummy.ps1 -Port COM18 -ConfigPath main/configs/dummy_lcd.py` |
+| COM18 | Old LCD dummy, nice!nano, uid 0x62A75130 | audio-box 0.1.1 (fake clock) on the Nightfire Audio image. To make it a dummy again: `upload_nrf_dummy.ps1 -Port COM18 -ConfigPath main/configs/dummy_lcd.py`, and flash the field image (`flash_nrf52840_uf2.ps1 -Device field`) so it is named Nightfire Field |
 
 ## Parts to order
 

@@ -22,11 +22,51 @@ run).
 | Audio box | audio-box 0.2.0 | Fake clock or the ESP32 player (`PLAYER = "uart"`, not on hardware). COM18 runs 0.1.1 (fake clock). On the old LCD dummy (COM18), which no longer runs nrf-dummy; restore with `upload_nrf_dummy.ps1 -Port COM18 -ConfigPath main/configs/dummy_lcd.py`. |
 | Audio player | audio-player 0.1.0 | ESP32 + PCM5102A. Not on hardware yet. |
 | App | 0.4.0 (build 4) | In its own repo, [nightfire-app](https://github.com/Pikokosan/nightfire-app), since 2026-11-25. App changes before then are below. |
-| nRF image | 2026-11-06 build | On the field modules and dummies. The COM12 bridge runs the 2026-11-23 background-receive build: A/B retries 0.11% against 0.44%. |
+| nRF image | 2026-11-25 build | Background receive, three named images: Nightfire Radio (bridge), Nightfire Field (field modules, dummies), Nightfire Audio (audio box). On COM12 (radio), COM16 (field) and COM18 (audio) since 2026-11-25. The 2026-11-06 build is kept as a baseline. |
 
 ## Unreleased
 
 ## 2026-11-25
+
+### nRF image 2026-11-25 — three named images: Nightfire Radio, Field and Audio
+- **Changed:** boards no longer call themselves nice!nano or MicroPython.
+  The image is built three times, differing only in the name: **Nightfire
+  Radio** (USB bridge), **Nightfire Field** (field modules and dummies) and
+  **Nightfire Audio** (audio box). The name is the REPL banner and
+  `os.uname().machine` ("Nightfire Field with NRF52840"), and the USB device
+  and serial port names Windows and Android show (were "Board in FS mode"
+  and "Board CDC"); the USB maker is "Nightfire" (was "MicroPython"). USB
+  VID/PID stay 239A:00B3, which is how the app finds the bridge. No code
+  reads the name.
+- **Renamed:** board folder `boards/NICENANO` to `boards/NIGHTFIRE`,
+  `nicenano_1M_256k.ld` to `nightfire_1M_256k.ld`, the images to
+  `nightfire_radio|field|audio_micropython.uf2/.hex`, and the 2026-11-06
+  baseline to `nightfire_micropython_2026-11-06_baseline.uf2` (that image
+  still calls itself nice!nano). The UF2 bootloader is unchanged and still
+  says nice!nano.
+- **Changed:** `build_nrf52840_micropython.ps1 -Device RADIO|FIELD|AUDIO`
+  (default all three, each in its own build folder);
+  `flash_nrf52840_uf2.ps1 -Device radio|field|audio`. The flash script waits
+  for the bootloader drive to settle and copies again if the board stays in
+  the bootloader: the first copy to COM16 failed that way.
+- **Changed:** the field module and audio box move to the background-receive
+  driver (`8ab3ba6`), which until now was only on the bridge.
+- **On hardware:** COM16 is Nightfire Field (2026-11-25 build, all five
+  files kept); `mesh_hw_smoke.py --uid D96E30DD` passes 11 of 11. COM12 is
+  Nightfire Radio (files unchanged, usb-master-0.4.7 bundle 28,827 bytes);
+  the smoke test through it passes 11 of 11. COM18 is Nightfire Audio (all
+  eight files kept). Its USB serial link hung on the first try and needed a
+  replug.
+- **Bench:** `test_audio_box_bench.py --port COM12 --box-port COM18`, 17 of
+  19. "box INFO" fails because the test expects audio-box 0.2.0 and COM18
+  runs 0.1.1, as before this change. "SHOW_TIME on air while playing" fails:
+  the bridge hears 19.7 frames a second over idle, against 9-15 expected
+  and 11.4 on 2026-11-24. That fits the field module now relaying each
+  SHOW_TIME (2 copies on top of the box's 3, so about 20 a second): on the
+  background-receive driver it hears every copy, where before it missed
+  most while busy. Flooded broadcasts are meant to be relayed once by each
+  module; the test's range assumes no relays. Everything else passes (LOAD,
+  PLAY, status within 125 ms of the PC clock, track end, STOP, quiet after).
 
 ### Tools — `upload_field_module.ps1` waits for the port properly — `b4c20be`
 - **Fixed:** the upload after the cleanup step failed, and left the board

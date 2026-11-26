@@ -1,5 +1,5 @@
 /*
-    nice!nano (nRF52840) layout for Nightfire.
+    Nightfire nRF52840 (nice!nano) layout.
 
     Same as the port's nrf52840_1M_256k.ld, but without its 256 KiB ROMFS
     partition (unused here; the flash driver accepts size 0). That space goes

@@ -1,6 +1,13 @@
+# Builds the Nightfire MicroPython image. The three images differ only in the
+# name the board shows (REPL banner, USB device and serial port names):
+#   RADIO "Nightfire Radio" (USB bridge), FIELD "Nightfire Field" (field
+#   modules and dummies), AUDIO "Nightfire Audio" (audio box).
+# Each lands in firmware/nrf52840/nightfire_<device>_micropython.uf2 and .hex.
 param(
+    [ValidateSet("all", "RADIO", "FIELD", "AUDIO")]
+    [string]$Device = "all",
     [string]$MicroPythonRoot = "",
-    [string]$Board = "NICENANO",
+    [string]$Board = "NIGHTFIRE",
     [string]$BoardDir = "",
     [string]$Bootloader = "open_bootloader",
     [int]$BootloaderVersionMajor = 1,
@@ -78,32 +85,32 @@ if ($Bootloader) {
     $BuildArgs = "$BuildArgs BOOTLOADER=$Bootloader BOOTLOADER_VERSION_MAJOR=$BootloaderVersionMajor BOOTLOADER_VERSION_MINOR=$BootloaderVersionMinor"
 }
 
-$WslBuildDir = "$WslNrfPort/build-$Board"
-$WslUf2 = "$WslBuildDir/firmware.uf2"
-$WslHex = "$WslBuildDir/firmware.hex"
-
-wsl bash -lc "export PATH=${WslToolchain}:/usr/bin:/bin; cd $WslNrfPort && make clean $BuildArgs && make $BuildArgs -j2 && python3 $WslMicroPythonRoot/tools/uf2conv.py -c -f 0xADA52840 -o $WslUf2 $WslHex"
-if ($LASTEXITCODE -ne 0) {
-    throw "nRF52840 MicroPython build failed with exit code $LASTEXITCODE"
-}
-
-$Uf2 = Join-Path $NrfPort "build-$Board\firmware.uf2"
-$Hex = Join-Path $NrfPort "build-$Board\firmware.hex"
-$ArtifactDir = Join-Path $RepoRoot "firmware\nrf52840"
-$ArtifactUf2 = Join-Path $ArtifactDir "nightfire_nicenano_micropython.uf2"
-$ArtifactHex = Join-Path $ArtifactDir "nightfire_nicenano_micropython.hex"
-
+$ArtifactDir = Join-Path $RepoRoot "firmware/nrf52840"
 if (-not (Test-Path -LiteralPath $ArtifactDir)) {
     New-Item -ItemType Directory -Path $ArtifactDir | Out-Null
 }
 
-if ((Test-Path -LiteralPath $Uf2) -and (Test-Path -LiteralPath $Hex)) {
-    Copy-Item -LiteralPath $Uf2 -Destination $ArtifactUf2 -Force
-    Copy-Item -LiteralPath $Hex -Destination $ArtifactHex -Force
-    Write-Host "Built $Uf2"
-    Write-Host "Copied $ArtifactUf2"
-    Write-Host "Copied $ArtifactHex"
-}
-else {
-    Write-Host "Built firmware. UF2 was not generated automatically; check build-$Board for output files."
+$Devices = if ($Device -eq "all") { @("RADIO", "FIELD", "AUDIO") } else { @($Device) }
+foreach ($Dev in $Devices) {
+    $BuildName = "build-$Board-$Dev"
+    $WslBuildDir = "$WslNrfPort/$BuildName"
+    $WslUf2 = "$WslBuildDir/firmware.uf2"
+    $WslHex = "$WslBuildDir/firmware.hex"
+    $DevArgs = "$BuildArgs NIGHTFIRE_DEVICE=$Dev BUILD=$BuildName"
+
+    Write-Host "=== Building the $Dev image"
+    wsl bash -lc "export PATH=${WslToolchain}:/usr/bin:/bin; cd $WslNrfPort && make clean $DevArgs && make $DevArgs -j2 && python3 $WslMicroPythonRoot/tools/uf2conv.py -c -f 0xADA52840 -o $WslUf2 $WslHex"
+    if ($LASTEXITCODE -ne 0) {
+        throw "nRF52840 MicroPython build ($Dev) failed with exit code $LASTEXITCODE"
+    }
+
+    $Uf2 = Join-Path $NrfPort "$BuildName/firmware.uf2"
+    $Hex = Join-Path $NrfPort "$BuildName/firmware.hex"
+    if (-not ((Test-Path -LiteralPath $Uf2) -and (Test-Path -LiteralPath $Hex))) {
+        throw "Built $Dev, but $Uf2 or $Hex is missing."
+    }
+    $Name = "nightfire_$($Dev.ToLower())_micropython"
+    Copy-Item -LiteralPath $Uf2 -Destination (Join-Path $ArtifactDir "$Name.uf2") -Force
+    Copy-Item -LiteralPath $Hex -Destination (Join-Path $ArtifactDir "$Name.hex") -Force
+    Write-Host "Copied $Name.uf2 and $Name.hex to $ArtifactDir"
 }

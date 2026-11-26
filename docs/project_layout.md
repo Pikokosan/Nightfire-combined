@@ -68,9 +68,11 @@ Installed on a board as `nrf_node_config.py` (modules) or `nrf_bridge_config.py`
 
 ## `firmware/`
 
-- `nrf52840/`: the Nightfire MicroPython image (`.uf2` and `.hex`) for every
-  board, and `bootloader/` for the nice!nano UF2 bootloader.
-- `micropython/`: source for rebuilding the image: the `NICENANO` board
+- `nrf52840/`: the Nightfire MicroPython images (`.uf2` and `.hex`):
+  `nightfire_radio_*` (bridge), `nightfire_field_*` (field modules and
+  dummies) and `nightfire_audio_*` (audio box), which differ only in the
+  name the board shows, and `bootloader/` for the nice!nano UF2 bootloader.
+- `micropython/`: source for rebuilding the image: the `NIGHTFIRE` board
   definition and the `nrf_radio` C module (radio, RSSI, LED driver). Built by
   `scripts/build/build_nrf52840_micropython.ps1`.
 

@@ -43,8 +43,15 @@ Thonny, the emulator relay, and so on before running these scripts.
 
 ## 2. Put Nightfire MicroPython on each board (once per board)
 
-Every nRF52840 board needs this before anything else. The image is
-`firmware/nrf52840/nightfire_nicenano_micropython.uf2`.
+Every nRF52840 board needs this before anything else. There are three images, the same except for the name the board shows
+(REPL banner, `os.uname()`, and the USB device and serial port names in
+Windows or Android):
+
+| Image (`firmware/nrf52840/`) | Name | For |
+|---|---|---|
+| `nightfire_radio_micropython.uf2` | Nightfire Radio | USB bridge |
+| `nightfire_field_micropython.uf2` | Nightfire Field | Field modules and dummies |
+| `nightfire_audio_micropython.uf2` | Nightfire Audio | Audio box |
 
 1. **Enter the bootloader.** Double-tap the board's reset button (on a
    nice!nano without a button, briefly short RST to GND twice). A USB drive
@@ -58,8 +65,10 @@ Every nRF52840 board needs this before anything else. The image is
 2. **Copy the image** onto that drive:
 
    ```powershell
-   powershell -ExecutionPolicy Bypass -File .\scripts\install\flash_nrf52840_uf2.ps1
+   powershell -ExecutionPolicy Bypass -File .\scripts\install\flash_nrf52840_uf2.ps1 -Device field
    ```
+
+   `-Device` is `radio`, `field` or `audio` (the table above).
 
    The script finds the bootloader drive by itself (pass
    `-BootloaderDrive E:` if more than one is plugged in). Dragging the `.uf2`

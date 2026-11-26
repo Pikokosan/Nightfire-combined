@@ -6,8 +6,9 @@ script takes `-Port` (PowerShell) or `--port` (Python).
 
 ## `install/`: put firmware on boards
 
-- `flash_nrf52840_uf2.ps1`: copy the Nightfire MicroPython image to a board in
-  UF2 bootloader mode (finds the drive by itself).
+- `flash_nrf52840_uf2.ps1`: copy a Nightfire MicroPython image to a board in
+  UF2 bootloader mode (`-Device radio|field|audio`; finds the drive by
+  itself, and copies again if the board stays in the bootloader).
 - `enter_nrf_bootloader.py`: switch a running board into the UF2 bootloader.
 - `install_usb_bridge.py`: install the USB bridge (`--master --compiled` for
   the app's bridge).

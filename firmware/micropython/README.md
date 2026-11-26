@@ -138,8 +138,13 @@ identity.
 
 ## Building and flashing (current setup)
 
-`scripts/build/build_nrf52840_micropython.ps1` builds the NICENANO board with this
-module and copies the result to `firmware/nrf52840/`. It uses the
+`scripts/build/build_nrf52840_micropython.ps1` builds the `NIGHTFIRE` board with this
+module, once per name (`-Device RADIO|FIELD|AUDIO`, default all three),
+and copies each to `firmware/nrf52840/nightfire_<device>_micropython.uf2`
+and `.hex`. The board header picks the name from `NIGHTFIRE_DEVICE`:
+Nightfire Radio (bridge), Nightfire Field (field modules and dummies),
+Nightfire Audio (audio box). The USB VID/PID stay 239A:00B3; the app finds
+the bridge by those, not by name. It uses the
 MicroPython checkout and ARM toolchain in `NightfirePY/nrf-micropython` or
 `NightfirePY/e77-micropython` (commit `be9a819`). Don't pipe its output
 through `*>&1` in Windows PowerShell 5.1: the linker's warnings go to
@@ -147,14 +152,16 @@ stderr and abort the script, even though the build is fine.
 
 To flash a board:
 1. Put it in UF2 mode: `py -3 scripts\install\enter_nrf_bootloader.py --port COMx`.
-2. Copy `firmware/nrf52840/nightfire_nicenano_micropython.uf2` to the drive
-   that appears (`INFO_UF2.TXT` names the board).
+2. `powershell -ExecutionPolicy Bypass -File scripts\install\flash_nrf52840_uf2.ps1 -Device radio|field|audio`
+   copies that image to the drive that appears (`INFO_UF2.TXT` names the
+   bootloader, which still says nice!nano).
 
 ### Flashing the COM12 bench bridge (nice!nano, UF2 bootloader)
 
 The bridge's files (its app, `nrf_node_config.py`, LED settings) stay on
 the board: the 2026-11-23 build has the same filesystem layout
-(`FS_SIZE = 0x80000`, `nicenano_1M_256k.ld`) as the 2026-11-05/06 builds.
+(`FS_SIZE = 0x80000`, `nightfire_1M_256k.ld`, called `nicenano_1M_256k.ld` before 2026-11-25)
+as the 2026-11-05/06 builds.
 
 1. Close anything that holds COM12 (the Android app, a serial monitor).
 2. Put the bridge in UF2 mode, either way:
@@ -165,17 +172,17 @@ the board: the 2026-11-23 build has the same filesystem layout
    A drive appears whose `INFO_UF2.TXT` names the nice!nano bootloader,
    and COM12 goes away.
 3. Copy the image:
-   `powershell -ExecutionPolicy Bypass -File scripts\install\flash_nrf52840_uf2.ps1`
-   (copies `firmware\nrf52840\nightfire_nicenano_micropython.uf2`; pass
+   `powershell -ExecutionPolicy Bypass -File scripts\install\flash_nrf52840_uf2.ps1 -Device radio`
+   (copies `firmware\nrf52840\nightfire_radio_micropython.uf2`; pass
    `-Uf2 <file>` for another image). The drive disappears and the board
    restarts on its own, back on COM12, running the bridge app.
 4. Check it is the image you meant: in a REPL, `import os; os.uname()`
    shows the build date, and on the background-receive build
    `nrf_radio.stats()` has an `rx_dropped` key.
 
-To go back, flash `firmware\nrf52840\nightfire_nicenano_micropython_2026-11-06_baseline.uf2`
+To go back, flash `firmware\nrf52840\nightfire_micropython_2026-11-06_baseline.uf2`
 the same way (`-Uf2` with that path). That is the image built 2026-11-06,
-before background receive.
+before background receive. It still calls itself nice!nano.
 
 ### Bench plan: background receive A/B (bridge only)
 
