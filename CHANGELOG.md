@@ -28,7 +28,7 @@ run).
 
 ## 2026-11-25
 
-### Field 0.3.6, Dummy 0.2.6 — remove the dead `loop_once()`
+### Field 0.3.6, Dummy 0.2.6 — remove the dead `loop_once()` — `e8129ce`
 - **Removed:** `loop_once()` from `field_main.py` and `nrf_dummy_main.py`.
   Only the trace harness called it, and that went with the simulator
   (`627ca0c`). The main loops are unchanged. The bridge's
@@ -40,7 +40,7 @@ run).
   with none failed). No ARM or FIRE was sent. Dummy 0.2.6 is not on
   hardware (there is no dummy board now).
 
-### Tools — `mesh_hw_smoke.py --uid`
+### Tools — `mesh_hw_smoke.py --uid` — `e8129ce`
 - **Added:** `--uid` picks the module to test. Without it the test takes
   the lowest uid that answers discover, which is now the audio box
   (`62A75130`), not the field module.
